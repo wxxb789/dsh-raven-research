@@ -51,6 +51,8 @@ interface WebFetchResultLike {
     readonly kind: 'html' | 'text'
     readonly content: string
   }
+  /** The Harness fetch contract caps body size; a cut-off tail is a retrieval limit, not missing evidence. */
+  readonly truncated?: boolean
 }
 
 interface WebLike {
@@ -280,9 +282,13 @@ function sourceVerifier(ctx: ContextLike, now: () => string): SourceVerifier {
             : ''
           const excerpt = normalizedEvidence(source.excerpt)
           const excerptMatched = body.length > 0 && body.includes(excerpt)
+          // A cut-off body cannot disprove an excerpt from the tail. Report it as
+          // unverifiable rather than as an evidence defect: both block publication,
+          // but only one of them accuses the agent of fabricating a quotation.
+          const truncatedMiss = !excerptMatched && httpReachable && identityMatched && fetched.truncated === true
           results.push({
             sourceId: source.sourceId,
-            status: excerptMatched ? 'reachable' : 'failed',
+            status: excerptMatched ? 'reachable' : truncatedMiss ? 'unavailable' : 'failed',
             checkedAt,
             statusCode: fetched.statusCode,
             resolvedUrl: fetched.url,
@@ -293,7 +299,11 @@ function sourceVerifier(ctx: ContextLike, now: () => string): SourceVerifier {
                     ? `HTTP ${fetched.statusCode}`
                     : !identityMatched
                       ? `source resolved to a different host: ${resolvedUrl.hostname}`
-                      : excerptMismatchDetail(body, excerpt, source.locator),
+                      : truncatedMiss
+                        ? `the retrieved body was truncated before the excerpt at ${source.locator} could be confirmed;`
+                          + ' narrow the retrieval or cite a passage inside the retrieved range,'
+                          + ' and do not weaken the excerpt to fit the visible prefix'
+                        : excerptMismatchDetail(body, excerpt, source.locator),
                 }),
           })
         } catch (error) {

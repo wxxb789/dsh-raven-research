@@ -20,6 +20,75 @@ afterEach(async () => {
 })
 
 describe('Source provenance integration', () => {
+  it('treats a truncated retrieval as unverifiable rather than as a fabricated quotation', async () => {
+    let tool: TestTool | undefined
+    apply({
+      tools: {
+        register(definition: TestTool) {
+          tool = definition
+          return () => undefined
+        },
+      },
+      systemPrompt: { section() { return () => undefined } },
+      get(name: string) {
+        if (name !== 'web') return undefined
+        return {
+          // The Harness contract exposes `truncated`; the tail of the document never arrived.
+          async fetch(request: { url: string }) {
+            return {
+              url: request.url,
+              statusCode: 200,
+              body: { kind: 'text' as const, content: 'The opening section only.' },
+              truncated: true,
+            }
+          },
+        }
+      },
+      on() { return () => undefined },
+    } as never)
+    if (tool === undefined) throw new Error('Raven tool did not register')
+    const registeredTool = tool
+    const signal = new AbortController().signal
+    const agent = { id: 'truncated-session', session: { events: [] } }
+    const run = (args: unknown) => registeredTool.execute(args, { agent, signal })
+
+    const started = await run({
+      action: 'start',
+      outcome: 'research',
+      request: 'Cite a passage beyond the truncation point.',
+    })
+    const attempt = await run({
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'Passage from the unretrieved tail.',
+      artifact: 'The concluding section states the result [@TRUNC1].',
+      sources: [{
+        sourceId: 'TRUNC1',
+        url: 'https://example.test/long-document',
+        title: 'Long document',
+        locator: 'Concluding section',
+        excerpt: 'the concluding section states the result',
+        role: 'primary',
+      }],
+      claims: [{
+        claimId: 'TRUNC-C1',
+        text: 'The concluding section states the result.',
+        kind: 'external',
+        importance: 'material',
+        disposition: 'supported',
+        sourceIds: ['TRUNC1'],
+      }],
+    })
+
+    // Still blocked, because it genuinely could not be verified...
+    expect(attempt.status).toBe('needs-revision')
+    const issues = attempt.issues.join(' ')
+    expect(issues).toContain('truncated')
+    // ...but never accused of fabrication, which is an evidence defect, not a retrieval limit.
+    expect(issues).not.toContain('fabricated')
+  })
+
   it('matches excerpts across inline markup and preserves block boundaries', async () => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })

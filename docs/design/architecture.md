@@ -268,7 +268,11 @@ Two real Adapters justify it:
    anchor failures. On mismatch the adapter reports the longest matching prefix plus the
    nearest retrieved passage so the agent repairs the anchor instead of retrying it
    unchanged, and separates a partial divergence from an excerpt absent entirely — the
-   latter is a fabrication signal rather than an anchor defect.
+   latter is a fabrication signal rather than an anchor defect. A `truncated` retrieval
+   is reported as `unavailable`, not `failed`: a cut-off body cannot disprove an excerpt
+   drawn from the tail. Both outcomes block publication, but only one of them accuses
+   the agent of fabricating a quotation, and the wrong label would push it to weaken a
+   correct excerpt until it fits the visible prefix.
 2. `DeterministicSourceVerifier` supplies reachable, failed, redirected, unavailable,
    and cancelled outcomes for tests.
 
