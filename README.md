@@ -29,10 +29,14 @@ effect.
 When external evidence is used, Raven records inspected Sources and material Claims.
 Artifacts cite stable Source IDs with `[@source-id]`; the plugin matches bounded
 excerpts against retrieved bodies, renders recorded URLs mechanically, and appends a
-Claim trace mapping material Claim IDs/text to Source IDs. Unknown citations,
+Claim trace mapping material Claim IDs/text to Source IDs. The trace marks Claims whose
+Sources share one declared `sourceFamily` as not independent corroboration, so reprints
+of one originating record cannot read as several confirmations. Unknown citations,
 unregistered URLs, cross-host redirects, and broken or mismatched Sources are
-rejected. Failed dependencies automatically defer Claims that lose all usable support,
-while independently verified work can still complete honestly.
+rejected; a mismatch reports the nearest retrieved passage so the anchor can be
+repaired instead of retried unchanged. Failed dependencies automatically defer Claims
+that lose all usable support, while independently verified work can still complete
+honestly.
 
 ## Compatibility
 
@@ -149,6 +153,9 @@ files, and persistence remain Harness responsibilities.
 Design evidence and decisions:
 
 - [`docs/reverse-engineering/assessment.md`](./docs/reverse-engineering/assessment.md)
+- [`docs/reverse-engineering/hermes-research-skills.md`](./docs/reverse-engineering/hermes-research-skills.md)
+- [`docs/reverse-engineering/hermes-r-round-references.md`](./docs/reverse-engineering/hermes-r-round-references.md)
+- [`docs/reverse-engineering/hermes-nana-wiki.md`](./docs/reverse-engineering/hermes-nana-wiki.md)
 - [`docs/design/architecture.md`](./docs/design/architecture.md)
 - [`docs/adr/0001-one-task-one-tool.md`](./docs/adr/0001-one-task-one-tool.md)
 - [`docs/acceptance.md`](./docs/acceptance.md)

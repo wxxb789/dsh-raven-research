@@ -609,6 +609,95 @@ describe('Raven task engine', () => {
     expect(rejected.issues.join(' ')).toContain('exact latest Checkpoint')
   })
 
+  it('preserves version identity of mutable scholarly Source URLs', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'academic-writing',
+      request: 'Cite an exact preprint version.',
+    }, { sessionId: 'session-version', signal })
+    const published = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'Versioned preprint citation.',
+      artifact: 'The preprint reports the result [@ARXIV1].',
+      sources: [{
+        sourceId: 'ARXIV1',
+        url: 'https://arxiv.org/abs/2401.12345v2',
+        title: 'Preprint, version 2',
+        locator: 'Abstract',
+        excerpt: 'we report the result',
+        role: 'primary',
+      }],
+      claims: [{
+        claimId: 'ARXIV-C1',
+        text: 'The preprint reports the result.',
+        kind: 'external',
+        importance: 'material',
+        disposition: 'supported',
+        sourceIds: ['ARXIV1'],
+      }],
+    }, { sessionId: 'session-version', signal })
+
+    expect(published.status).toBe('active')
+    expect(published.state.sources[0]?.url).toBe('https://arxiv.org/abs/2401.12345v2')
+    expect(published.renderedArtifact).toContain('2401.12345v2')
+  })
+
+  it('marks a Claim whose Sources share one family as non-independent in the Claim trace', () => {
+    const reachable = {
+      status: 'reachable' as const,
+      checkedAt: now(),
+      statusCode: 200,
+    }
+    const wire = (sourceId: string, suffix: string, sourceFamily?: string) => ({
+      sourceId,
+      url: `https://outlet-${suffix}.test/story`,
+      title: `Outlet ${suffix}`,
+      locator: 'Body',
+      excerpt: 'the agency reported the figure',
+      role: 'secondary' as const,
+      inspectedAt: now(),
+      check: { ...reachable, resolvedUrl: `https://outlet-${suffix}.test/story` },
+      ...(sourceFamily === undefined ? {} : { sourceFamily }),
+    })
+    const claim = (claimId: string, sourceIds: string[]) => ({
+      claimId,
+      text: 'The figure is confirmed.',
+      kind: 'external' as const,
+      importance: 'material' as const,
+      disposition: 'supported' as const,
+      sourceIds,
+    })
+
+    // Three outlets republishing one originating record are one epistemic family.
+    const republished = renderArtifact(
+      'The figure is confirmed [@W1][@W2][@W3].',
+      [wire('W1', 'a', 'wire-2026-07-02'), wire('W2', 'b', 'wire-2026-07-02'), wire('W3', 'c', 'wire-2026-07-02')],
+      [claim('WIRE-C1', ['W1', 'W2', 'W3'])],
+    )
+    expect(republished).toContain('single Source family')
+    expect(republished).toContain('not independent corroboration')
+
+    // Undeclared families cannot be assumed independent.
+    const undeclared = renderArtifact(
+      'The figure is confirmed [@U1][@U2].',
+      [wire('U1', 'd'), wire('U2', 'e')],
+      [claim('UNDECLARED-C1', ['U1', 'U2'])],
+    )
+    expect(undeclared).toContain('independence unverified')
+
+    // Genuinely distinct families carry no warning.
+    const independent = renderArtifact(
+      'The figure is confirmed [@I1][@I2].',
+      [wire('I1', 'f', 'registry-filing'), wire('I2', 'g', 'field-survey')],
+      [claim('INDEPENDENT-C1', ['I1', 'I2'])],
+    )
+    expect(independent).not.toContain('single Source family')
+    expect(independent).not.toContain('independence unverified')
+  })
+
   it('escapes Source and Claim trace Markdown supplied by evidence records', () => {
     const rendered = renderArtifact('Claim [@ESC1].', [{
       sourceId: 'ESC1',

@@ -159,6 +159,17 @@ are Markdown/HTML escaped before rendering. Unknown IDs and unregistered raw ext
 URLs are rejected. This keeps the URL and Claim↔Source mapping outside model memory;
 literal anchor matching does not replace main-agent semantic entailment judgment.
 
+The Claim trace also annotates independence. A Claim citing two or more Sources that
+all declare one `sourceFamily` renders as a single family and explicitly not as
+independent corroboration, and undeclared families render as unverified rather than
+being assumed independent. Family is declared by originating record and institutional
+lineage, never derived from host: outlets republishing one wire item are one family,
+while distinct formal documents on one host may be separate families. Raven does not
+mechanically require multiple families, because independence only counts for the same
+atomic proposition — two Sources each supporting a different clause of a compound Claim
+are not cross-verification, and that judgment stays with the agent. Raven enforces only
+what it can verify and makes the rest impossible to misread.
+
 A Checkpoint stores its immutable ordinal, stage observation, summary, Artifact
 SHA-256, character count, creation time, and applied Steering Revision. The latest
 Artifact content remains in compact state; older full contents already live in
@@ -242,7 +253,13 @@ Two real Adapters justify it:
    reopens URLs with the tool cancellation signal, normalizes HTML/entity/whitespace
    presentation, rejects cross-host resolution, and marks a Source reachable only
    when its bounded excerpt occurs in the retrieved body. Provider absence, identity
-   drift, or mismatch is never fabricated success.
+   drift, or mismatch is never fabricated success. Extraction distinguishes block-level
+   from inline elements: block boundaries emit one separator, inline markup emits none,
+   so `pre<em>cise</em>`, `50<sup>th</sup>`, and inline-wrapped CJK do not produce false
+   anchor failures. On mismatch the adapter reports the longest matching prefix plus the
+   nearest retrieved passage so the agent repairs the anchor instead of retrying it
+   unchanged, and separates a partial divergence from an excerpt absent entirely — the
+   latter is a fabrication signal rather than an anchor defect.
 2. `DeterministicSourceVerifier` supplies reachable, failed, redirected, unavailable,
    and cancelled outcomes for tests.
 

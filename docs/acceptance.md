@@ -19,8 +19,8 @@ agent topology.
 | Criterion | Evidence |
 |---|---|
 | Clean install, load, and run against intended Harness | `pnpm test:pack` creates an external staging project with no `lib/`, links only the pinned toolchain, exercises real `prepack` without mutating the repository build, enforces the exact tarball allowlist, and installs it with an isolated pnpm home/store in a second external consumer before import/apply/execute; `pnpm test:dsh` requires the exact clean Harness commit, loads a real `cordis.yml` through Loader + Include, executes start/checkpoint/complete through the real tool registry and `ctx.web` seam, and removes the composition to verify disposal. |
-| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, 37 Vitest tests, and tsdown ESM/declaration build. |
-| Evidence-backed Keep / Change / Drop assessment | `docs/reverse-engineering/assessment.md` synthesizes the detailed Hermes profile, nana-research, and Harness reports and maps preserved mechanisms to source files and line ranges. |
+| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, 41 Vitest tests, and tsdown ESM/declaration build. |
+| Evidence-backed Keep / Change / Drop assessment | `docs/reverse-engineering/assessment.md` synthesizes the Hermes profile, nana-research, Harness, and skill-corpus reports — `hermes-research-skills.md` (all 258 files across 18 research skills), `hermes-r-round-references.md`, and `hermes-nana-wiki.md` — and maps preserved mechanisms to source files and line ranges. |
 | Four first-class Outcomes | `tests/acceptance/raven.acceptance.test.ts` has end-to-end scenarios for `research`, `general-writing`, `academic-writing`, and `learning` through the same tool and Task state. |
 | Progressive research and mid-run correction | The first acceptance scenario verifies one initial Source and publishes an active early Artifact before the second Source, broader collection, and final Completion verification; it then continues research, applies `steer`, emits a revised Checkpoint, and completes with the original Task ID. |
 | No mandatory normal-stage confirmation | At the executable Raven interface, the acceptance suite verifies there is no `confirm` or `approve` action and the real DSH composition advances start/checkpoint/complete without an approval call; the prompt explicitly forbids approval requests between normal stages. |
@@ -33,6 +33,8 @@ agent topology.
   - strict action/nested-record unknown-field rejection;
   - Task start/status and default grounding;
   - immutable Source identity and evidence anchors;
+  - preserved version identity for mutable scholarly URLs;
+  - single-family and undeclared-family independence annotation in the Claim trace;
   - Source/Claim capture, bounded state, escaped Markdown rendering, and generated Claim trace;
   - same-Task Steering Revision;
   - verified excerpts before grounded Checkpoint publication;
@@ -56,6 +58,8 @@ agent topology.
   - preservation and replay of multiple historical Task identities in one Session.
 - `tests/integration/source-provenance.test.ts`
   - real loopback HTTP retrieval;
+  - inline-markup and CJK anchor matching with preserved block boundaries;
+  - nearest-passage repair diagnostics on excerpt drift;
   - invented excerpt rejection before publication;
   - HTML/entity-normalized verbatim excerpt matching and exact Completion;
   - cancellation of a provider Promise that ignores `AbortSignal`.

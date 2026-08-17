@@ -20,6 +20,174 @@ afterEach(async () => {
 })
 
 describe('Source provenance integration', () => {
+  it('matches excerpts across inline markup and preserves block boundaries', async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.end([
+        '<article>',
+        '<p>The <em>pre</em><strong>cise</strong> figure is 50<sup>th</sup> percentile.</p>',
+        '<p>研究<span>表明</span>该机制有效。</p>',
+        '<p>第一条 前段结束。</p><p>第二条 后段开始。</p>',
+        '</article>',
+      ].join(''))
+    })
+    servers.push(server)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/inline`
+
+    let tool: TestTool | undefined
+    apply({
+      tools: {
+        register(definition: TestTool) {
+          tool = definition
+          return () => undefined
+        },
+      },
+      systemPrompt: { section() { return () => undefined } },
+      get(name: string) {
+        if (name !== 'web') return undefined
+        return {
+          async fetch(request: { url: string }, signal?: AbortSignal) {
+            const response = await fetch(request.url, signal === undefined ? {} : { signal })
+            return {
+              url: response.url,
+              statusCode: response.status,
+              body: { kind: 'html' as const, content: await response.text() },
+            }
+          },
+        }
+      },
+      on() { return () => undefined },
+    } as never)
+    if (tool === undefined) throw new Error('Raven tool did not register')
+    const registeredTool = tool
+    const signal = new AbortController().signal
+    const agent = { id: 'inline-session', session: { events: [] } }
+    const run = (args: unknown) => registeredTool.execute(args, { agent, signal })
+
+    const started = await run({
+      action: 'start',
+      outcome: 'research',
+      request: 'Match excerpts that inline markup splits.',
+    })
+
+    const source = (sourceId: string, path: string, excerpt: string) => ({
+      sourceId,
+      url: `${url}/${path}`,
+      title: 'Inline markup record',
+      locator: 'Body',
+      excerpt,
+      role: 'primary',
+    })
+    const claim = (claimId: string, sourceId: string) => ({
+      claimId,
+      text: `Inline markup does not break anchor ${sourceId}.`,
+      kind: 'external',
+      importance: 'material',
+      disposition: 'supported',
+      sourceIds: [sourceId],
+    })
+
+    const published = await run({
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'Anchors that inline markup splits.',
+      artifact: [
+        'A tag splitting a Latin word must not inject a false space [@INLINE1].',
+        'CJK has no word spaces, so any inline span would break a naive extractor [@INLINE2].',
+        'Adjacent block elements must still produce a separator [@INLINE3].',
+      ].join(' '),
+      sources: [
+        source('INLINE1', 'latin', 'The precise figure is 50th percentile.'),
+        source('INLINE2', 'cjk', '研究表明该机制有效。'),
+        source('INLINE3', 'blocks', '前段结束。 第二条'),
+      ],
+      claims: [claim('INLINE-C1', 'INLINE1'), claim('INLINE-C2', 'INLINE2'), claim('INLINE-C3', 'INLINE3')],
+    })
+
+    expect(published.issues).toEqual([])
+    expect(published.status).toBe('active')
+    expect(published.state.sources.map(item => item.check.status)).toEqual(['reachable', 'reachable', 'reachable'])
+  })
+
+  it('reports the nearest source passage when a recorded excerpt drifts', async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.end('<p>The system acknowledges the write before returning</p>')
+    })
+    servers.push(server)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/drift`
+
+    let tool: TestTool | undefined
+    apply({
+      tools: {
+        register(definition: TestTool) {
+          tool = definition
+          return () => undefined
+        },
+      },
+      systemPrompt: { section() { return () => undefined } },
+      get(name: string) {
+        if (name !== 'web') return undefined
+        return {
+          async fetch(request: { url: string }, signal?: AbortSignal) {
+            const response = await fetch(request.url, signal === undefined ? {} : { signal })
+            return {
+              url: response.url,
+              statusCode: response.status,
+              body: { kind: 'html' as const, content: await response.text() },
+            }
+          },
+        }
+      },
+      on() { return () => undefined },
+    } as never)
+    if (tool === undefined) throw new Error('Raven tool did not register')
+    const registeredTool = tool
+    const signal = new AbortController().signal
+    const agent = { id: 'drift-session', session: { events: [] } }
+    const run = (args: unknown) => registeredTool.execute(args, { agent, signal })
+
+    const started = await run({
+      action: 'start',
+      outcome: 'research',
+      request: 'Repair a drifted anchor.',
+    })
+
+    // Model-added terminal punctuation is a repairable anchor defect, not a fabrication.
+    const drifted = await run({
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'Anchor with added punctuation.',
+      artifact: 'The write is durable before acknowledgement [@DRIFT1].',
+      sources: [{
+        sourceId: 'DRIFT1',
+        url,
+        title: 'Drift record',
+        locator: 'Body',
+        excerpt: 'The system acknowledges the write before returning.',
+        role: 'primary',
+      }],
+      claims: [{
+        claimId: 'DRIFT-C1',
+        text: 'The write is durable before acknowledgement.',
+        kind: 'external',
+        importance: 'material',
+        disposition: 'supported',
+        sourceIds: ['DRIFT1'],
+      }],
+    })
+
+    expect(drifted.status).toBe('needs-revision')
+    const issues = drifted.issues.join(' ')
+    expect(issues).toContain('DRIFT1')
+    expect(issues).toContain('nearest retrieved passage')
+    expect(issues).toContain('acknowledges the write before returning')
+  })
+
   it('retrieves the Source body and rejects an excerpt that is not present before publishing', async () => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
@@ -89,7 +257,7 @@ describe('Source provenance integration', () => {
     })
     expect(invented.status).toBe('needs-revision')
     expect(invented.state).toBe(started.state)
-    expect(invented.issues.join(' ')).toContain('excerpt was not found')
+    expect(invented.issues.join(' ')).toContain('diverges from the retrieved source')
 
     const grounded = await run({
       action: 'checkpoint',

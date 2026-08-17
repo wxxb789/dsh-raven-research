@@ -171,12 +171,66 @@ function normalizedEvidence(value: string): string {
   return decodeHtmlEntities(value).replaceAll(/\s+/g, ' ').trim()
 }
 
+/**
+ * Block-level elements create a real visible-text boundary; inline elements do not.
+ * Replacing every tag with a space splits words that inline markup interrupts
+ * (`pre<em>cise</em>`, `50<sup>th</sup>`, and any CJK text wrapped in a span),
+ * which produces false "excerpt not found" rejections against genuine sources.
+ */
+const BLOCK_LEVEL_TAGS = new Set([
+  'address', 'article', 'aside', 'blockquote', 'br', 'caption', 'dd', 'details', 'dialog',
+  'div', 'dl', 'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3',
+  'h4', 'h5', 'h6', 'header', 'hgroup', 'hr', 'li', 'main', 'nav', 'ol', 'p', 'pre', 'section',
+  'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
+])
+
 function fetchedVisibleText(result: WebFetchResultLike): string {
   if (result.body.kind === 'text') return result.body.content
   return result.body.content
     .replaceAll(/<!--[\s\S]*?-->/g, ' ')
     .replaceAll(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-    .replaceAll(/<[^>]+>/g, ' ')
+    .replaceAll(
+      /<\/?([a-z][a-z0-9-]*)\b[^>]*>/gi,
+      (_tag, tagName: string) => BLOCK_LEVEL_TAGS.has(tagName.toLowerCase()) ? ' ' : '',
+    )
+    .replaceAll(/<[^>]*>/g, ' ')
+}
+
+/**
+ * Longest prefix of `excerpt` that occurs in `body`. Prefix containment is monotone,
+ * so a binary search finds the exact divergence point.
+ */
+function longestPrefixMatch(body: string, excerpt: string): { length: number; index: number } {
+  let low = 1
+  let high = excerpt.length
+  let length = 0
+  let index = -1
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2)
+    const found = body.indexOf(excerpt.slice(0, middle))
+    if (found === -1) {
+      high = middle - 1
+    } else {
+      length = middle
+      index = found
+      low = middle + 1
+    }
+  }
+  return { length, index }
+}
+
+/** Actionable repair guidance: where the recorded anchor stops matching, and what the source actually says. */
+function excerptMismatchDetail(body: string, excerpt: string, locator: string): string {
+  const { length, index } = longestPrefixMatch(body, excerpt)
+  if (length === 0 || index === -1) {
+    return `no part of the recorded excerpt occurs in the retrieved source at ${locator};`
+      + ' treat this as a possible fabricated quotation rather than an anchor repair'
+  }
+  const window = body.slice(index, index + Math.min(excerpt.length + 40, 240)).trim()
+  return `recorded excerpt diverges from the retrieved source at ${locator} after ${length}`
+    + ` matching character(s); nearest retrieved passage: "${window}".`
+    + ' Replace the excerpt with the shortest exact contiguous phrase that still carries the Claim,'
+    + ' without adding terminal punctuation the source does not contain'
 }
 
 function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -221,9 +275,11 @@ function sourceVerifier(ctx: ContextLike, now: () => string): SourceVerifier {
           const httpReachable = fetched.statusCode >= 200 && fetched.statusCode < 400
           const resolvedUrl = new URL(fetched.url)
           const identityMatched = sameSourceIdentity(source.url, fetched.url)
-          const excerptMatched = httpReachable
-            && identityMatched
-            && normalizedEvidence(fetchedVisibleText(fetched)).includes(normalizedEvidence(source.excerpt))
+          const body = httpReachable && identityMatched
+            ? normalizedEvidence(fetchedVisibleText(fetched))
+            : ''
+          const excerpt = normalizedEvidence(source.excerpt)
+          const excerptMatched = body.length > 0 && body.includes(excerpt)
           results.push({
             sourceId: source.sourceId,
             status: excerptMatched ? 'reachable' : 'failed',
@@ -237,7 +293,7 @@ function sourceVerifier(ctx: ContextLike, now: () => string): SourceVerifier {
                     ? `HTTP ${fetched.statusCode}`
                     : !identityMatched
                       ? `source resolved to a different host: ${resolvedUrl.hostname}`
-                      : `recorded excerpt was not found in the retrieved source at ${source.locator}`,
+                      : excerptMismatchDetail(body, excerpt, source.locator),
                 }),
           })
         } catch (error) {

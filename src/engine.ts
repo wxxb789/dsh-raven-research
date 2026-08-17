@@ -514,6 +514,29 @@ async function checkSources(
   }
 }
 
+/**
+ * Independence note for one Claim's cited Sources.
+ *
+ * Multiple publishers repeating one originating record remain one epistemic family,
+ * so a Claim citing three reprints must not read as three independent confirmations.
+ * Family is declared, never derived from host: distinct formal documents on one host
+ * can be separate families, and one document mirrored across hosts is still one.
+ * Independence is only meaningful per atomic proposition; that judgment stays with
+ * the agent, so this annotates the rendered trace instead of blocking Completion.
+ */
+function independenceNote(
+  claim: RavenClaimRecord,
+  byId: Map<string, RavenSourceRecord>,
+): string {
+  if (claim.sourceIds.length < 2) return ''
+  const families = claim.sourceIds.map(sourceId => byId.get(sourceId)?.sourceFamily)
+  if (families.some(family => family === undefined)) return ' — independence unverified (undeclared Source family)'
+  const distinct = new Set(families)
+  if (distinct.size > 1) return ''
+  const [only] = distinct
+  return ` — single Source family "${markdownText(only ?? '')}"; not independent corroboration`
+}
+
 function markdownText(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -559,7 +582,7 @@ export function renderArtifact(
         if (source === undefined) throw new Error(`claim ${claim.claimId} lost source ${sourceId} during rendering`)
         return `[${sourceId}](${source.url.replaceAll(')', '%29')})`
       })
-      return `- **${claim.claimId}**: ${markdownText(claim.text)} — ${links.join(', ')}`
+      return `- **${claim.claimId}**: ${markdownText(claim.text)} — ${links.join(', ')}${independenceNote(claim, byId)}`
     })
     sections.push(`## Claim trace\n${lines.join('\n')}`)
   }
