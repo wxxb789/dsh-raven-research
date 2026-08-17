@@ -609,6 +609,89 @@ describe('Raven task engine', () => {
     expect(rejected.issues.join(' ')).toContain('exact latest Checkpoint')
   })
 
+  it('preserves source disagreement instead of silently resolving it', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Report a genuine disagreement between two records.',
+    }, { sessionId: 'session-contested', signal })
+
+    const source = (sourceId: string, suffix: string) => ({
+      sourceId,
+      url: `https://${suffix}.test/record`,
+      title: `Record ${sourceId}`,
+      locator: 'Body',
+      excerpt: `figure recorded by ${sourceId}`,
+      role: 'primary',
+      sourceFamily: `family-${sourceId}`,
+    })
+
+    const published = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'analyze',
+      summary: 'Two authorities disagree.',
+      artifact: 'The registry reports 120 units [@D1]. The ministry reports 95 units [@D2].',
+      sources: [source('D1', 'registry'), source('D2', 'ministry')],
+      claims: [
+        {
+          claimId: 'DIS-C1',
+          text: 'The registry reports 120 units.',
+          kind: 'external',
+          importance: 'material',
+          disposition: 'qualified',
+          sourceIds: ['D1'],
+          contradicts: ['DIS-C2'],
+        },
+        {
+          claimId: 'DIS-C2',
+          text: 'The ministry reports 95 units.',
+          kind: 'external',
+          importance: 'material',
+          disposition: 'qualified',
+          sourceIds: ['D2'],
+          contradicts: ['DIS-C1'],
+        },
+      ],
+    }, { sessionId: 'session-contested', signal })
+
+    expect(published.status).toBe('active')
+    expect(published.renderedArtifact).toContain('contested')
+    expect(published.renderedArtifact).toContain('DIS-C2')
+    expect(published.state.claims[0]?.contradicts).toEqual(['DIS-C2'])
+  })
+
+  it('rejects a contradiction that names an unknown or self-referential Claim', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Reject dangling contradiction links.',
+    }, { sessionId: 'session-contested-bad', signal })
+
+    const attempt = (contradicts: string[]) => engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'Dangling contradiction.',
+      artifact: 'An analysis Claim.',
+      claims: [{
+        claimId: 'BAD-C1',
+        text: 'An analysis Claim.',
+        kind: 'analysis',
+        importance: 'context',
+        disposition: 'supported',
+        sourceIds: [],
+        contradicts,
+      }],
+    }, { sessionId: 'session-contested-bad', signal })
+
+    await expect(attempt(['NOT-A-CLAIM'])).rejects.toThrow('unknown Claim')
+    await expect(attempt(['BAD-C1'])).rejects.toThrow('itself')
+  })
+
   it('refuses to disable the evidence floor on evidence-defined Outcomes', async () => {
     const engine = createRavenEngine({ now, sourceVerifier })
     for (const outcome of ['research', 'academic-writing']) {

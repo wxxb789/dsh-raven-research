@@ -355,6 +355,11 @@ const CLAIM_SCHEMA = {
       items: { type: 'string' },
       description: `Unique registered Source IDs; at most ${RAVEN_LIMITS.sources}.`,
     },
+    contradicts: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Claim IDs this Claim genuinely conflicts with. Preserve disagreement instead of silently choosing a side; the rendered Claim trace marks both as contested.',
+    },
   },
 } as const
 

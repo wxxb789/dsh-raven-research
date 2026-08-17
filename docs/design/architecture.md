@@ -149,9 +149,14 @@ HTML/entity and whitespace presentation normalization.
 
 A Claim has a stable ID, text, `external | analysis` kind,
 `material | context` importance, `supported | qualified | deferred | rejected`
-disposition, and Source IDs. A supported or qualified external Claim cannot have an
+disposition, Source IDs, and optional `contradicts` links to Claims it genuinely
+conflicts with. A supported or qualified external Claim cannot have an
 empty, unknown, or failed Source set. Reusing a Claim ID for different text is
-rejected rather than silently rewriting provenance.
+rejected rather than silently rewriting provenance. Contradiction links must resolve
+to Claims in the same Task and cannot be self-referential; they are validated after
+the whole batch so a mutually contradicting pair can be submitted together. The
+rendered Claim trace marks both sides contested, so genuine disagreement between
+authorities survives instead of one side being silently dropped.
 
 ### Artifact and citations
 

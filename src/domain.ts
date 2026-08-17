@@ -84,6 +84,8 @@ export interface RavenClaimRecord {
   readonly importance: ClaimImportance
   readonly disposition: ClaimDisposition
   readonly sourceIds: readonly string[]
+  /** Claim IDs this Claim genuinely conflicts with; disagreement is preserved, never silently resolved. */
+  readonly contradicts?: readonly string[]
 }
 
 export interface RavenSteeringRevision {

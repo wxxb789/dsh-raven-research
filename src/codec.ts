@@ -193,7 +193,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   for (const raw of state.claims) {
     const item = record(raw)
     if (item === undefined
-      || !exactKeys(item, ['claimId', 'text', 'kind', 'importance', 'disposition', 'sourceIds'])
+      || !exactKeys(item, ['claimId', 'text', 'kind', 'importance', 'disposition', 'sourceIds', 'contradicts'])
       || !string(item.claimId)
       || !STABLE_ID.test(item.claimId)
       || claimIds.has(item.claimId)
@@ -202,13 +202,22 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || !member(item.kind, CLAIM_KINDS)
       || !member(item.importance, CLAIM_IMPORTANCE)
       || !member(item.disposition, CLAIM_DISPOSITIONS)
-      || !uniqueStrings(item.sourceIds, id => STABLE_ID.test(id) && sourceIds.has(id))) return undefined
+      || !uniqueStrings(item.sourceIds, id => STABLE_ID.test(id) && sourceIds.has(id))
+      || (item.contradicts !== undefined
+        && (!uniqueStrings(item.contradicts, id => STABLE_ID.test(id) && id !== item.claimId)
+          || item.contradicts.length > RAVEN_LIMITS.claims))) return undefined
     if (item.kind === 'external'
       && (item.disposition === 'supported' || item.disposition === 'qualified')) {
       if (item.sourceIds.length === 0
         || item.sourceIds.some(sourceId => sourceChecks.get(sourceId)?.status !== 'reachable')) return undefined
     }
     claimIds.add(item.claimId)
+  }
+  for (const raw of state.claims) {
+    const item = record(raw)
+    const contradicts = item?.contradicts
+    if (!Array.isArray(contradicts)) continue
+    if (contradicts.some(other => typeof other !== 'string' || !claimIds.has(other))) return undefined
   }
 
   const limitationIds = new Set<string>()

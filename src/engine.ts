@@ -208,7 +208,7 @@ function parseClaims(
   const byId = new Map(existing.map(claim => [claim.claimId, claim]))
   for (const raw of optionalArray(value, 'claims')) {
     const input = record(raw, 'claim')
-    assertOnlyKeys(input, ['claimId', 'text', 'kind', 'importance', 'disposition', 'sourceIds'], 'claim')
+    assertOnlyKeys(input, ['claimId', 'text', 'kind', 'importance', 'disposition', 'sourceIds', 'contradicts'], 'claim')
     const claimId = stableId(input.claimId, 'claim.claimId')
     const text = boundedText(input.text, 'claim.text', RAVEN_LIMITS.claimTextChars)
     const current = byId.get(claimId)
@@ -232,7 +232,30 @@ function parseClaims(
     if (kind === 'external' && (disposition === 'supported' || disposition === 'qualified') && sourceIds.length === 0) {
       throw new Error(`external claim ${claimId} requires at least one source`)
     }
-    byId.set(claimId, { claimId, text, kind, importance, disposition, sourceIds })
+    const contradicts = optionalArray(input.contradicts, 'claim.contradicts')
+      .map(other => stableId(other, 'claim.contradicts[]'))
+    if (contradicts.length > RAVEN_LIMITS.claims) {
+      throw new Error(`claim.contradicts may name at most ${RAVEN_LIMITS.claims} Claim IDs`)
+    }
+    if (new Set(contradicts).size !== contradicts.length) {
+      throw new Error(`claim ${claimId} contains duplicate contradiction links`)
+    }
+    if (contradicts.includes(claimId)) throw new Error(`claim ${claimId} cannot contradict itself`)
+    byId.set(claimId, {
+      claimId,
+      text,
+      kind,
+      importance,
+      disposition,
+      sourceIds,
+      ...(contradicts.length === 0 ? {} : { contradicts }),
+    })
+  }
+  // Resolved after the batch so a mutually contradicting pair can be submitted together.
+  for (const claim of byId.values()) {
+    for (const other of claim.contradicts ?? []) {
+      if (!byId.has(other)) throw new Error(`claim ${claim.claimId} contradicts unknown Claim ${other}`)
+    }
   }
   if (byId.size > RAVEN_LIMITS.claims) {
     throw new Error(`Raven Task may retain at most ${RAVEN_LIMITS.claims} Claims`)
@@ -524,6 +547,13 @@ async function checkSources(
  * Independence is only meaningful per atomic proposition; that judgment stays with
  * the agent, so this annotates the rendered trace instead of blocking Completion.
  */
+/** Preserved disagreement: a contested Claim must never read as settled fact. */
+function contestedNote(claim: RavenClaimRecord): string {
+  const contested = claim.contradicts ?? []
+  if (contested.length === 0) return ''
+  return ` — contested with ${contested.map(other => markdownText(other)).join(', ')}`
+}
+
 function independenceNote(
   claim: RavenClaimRecord,
   byId: Map<string, RavenSourceRecord>,
@@ -582,7 +612,7 @@ export function renderArtifact(
         if (source === undefined) throw new Error(`claim ${claim.claimId} lost source ${sourceId} during rendering`)
         return `[${sourceId}](${source.url.replaceAll(')', '%29')})`
       })
-      return `- **${claim.claimId}**: ${markdownText(claim.text)} — ${links.join(', ')}${independenceNote(claim, byId)}`
+      return `- **${claim.claimId}**: ${markdownText(claim.text)} — ${links.join(', ')}${independenceNote(claim, byId)}${contestedNote(claim)}`
     })
     sections.push(`## Claim trace\n${lines.join('\n')}`)
   }
