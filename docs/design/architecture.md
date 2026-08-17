@@ -95,7 +95,11 @@ registry.
 
 ### Why these actions exist
 
-- `start` establishes one Task identity and Outcome before work is recorded.
+- `start` establishes one Task identity and Outcome before work is recorded. The
+  evidence floor belongs to the Outcome, not to the executor: `research` and
+  `academic-writing` default to `required` and may be narrowed to `optional`, but
+  never to `none`. An executor that could switch its own floor off could relabel
+  ungrounded prose as research and still complete cleanly.
 - `checkpoint` atomically commits an independently useful Artifact plus the evidence
   and failures that inform it. Stages are observations, never approval gates.
 - `steer` appends a Steering Revision to the same Task and invalidates stale final

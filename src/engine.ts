@@ -608,6 +608,12 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const grounding = args.grounding === undefined
           ? defaultGrounding(outcome)
           : member<GroundingPolicy>(args.grounding, GROUNDING_POLICIES, 'grounding')
+        // The evidence floor belongs to the Outcome, not to the executor's convenience.
+        // `research` and `academic-writing` are defined by external evidence, so they may
+        // narrow the floor to `optional` but may never switch it off entirely.
+        if (grounding === 'none' && defaultGrounding(outcome) === 'required') {
+          throw new Error(`a ${outcome} Task cannot disable its evidence floor; use grounding=optional or start a general-writing Task`)
+        }
         const ordinal = (previous?.ordinal ?? 0) + 1
         const at = options.now()
         const state: RavenTaskState = {

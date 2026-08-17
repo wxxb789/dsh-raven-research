@@ -609,6 +609,36 @@ describe('Raven task engine', () => {
     expect(rejected.issues.join(' ')).toContain('exact latest Checkpoint')
   })
 
+  it('refuses to disable the evidence floor on evidence-defined Outcomes', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    for (const outcome of ['research', 'academic-writing']) {
+      await expect(engine.dispatch(null, {
+        action: 'start',
+        outcome,
+        grounding: 'none',
+        request: 'Silently drop the evidence floor.',
+      }, { sessionId: `session-floor-${outcome}`, signal })).rejects.toThrow('cannot disable its evidence floor')
+    }
+
+    // `optional` stays available: such a Task may be mostly analysis with some external Claims.
+    const optional = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      grounding: 'optional',
+      request: 'Mostly analysis with some external Claims.',
+    }, { sessionId: 'session-floor-optional', signal })
+    expect(optional.state.grounding).toBe('optional')
+
+    // Outcomes that are not defined by external evidence keep the full range.
+    const ungrounded = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Draft a personal note.',
+    }, { sessionId: 'session-floor-writing', signal })
+    expect(ungrounded.state.grounding).toBe('none')
+  })
+
   it('preserves version identity of mutable scholarly Source URLs', async () => {
     const engine = createRavenEngine({ now, sourceVerifier })
     const started = await engine.dispatch(null, {

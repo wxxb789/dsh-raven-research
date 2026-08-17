@@ -19,7 +19,7 @@ agent topology.
 | Criterion | Evidence |
 |---|---|
 | Clean install, load, and run against intended Harness | `pnpm test:pack` creates an external staging project with no `lib/`, links only the pinned toolchain, exercises real `prepack` without mutating the repository build, enforces the exact tarball allowlist, and installs it with an isolated pnpm home/store in a second external consumer before import/apply/execute; `pnpm test:dsh` requires the exact clean Harness commit, loads a real `cordis.yml` through Loader + Include, executes start/checkpoint/complete through the real tool registry and `ctx.web` seam, and removes the composition to verify disposal. |
-| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, 41 Vitest tests, and tsdown ESM/declaration build. |
+| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, 42 Vitest tests, and tsdown ESM/declaration build. |
 | Evidence-backed Keep / Change / Drop assessment | `docs/reverse-engineering/assessment.md` synthesizes the Hermes profile, nana-research, Harness, and skill-corpus reports — `hermes-research-skills.md` (all 258 files across 18 research skills), `hermes-r-round-references.md`, and `hermes-nana-wiki.md` — and maps preserved mechanisms to source files and line ranges. |
 | Four first-class Outcomes | `tests/acceptance/raven.acceptance.test.ts` has end-to-end scenarios for `research`, `general-writing`, `academic-writing`, and `learning` through the same tool and Task state. |
 | Progressive research and mid-run correction | The first acceptance scenario verifies one initial Source and publishes an active early Artifact before the second Source, broader collection, and final Completion verification; it then continues research, applies `steer`, emits a revised Checkpoint, and completes with the original Task ID. |
@@ -32,6 +32,7 @@ agent topology.
 - `tests/unit/engine.test.ts`
   - strict action/nested-record unknown-field rejection;
   - Task start/status and default grounding;
+  - refusal to disable the evidence floor on evidence-defined Outcomes;
   - immutable Source identity and evidence anchors;
   - preserved version identity for mutable scholarly URLs;
   - single-family and undeclared-family independence annotation in the Claim trace;
