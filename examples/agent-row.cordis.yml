@@ -1,0 +1,4 @@
+# Append this row to a copied, user-authored agent preset.
+# Do not edit a shipped DeepSeek Harness preset.
+- id: raven-research
+  name: dsh-raven-research

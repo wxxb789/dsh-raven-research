@@ -1,0 +1,3 @@
+# package.json "files" is the publication allowlist.
+!lib/
+!lib/**

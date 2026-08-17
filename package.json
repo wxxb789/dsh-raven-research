@@ -1,0 +1,60 @@
+{
+  "name": "dsh-raven-research",
+  "version": "0.1.0",
+  "description": "Progressive, source-grounded research, writing, and learning for DeepSeek Harness",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wxxb789/dsh-raven-research.git"
+  },
+  "keywords": ["deepseek-harness", "cordis", "research", "writing", "learning"],
+  "sideEffects": false,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "examples/*.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "build": "tsdown",
+    "prepack": "tsdown",
+    "lint": "oxlint --deny-warnings src tests scripts tsdown.config.ts vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:dsh": "pnpm run build && tsx scripts/run-dsh-test.ts",
+    "test:pack": "tsx scripts/verify-packed-install.ts",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build",
+    "check:release": "pnpm run check && pnpm run test:pack && pnpm run test:dsh"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.0",
+    "oxlint": "1.76.0",
+    "tsdown": "0.22.2",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  },
+  "dshRaven": {
+    "harnessVersion": "0.1.0-rc.5",
+    "harnessCommit": "47f943859bef60e4160492346772ded9b24f765a",
+    "plane": "agent",
+    "publishesService": false
+  }
+}
