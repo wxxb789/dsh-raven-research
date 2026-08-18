@@ -14,22 +14,31 @@
 Task，用于深度研究（deep research）、通用写作、学术写作与学习辅导 —— 过程中持续产出可用的 Checkpoint，支持中途纠偏，
 并且每一条引用都要与真实抓取到的字节对得上。**
 
-它是一个 host-only 的原生 [Cordis](https://github.com/cordiverse/cordis) 插件：不引入第二个 agent runtime，
-不自带模型、向量库或数据库。研究和写作仍由现有的 Harness agent 用自己的工具完成，Raven 负责维持连续的 Task 身份、
-可见的中间产物、用户 steering、source/claim 溯源，以及最终的完成校验。
+## TL;DR
 
-> **状态：** v1，developer preview。锚定并针对 DeepSeek Harness `0.1.0-rc.7` 测试；Harness 本身仍是 RC 且迭代很快，
-> Raven 不宣称兼容未经测试的 Harness 版本。
+- **是什么：** 一个 DeepSeek Harness（`dsh`）插件，为深度研究、通用写作、学术写作与学习引入一个渐进式、证据感知的
+  Task 抽象。
+- **解决什么：** 早期就能拿到可用的 Checkpoint，中途纠偏而不是推倒重来，并且每条引用都对照真实抓取到的字节校验 ——
+  而不是对照模型的记忆。
+- **怎么实现：** 一个 host-only 的 [Cordis](https://github.com/cordiverse/cordis) 插件、一个面向模型的 `raven_task`
+  工具、一段紧凑的 prompt。不引入第二个 agent runtime，不自带模型、向量库或数据库；研究与写作仍由现有 Harness agent
+  用自己的工具完成。
+- **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再往用户自有的 agent preset 里加一行。
+  见[安装](#安装)。
+- **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语，也没有独立 UI。见[使用](#使用)。
+- **状态：** v1 developer preview，锚定 Harness `0.1.0-rc.7`，尚未发布到 npm。
+
+## 目录
 
 - [为什么需要 Raven](#为什么需要-raven)
 - [特性](#特性)
-- [工作流程](#工作流程)
-- [快速开始](#快速开始)
+- [安装](#安装)
+- [升级](#升级)
+- [卸载](#卸载)
+- [使用](#使用)
+- [工作原理 (under the hood)](#工作原理-under-the-hood)
 - [配置](#配置)
-- [会触发 Raven Task 的提问方式](#会触发-raven-task-的提问方式)
-- [让成果活过本次会话：llm-wiki 导出](#让成果活过本次会话llm-wiki-导出)
 - [兼容性](#兼容性)
-- [架构](#架构)
 - [开发](#开发)
 - [FAQ](#faq)
 - [v1 限制](#v1-限制)
@@ -59,21 +68,167 @@ Raven 改变的是这项工作的形态。
   机械渲染记录的 URL，并拒绝未知引用、未注册 URL、跨站重定向以及失效或不匹配的 Source。不匹配时会报告最接近的
   抓取片段，方便修正锚点，而不是原样重试。
 - **带独立性判断的 Claim trace。** 每次 Completion 都会追加一张把关键 Claim ID / 文本映射到 Source ID 的 trace，
-  并标出共享同一 `sourceFamily` 的 Claim，避免同一原始记录的多份转载被读成多次印证。
+  并标出共享同一 `sourceFamily` 的 Claim，避免同一原始记录的多份转载被读成多次印证；真正冲突的 Claim 会被记录为
+  contested，而不是被悄悄消解。
 - **诚实的部分结果。** Claim 被撤回时，断言它的正文必须在同一个 Checkpoint 内改写：不允许只删引用、留下裸断言。
   无法验证的证据会拒绝发布，而不是悄悄降级成"未检查"。
-- **会话内持久的 Task book。** 直接工具调用通过 `tool/result.meta` 携带 Task 记录；Code Mode `run_code` 内的调用
-  拿不到 result card，因此 Raven 会以 `dsh-raven-research/task-state` session event 发布同一份记录。两条路径都能在
-  resume 时恢复。
-- **失败路径也带上下文。** 调用失败时，模型会收到通过 tool-owned content finalizer 附加的 `<raven_task_recovery>`
-  提示 —— 这是参数非法与取消场景下仍会执行的那个钩子。
+- **会话内持久的 Task book。** 直接工具调用与 Code Mode `run_code` 内的调用都有效，并且能扛过 stop / resume ——
+  见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
 - **一等公民的 settings namespace。** 注册插件即暴露 `raven-research` 命名空间到 Harness 组合出的每一个配置界面，
   Harness 端无需改动。
 - **可持久化导出。** `export` 产出一个合法的 [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) 仓库 —— artifact 页、
   每个 Source 一张带验证回执的不可变 `raw/` 页、以及可追加的 `log.md` —— 由 agent 用普通文件工具写入，
   Raven 自身从不碰文件系统。
 
-## 工作流程
+## 安装
+
+Raven **尚未发布到 npm**，请从仓库源码安装。下面所有操作都发生在 Harness 仓库之外：你不需要改动 Harness checkout，
+也不需要改动它自带的 preset。
+
+### 环境要求
+
+| 要求 | 版本 |
+| --- | --- |
+| DeepSeek Harness | `0.1.0-rc.7`（checkout `99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`） |
+| Node.js | `^22.19.0 \|\| >=24.0.0` |
+| pnpm | `11.21.0` |
+| Peer dependencies | `@deepseek-ai/dsh-settings`、`@deepseek-ai/schemastery` —— 由 Harness 部署提供 |
+
+### 1. 构建并打包
+
+```bash
+git clone https://github.com/wxxb789/dsh-raven-research.git
+cd dsh-raven-research
+pnpm install --frozen-lockfile
+pnpm build
+pnpm pack        # -> dsh-raven-research-0.1.0.tgz
+```
+
+### 2. 把 tarball 装进 Harness 部署
+
+在部署根目录执行；这个包只需要在该 Node 解析图中可被解析：
+
+```bash
+pnpm add /path/to/dsh-raven-research-0.1.0.tgz
+```
+
+tarball 自身没有任何运行时依赖，两个 peer 由部署提供。发布之后，等价依赖是 `dsh-raven-research@0.1.0`。
+
+### 3. 在用户自有的 agent preset 中启用
+
+新建或复制一份**用户自有**的 agent preset，把
+[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) 中的这一行追加到它的 `cordis.yml`：
+
+```yaml
+- id: raven-research
+  name: dsh-raven-research
+  # 可选：raven-research settings namespace 的 base 层
+  # config:
+  #   sourceVerification: remote
+  #   sourceCheckTimeoutMs: 30000
+```
+
+不要改 Harness 自带的 preset。Raven 不发布进程服务，因此这一行不需要 isolate realm；它消费 preset 作用域内的
+`tools` 与 `systemPrompt` 注册表，并在可以重开 source 时动态获取 `web`。
+
+### 4. 验证
+
+启动 Harness，向 agent 提一个有分量的请求（见[使用](#使用)）。当对话里出现 `raven_task` 调用、并且在最终答案之前
+先收到 Checkpoint，就说明 Raven 已经生效。
+
+## 升级
+
+```bash
+cd dsh-raven-research
+git pull
+pnpm install --frozen-lockfile
+pnpm check          # lint、typecheck、test、build
+pnpm pack
+```
+
+然后在部署根目录重新安装新的 tarball：
+
+```bash
+pnpm add /path/to/dsh-raven-research-<version>.tgz
+```
+
+pnpm 以完整性哈希标识本地 tarball，因此即便版本号没变也会识别到新字节；若部署仍在用旧构建，执行
+`pnpm install --force`。
+
+升级前请确认两件事：
+
+- **Harness 锚定版本。** 比对 `package.json` 里的 `dshRaven.harnessVersion` 与你实际运行的 Harness。Raven 只锚定
+  一个 RC，不宣称兼容未经测试的版本。
+- **配置。** 存在用户 `settings.yaml` 里的 `raven-research` 取值会在重装后保留；preset 的 `config:` 块只是 base 层。
+
+进行中的 Task 存在会话里而不是磁盘上。换构建之前，先把它完成或 `export` 出来。
+
+## 卸载
+
+1. 从 agent preset 的 `cordis.yml` 中删掉 `- id: raven-research` 这一行。
+2. 从部署中移除依赖：
+
+   ```bash
+   pnpm remove dsh-raven-research
+   ```
+
+3. 可选：删掉用户 `settings.yaml` 中的 `raven-research` 段。
+
+Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pre-step` 监听器、settings section —— 都由 Cordis
+fiber 持有 disposer，卸载会把它们一并撤销，不会留下孤儿工具或残留 prompt 文本（`pnpm test:dsh` 正是针对真实 Harness
+Loader 验证这条释放路径）。如果你的部署不会在 preset 变更时重载，请重启 Harness。
+
+除此之外没有任何残留：Raven 没有数据库、没有缓存、不写文件。Task 状态存在 Harness session log 中，导出的内容则是
+一个本来就属于你的普通 llm-wiki 仓库。
+
+## 使用
+
+没有启动咒语，也没有独立的 Raven UI —— 用户照常和 Harness agent 对话，Task 生命周期由模型驱动。
+
+```text
+研究支持与反对这项政策的最强一手证据。先给我一份早期发现提纲，继续推进，
+最后精修成一份决策备忘录。
+```
+
+```text
+把这些笔记写成一篇面向工程管理者的 800 字文章。早点出初稿，方便我调整重点。
+```
+
+```text
+基于这些论文写出一节文献综述。保留分歧，不要编造参考文献。
+```
+
+```text
+用一个心智模型、两个例子和一次自测，教我理解闭包。
+```
+
+纠偏就是下一条消息 —— "重点讲成本，不要讲采用率""再挑剔一些""只引用一手资料" —— 它会落在同一个 Task 上，
+而不是开一个新的。
+
+### `raven_task` 的 action
+
+`raven_task` 面向模型。这些是同一个用户 Task 的内部生命周期操作，不是需要用户自己管理的多套流程：
+
+| Action | 作用 |
+| --- | --- |
+| `start` | 开启一个 Task，指定 Outcome（`research`、`general-writing`、`academic-writing`、`learning`）与 grounding 级别（`required`、`optional`、`none`）。 |
+| `checkpoint` | 发布一版用户可见的 Artifact，附带新的 Source、Claim 与失败记录，并校验有据可依的证据。 |
+| `steer` | 把用户纠偏应用到同一个 Task，保留既有证据与 Checkpoint。 |
+| `complete` | 校验引用身份、关键 Claim 链接、摘录匹配、Source 可达性，以及与最新一次 steer 之后 Checkpoint 完全一致的 Artifact 指纹。 |
+| `status` | 报告当前 Task book。 |
+| `stop` | 以记录在案的原因结束 Task；明确不等于 Completion。 |
+| `resume` | 重新打开已停止的 Task（包括较早的那个），不丢失证据与 Artifact。 |
+| `export` | 返回 llm-wiki 页面字节，由 agent 用普通文件工具写盘。 |
+
+### 让成果活过本次会话：llm-wiki 导出
+
+Completion 之后调用 `action=export`，Raven 返回一个 [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) 仓库的页面
+字节：`wiki/queries` 下的 artifact 页、每个 Source 一张携带已验证摘录与验证回执的不可变 `wiki/raw` 页
+（`capture: excerpt-only`），以及一条可追加的 `wiki/log.md` 记录。对尚无 wiki 的仓库传 `init=true`，会一并生成
+`SCHEMA.md`、`index.md` 与 `log.md`。产物是合法的 llm-wiki，可被 Obsidian 及该 skill 自己的工具读取。返回的字节要
+原样写入 —— 每张 raw 页的摘要覆盖其自身正文，导出后再编辑会使其失效。
+
+## 工作原理 (under the hood)
 
 ```mermaid
 flowchart LR
@@ -88,36 +243,65 @@ flowchart LR
   D --> E["export<br/>llm-wiki 页面"]
 ```
 
-`raven_task` 是面向模型的工具。它的 `start`、`checkpoint`、`steer`、`complete`、`status`、`stop`、`resume`、
-`export` 都是同一个用户 Task 的内部生命周期操作，不是需要用户自己管理的多套流程。
+### 插件注册了什么
 
-## 快速开始
+Raven 导出的是普通的 Cordis 插件元数据（`name`、`inject = ['tools', 'systemPrompt']`、Schemastery `Config` 与
+`apply`），并让 `apply` 保持很薄。它注册：
 
-Raven 尚未发布到 npm，请从仓库构建打包：
+- 通过 `ctx.tools` 注册的一个 `raven_task` 模型工具；
+- 通过 `ctx.systemPrompt` 注册的一段紧凑静态 section；
+- 一个 `agent/pre-step` 监听器，在每一步之前把当前 Task book 放到模型面前；以及
+- `raven-research` settings section，它挂在 `ctx.inject` 之后，所以没有 settings 服务的部署根本不会执行这段接线。
 
-```bash
-git clone https://github.com/wxxb789/dsh-raven-research.git
-cd dsh-raven-research
-pnpm install --frozen-lockfile
-pnpm build
-pnpm pack
-```
+`web` 刻意不走 inject：需要重开 Source 时才从 context 动态获取，因此缺少该能力的部署照样能加载、照样能写作。
+每一处注册都返回由调用 fiber 持有的 disposer —— 这正是[卸载](#卸载)能干净收场的原因。
 
-用 pnpm 把生成的 tarball 安装进 DeepSeek Harness 部署的 Node 解析图。发布之后，等价依赖是
-`dsh-raven-research@0.1.0`。
+### Task book 的两条持久化路径
 
-然后新建或复制一份**用户自有**的 agent preset，并追加
-[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) 中的这一行：
+Raven 每个会话维护一份 Task book，并且是从 session log 重建，而不是靠自己的存储：
 
-```yaml
-- id: raven-research
-  name: dsh-raven-research
-```
+- **直接工具调用**通过持久化的结果元数据携带 Task 记录（`tool/result.meta`，kind 为
+  `dsh-raven-research/task-state`）。
+- **Code Mode `run_code` 程序内的调用**是嵌套子调用，没有 result card，Harness 也就不会为它计算 presentation
+  metadata。因此 Raven 自己把同一份记录作为 `dsh-raven-research/task-state` session event 发布出去。
 
-不要改 Harness 自带的 preset。Raven 不发布进程服务，因此这一行不需要 isolate realm；它消费 preset 作用域内的
-`tools` 与 `systemPrompt` 注册表，并在可以重开 source 时动态获取 `web`。
+两条路径都能在会话 resume 时恢复这本 book，所以在程序内推进的 Task 不会悄无声息地丢失。
 
-Raven 有两个 peer dependency，均由 Harness 部署提供：`@deepseek-ai/dsh-settings` 与 `@deepseek-ai/schemastery`。
+### 失败路径同样带着 Task
+
+调用失败时，模型需要拿到"要对着改"的那个 Task，但注册表自身的错误文本并不知道有 Task 正在进行。Raven 通过
+tool-owned content finalizer 附加 `<raven_task_recovery>` 提示 —— 这是在参数非法与取消场景下仍会执行、
+而输出投影完全不会执行的那个钩子。
+
+### 校验流水线
+
+有据可依的 Checkpoint 与 Completion 会把记录在案的 Source 送进内部的 `SourceVerifier` 接缝（生产用 Harness-web
+适配器，测试用确定性适配器）：
+
+1. 通过 Harness `web` 能力重新打开记录的 URL，受 `sourceCheckTimeoutMs` 约束。
+2. 拒绝偏离原始 source 身份的重定向，避免停靠域名或聚合站悄悄顶替一条引用。
+3. 把 HTML 呈现归一化为文本，再对有界摘录做字面匹配；不匹配时报告最接近的抓取片段，而不是只丢一个失败。
+4. 把截断的抓取判为**不可验证**，绝不判为编造 —— 被 fetch 契约截断的正文是检索限制，不是证据缺失。
+5. 单个 Source 超时按不可验证上报，而不是让整个 Checkpoint 一直挂着。
+
+Completion 会再次核对引用身份、关键 Claim 链接、Source 可达性与 Artifact 指纹，并追加带独立性判断的 Claim trace。
+
+### 包的边界与非目标
+
+Raven 是一个依赖极少的 ESM 包：一个 Cordis 插件、一个模型工具、一段 prompt section、一个纯 TypeScript Task engine、
+基于官方 `tool/result.meta` 的同会话紧凑重放，以及一个 `SourceVerifier` 接缝。
+
+它刻意不做 GUI、模型宿主、向量库、自定义调度器、通用 agent 框架和 Raven 自有数据库。长期目标、subagent、workflow、
+文件与持久化仍归 Harness 负责。
+
+设计依据与决策记录：
+
+- [`docs/design/architecture.md`](./docs/design/architecture.md)
+- [`docs/adr/0001-one-task-one-tool.md`](./docs/adr/0001-one-task-one-tool.md)
+- [`docs/adr/0002-llm-wiki-repo-format.md`](./docs/adr/0002-llm-wiki-repo-format.md)
+- [`docs/acceptance.md`](./docs/acceptance.md)
+- [`docs/reverse-engineering/assessment.md`](./docs/reverse-engineering/assessment.md)
+- [`CONTEXT.md`](./CONTEXT.md)
 
 ## 配置
 
@@ -138,35 +322,6 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 该命名空间的浏览器配置卡片暂缓：client module 系统要求 loader 的 lazy-CJS factory 格式的 `dsh.client` bundle，
 而生成它的 preset 并未在 Harness 仓库之外发布。
 
-## 会触发 Raven Task 的提问方式
-
-没有启动咒语，也没有独立的 Raven UI —— 用户照常和 Harness agent 对话即可。
-
-```text
-研究支持与反对这项政策的最强一手证据。先给我一份早期发现提纲，继续推进，
-最后精修成一份决策备忘录。
-```
-
-```text
-把这些笔记写成一篇面向工程管理者的 800 字文章。早点出初稿，方便我调整重点。
-```
-
-```text
-基于这些论文写出一节文献综述。保留分歧，不要编造参考文献。
-```
-
-```text
-用一个心智模型、两个例子和一次自测，教我理解闭包。
-```
-
-## 让成果活过本次会话：llm-wiki 导出
-
-Completion 之后调用 `action=export`，Raven 返回一个 [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) 仓库的页面
-字节：`wiki/queries` 下的 artifact 页、每个 Source 一张携带已验证摘录与验证回执的不可变 `wiki/raw` 页
-（`capture: excerpt-only`），以及一条可追加的 `wiki/log.md` 记录。对尚无 wiki 的仓库传 `init=true`，会一并生成
-`SCHEMA.md`、`index.md` 与 `log.md`。产物是合法的 llm-wiki，可被 Obsidian 及该 skill 自己的工具读取。返回的字节要
-原样写入 —— 每张 raw 页的摘要覆盖其自身正文，导出后再编辑会使其失效。
-
 ## 兼容性
 
 Raven v1 锚定并测试于：
@@ -176,28 +331,7 @@ Raven v1 锚定并测试于：
 - Node.js `^22.19.0 || >=24.0.0`；以及
 - pnpm `11.21.0`。
 
-## 架构
-
-Raven 是一个依赖极少的 ESM 包，包含：
-
-- 一个 Cordis 插件；
-- 一个 `raven_task` 模型工具；
-- 一段紧凑的 system prompt；
-- 一个纯 TypeScript 的 Task engine；
-- 通过官方 `tool/result.meta` 实现的同会话紧凑重放；以及
-- 一个内部 `SourceVerifier` 接缝，配 Harness-web 适配器与确定性测试适配器。
-
-它刻意不做 GUI、模型宿主、向量库、自定义调度器、通用 agent 框架和 Raven 自有数据库。长期目标、subagent、workflow、
-文件与持久化仍归 Harness 负责。
-
-设计依据与决策记录：
-
-- [`docs/design/architecture.md`](./docs/design/architecture.md)
-- [`docs/adr/0001-one-task-one-tool.md`](./docs/adr/0001-one-task-one-tool.md)
-- [`docs/adr/0002-llm-wiki-repo-format.md`](./docs/adr/0002-llm-wiki-repo-format.md)
-- [`docs/acceptance.md`](./docs/acceptance.md)
-- [`docs/reverse-engineering/assessment.md`](./docs/reverse-engineering/assessment.md)
-- [`CONTEXT.md`](./CONTEXT.md)
+DeepSeek Harness 目前仍是 RC，会有破坏性变更。Raven 不宣称兼容未经测试的 Harness 版本。
 
 ## 开发
 
@@ -255,8 +389,7 @@ import、apply 与模型工具调用。
 grounding 但没有任何有效 Claim 的 Task 会保持 active，而不会被标记为完成。
 
 **Code Mode（`run_code`）里能用吗？**
-可以。`run_code` 内的调用拿不到 result card，因此 Raven 会以 `dsh-raven-research/task-state` session event 发布同一份
-Task 记录，resume 时依旧能恢复 Task book。
+可以 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
 
 **它和"deep research"管线有什么不同？**
 管线把中间过程藏起来，最后甩给你一份报告。Raven 把中间过程作为可纠偏的 Checkpoint 发布在同一个 Task 上，并且以
@@ -267,10 +400,13 @@ Task 记录，resume 时依旧能恢复 Task book。
 Claim 的判断仍由 agent 负责。
 
 **发到 npm 了吗？**
-还没有。请按[快速开始](#快速开始)从仓库构建打包。
+还没有。请按[安装](#安装)从仓库构建打包。
 
 **支持哪些 DeepSeek Harness 版本？**
-只有[兼容性](#兼容性)中锚定的那个 RC。Harness 处于 developer preview，会有破坏性变更。
+只有[兼容性](#兼容性)中锚定的那个 RC。
+
+**怎么干净卸载？**
+删一行 preset 配置、移除一个依赖即可 —— 见[卸载](#卸载)。Raven 不会留下数据库、缓存或文件。
 
 ## v1 限制
 
