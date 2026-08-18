@@ -1,7 +1,7 @@
 {
   "name": "dsh-raven-research",
   "version": "0.1.0",
-  "description": "Progressive, source-grounded research, writing, and learning for DeepSeek Harness",
+  "description": "DeepSeek Harness plugin for progressive, source-grounded deep research, writing, and learning: steerable checkpoints and citations verified against retrieved sources",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -10,12 +10,28 @@
     "type": "git",
     "url": "git+https://github.com/wxxb789/dsh-raven-research.git"
   },
+  "homepage": "https://github.com/wxxb789/dsh-raven-research#readme",
+  "bugs": {
+    "url": "https://github.com/wxxb789/dsh-raven-research/issues"
+  },
   "keywords": [
+    "deepseek",
     "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
     "cordis",
-    "research",
-    "writing",
-    "learning"
+    "cordis-plugin",
+    "ai-agent",
+    "llm",
+    "deep-research",
+    "research-agent",
+    "citations",
+    "source-grounding",
+    "rag",
+    "academic-writing",
+    "writing-assistant",
+    "learning",
+    "typescript"
   ],
   "sideEffects": false,
   "type": "module",
