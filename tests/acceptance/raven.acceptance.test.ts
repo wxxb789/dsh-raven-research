@@ -38,6 +38,9 @@ function createHarness(web?: {
         return () => undefined
       },
     },
+    inject() {
+      return () => undefined
+    },
     get(name: string) {
       return name === 'web' ? web : undefined
     },

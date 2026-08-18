@@ -1,4 +1,7 @@
+import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+
 import { decodeRavenTaskState } from './codec.js'
+import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig } from './config.js'
 import { createRavenEngine, renderArtifact } from './engine.js'
 import { RAVEN_PROMPT } from './prompt.js'
 import { sameSourceIdentity } from './url.js'
@@ -13,6 +16,15 @@ import type {
 
 const META_KIND = 'dsh-raven-research/task-state'
 const TOOL_NAME = 'raven_task'
+/**
+ * Plugin-owned session event carrying the record `presentationMeta` publishes.
+ * A nested Code Mode sub-call has no result card, so the Harness registry computes
+ * no presentation metadata for it and the dispatch bridge logs rendered content
+ * without any. Task steps taken from inside a `run_code` program would then vanish
+ * from a resumed session while the in-memory book still looked complete. The event
+ * type intentionally repeats the metadata kind: both name the same durable record.
+ */
+const STATE_EVENT = META_KIND
 
 interface PromptSection extends Record<string, unknown> {
   readonly name: string
@@ -26,21 +38,46 @@ interface ToolOutput {
   presentationMeta(args: unknown, value: RavenToolValue): RavenTaskMeta
 }
 
+interface ContentBlockLike extends Record<string, unknown> {
+  readonly type: string
+}
+
+/** The normalized outcome the Harness hands to `finalizeContent`, narrowed to what Raven reads. */
+interface ToolOutcomeLike {
+  readonly isError: boolean
+  readonly content: readonly ContentBlockLike[]
+}
+
+/** Execution identity as `finalizeContent` sees it: no signal, no context deferral. */
+interface ToolIdentityLike {
+  readonly agent?: AgentLike
+  readonly arguments?: unknown
+}
+
 interface RavenToolDefinition extends Record<string, unknown> {
   readonly name: string
   readonly description: string
   readonly parameters: Record<string, unknown>
   readonly output: ToolOutput
   execute(args: unknown, exec: ToolExecutionLike): Promise<RavenToolValue>
+  finalizeContent(exec: ToolIdentityLike, result: ToolOutcomeLike): ContentBlockLike[] | undefined
+}
+
+interface SessionLike {
+  readonly events: readonly unknown[]
+  /** Absent on a host that exposes a read-only session view; durability then rests on result metadata alone. */
+  append?(type: string, data: unknown): unknown
 }
 
 interface AgentLike {
   readonly id: string
-  readonly session: { readonly events: readonly unknown[] }
+  readonly session: SessionLike
 }
 
 interface ToolExecutionLike {
   readonly agent?: AgentLike
+  /** Present only for a nested sub-call, such as a Code Mode dispatch inside `run_code`. */
+  readonly parent?: unknown
   readonly signal: AbortSignal
 }
 
@@ -71,6 +108,8 @@ interface PreStepDecision {
 interface ContextLike {
   readonly tools: { register(definition: RavenToolDefinition): () => void }
   readonly systemPrompt: { section(section: PromptSection): () => void }
+  /** Cordis dependency gate; the settings wiring rides it so an absent service simply never runs. */
+  inject(dependencies: readonly string[], callback: (ctx: ContextLike) => void): unknown
   get(name: string): unknown
   on(
     event: 'agent/pre-step',
@@ -101,15 +140,21 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+/** The durable Task record an event carries, from either publication path. */
+function readTaskStateMeta(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (event.type === 'tool/result') return asRecord(asRecord(event.data)?.meta)
+  if (event.type === STATE_EVENT) return asRecord(event.data)
+  return undefined
+}
+
 function restoreTaskBook(events: readonly unknown[]): SessionTaskBook {
   const book: SessionTaskBook = { tasks: new Map() }
   const currentDeclarations: string[] = []
   let lastStateTaskId: string | undefined
   for (const raw of events) {
     const event = asRecord(raw)
-    if (event?.type !== 'tool/result') continue
-    const data = asRecord(event.data)
-    const meta = asRecord(data?.meta)
+    if (event === undefined) continue
+    const meta = readTaskStateMeta(event)
     if (meta?.kind !== META_KIND || (meta.version !== 1 && meta.version !== 2)) continue
     const state = decodeRavenTaskState(meta.state)
     if (state === undefined) continue
@@ -131,6 +176,15 @@ function restoreTaskBook(events: readonly unknown[]): SessionTaskBook {
     book.currentTaskId = lastStateTaskId
   }
   return book
+}
+
+/** The session's Task book, restored from the durable log the first time this Agent is seen. */
+function taskBookFor(books: Map<string, SessionTaskBook>, agent: AgentLike): SessionTaskBook {
+  const existing = books.get(agent.id)
+  if (existing !== undefined) return existing
+  const restored = restoreTaskBook(agent.session.events)
+  books.set(agent.id, restored)
+  return restored
 }
 
 function requireAgent(exec: ToolExecutionLike): AgentLike {
@@ -255,25 +309,44 @@ function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise
   })
 }
 
-function sourceVerifier(ctx: ContextLike, now: () => string): SourceVerifier {
+function sourceVerifier(
+  ctx: ContextLike,
+  now: () => string,
+  settings: () => RavenConfig,
+): SourceVerifier {
   return {
     async verify(sources: readonly SourceCheckRequest[], signal: AbortSignal): Promise<readonly SourceCheckResult[]> {
-      const web = webCapability(ctx.get('web'))
-      if (web === undefined) {
+      const config = settings()
+      const unverifiable = (detail: string): readonly SourceCheckResult[] => {
         const checkedAt = now()
         return sources.map(source => ({
           sourceId: source.sourceId,
-          status: 'unavailable',
+          status: 'unavailable' as const,
           checkedAt,
-          detail: 'DeepSeek Harness web capability is not composed',
+          detail,
         }))
       }
+      if ((config.sourceVerification ?? 'remote') === 'structural-only') {
+        // Withholding the network is a deployment decision, so it reports the same
+        // way an absent capability does: unverifiable evidence, never silent trust.
+        return unverifiable(
+          'remote Source verification is disabled for this deployment'
+          + ' (raven-research.sourceVerification=structural-only)',
+        )
+      }
+      const web = webCapability(ctx.get('web'))
+      if (web === undefined) return unverifiable('DeepSeek Harness web capability is not composed')
+      const timeoutMs = config.sourceCheckTimeoutMs ?? 0
       const results: SourceCheckResult[] = []
       for (const source of sources) {
         signal.throwIfAborted()
         const checkedAt = now()
+        // One deadline per Source: a slow origin costs that Source its verification,
+        // not the whole Checkpoint.
+        const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+        const attempt = deadline === undefined ? signal : AbortSignal.any([signal, deadline])
         try {
-          const fetched = await settleWithAbort(web.fetch({ url: source.url }, signal), signal)
+          const fetched = await settleWithAbort(web.fetch({ url: source.url }, attempt), attempt)
           const httpReachable = fetched.statusCode >= 200 && fetched.statusCode < 400
           const resolvedUrl = new URL(fetched.url)
           const identityMatched = sameSourceIdentity(source.url, fetched.url)
@@ -312,12 +385,23 @@ function sourceVerifier(ctx: ContextLike, now: () => string): SourceVerifier {
             sourceId: source.sourceId,
             status: 'unavailable',
             checkedAt,
-            detail: compactError(error),
+            detail: deadline?.aborted === true
+              ? `the Source check exceeded the configured ${timeoutMs}ms deadline`
+              : compactError(error),
           })
         }
       }
       return results
     },
+  }
+}
+
+function taskStateMeta(value: RavenToolValue): RavenTaskMeta {
+  return {
+    kind: META_KIND,
+    version: 2,
+    currentTaskId: value.currentTaskId,
+    state: value.state,
   }
 }
 
@@ -426,20 +510,28 @@ function toolDefinition(
     output: {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, value) => [{ type: 'text', text: renderToolValue(value) }],
-      presentationMeta: (_args, value) => ({
-        kind: META_KIND,
-        version: 2,
-        currentTaskId: value.currentTaskId,
-        state: value.state,
-      }),
+      presentationMeta: (_args, value) => taskStateMeta(value),
+    },
+    finalizeContent(exec, result) {
+      // Total by contract: a throw here would replace a real outcome with a
+      // finalizer failure, so every step that can fail is contained.
+      try {
+        if (!result.isError) return undefined
+        const agent = exec.agent
+        if (agent === undefined) return undefined
+        const book = taskBookFor(books, agent)
+        const requested = asRecord(exec.arguments)?.taskId
+        const state = (typeof requested === 'string' ? book.tasks.get(requested) : undefined)
+          ?? (book.currentTaskId === undefined ? undefined : book.tasks.get(book.currentTaskId))
+        if (state === undefined) return undefined
+        return [...result.content, { type: 'text', text: taskRecoveryHint(state) }]
+      } catch {
+        return undefined
+      }
     },
     async execute(args, exec) {
       const agent = requireAgent(exec)
-      let book = books.get(agent.id)
-      if (book === undefined) {
-        book = restoreTaskBook(agent.session.events)
-        books.set(agent.id, book)
-      }
+      const book = taskBookFor(books, agent)
       const input = asRecord(args)
       const action = input?.action
       const requestedTaskId = typeof input?.taskId === 'string' ? input.taskId : undefined
@@ -470,9 +562,33 @@ function toolDefinition(
         && result.state.latestArtifact !== null
         ? { ...result, renderedArtifact: renderArtifact(result.state.latestArtifact, result.state.sources, result.state.claims) }
         : result
-      return { kind: 'raven-task-result', currentTaskId, ...withStatusArtifact }
+      const value: RavenToolValue = { kind: 'raven-task-result', currentTaskId, ...withStatusArtifact }
+      // A direct call publishes its state through `presentationMeta` on the durable
+      // tool result. A nested sub-call gets neither, so it publishes the same record
+      // itself; appending on both paths would store every Task twice.
+      if (exec.parent !== undefined) agent.session.append?.(STATE_EVENT, taskStateMeta(value))
+      return value
     },
   }
+}
+
+/**
+ * A failed call carries only the registry's error text, which cannot know that a
+ * Raven Task is open. Naming the Task, its phase, and the recovery action keeps a
+ * rejected call from reading as a reason to abandon the Task and start another one.
+ */
+function taskRecoveryHint(state: RavenTaskState): string {
+  return [
+    '<raven_task_recovery>',
+    `This call failed. Raven Task ${state.taskId} is unchanged at revision ${state.revision}.`,
+    `Outcome: ${state.outcome}. Phase: ${state.phase}. Steering revision: ${state.steeringRevision}.`,
+    `Evidence: ${state.sources.length} Source(s), ${state.claims.length} Claim(s), ${state.limitations.length} Limitation(s).`,
+    state.phase === 'stopped'
+      ? `Call raven_task action=resume taskId=${state.taskId} before steer or checkpoint.`
+      : `Correct this call against Task ${state.taskId} instead of starting a replacement Task;`
+        + ` re-read it with raven_task action=status taskId=${state.taskId}.`,
+    '</raven_task_recovery>',
+  ].join('\n')
 }
 
 function activeTaskContext(state: RavenTaskState): string {
@@ -497,21 +613,34 @@ function activeTaskContext(state: RavenTaskState): string {
 export const name = 'raven-research'
 export const inject = ['tools', 'systemPrompt'] as const
 
-export function apply(ctx: ContextLike): void {
+export function apply(ctx: ContextLike, config: RavenConfig = {}): void {
   const now = () => new Date().toISOString()
   const books = new Map<string, SessionTaskBook>()
-  const engine = createRavenEngine({ now, sourceVerifier: sourceVerifier(ctx, now) })
+  // The composition entry stays authoritative until a settings service attaches;
+  // the wiring then points this thunk at the resolved scope, and points it back at
+  // the entry if that service goes away. A Harness that serves no settings at all
+  // never runs any of it.
+  let settings: () => RavenConfig = () => config
+  installSettingsSection(
+    ctx as unknown as Parameters<typeof installSettingsSection>[0],
+    RAVEN_SETTINGS_NAMESPACE,
+    Config,
+    config,
+    {
+      setSource: (current) => { settings = current },
+      // Nothing is derived from the section: every Source check reads the thunk, so a
+      // committed change takes effect on the next check with nothing to re-judge.
+      onChange: () => undefined,
+    },
+  )
+  const engine = createRavenEngine({ now, sourceVerifier: sourceVerifier(ctx, now, () => settings()) })
 
   ctx.systemPrompt.section({ name: 'tool:raven-task', order: 116, text: RAVEN_PROMPT })
   ctx.tools.register(toolDefinition(engine, books))
   ctx.on('agent/pre-step', async ({ agent }, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
-    let book = books.get(agent.id)
-    if (book === undefined) {
-      book = restoreTaskBook(agent.session.events)
-      books.set(agent.id, book)
-    }
+    const book = taskBookFor(books, agent)
     const state = book.currentTaskId === undefined ? undefined : book.tasks.get(book.currentTaskId)
     if (state === undefined || (state.phase !== 'active' && state.phase !== 'stopped')) return decision
     return {

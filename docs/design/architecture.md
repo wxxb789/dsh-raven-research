@@ -348,14 +348,26 @@ The direct objective already fixes the test surfaces:
 3. **SourceVerifier Seam:** production-shaped and deterministic Adapters produce the
    same completion policy, including unknown citations, broken links, optional
    capability absence, cancellation, and independent partial-result survival.
+4. **Durable Task-state Seam:** a direct call publishes Task state as result metadata
+   and a nested Code Mode sub-call publishes the same record as a plugin-owned session
+   event; each path alone rebuilds the Task book on replay, and neither duplicates the
+   other. A host exposing a read-only session view keeps working on result metadata.
+5. **Failure Recovery Seam:** the tool-owned content finalizer attaches the addressed
+   Task's identity and recovery action to a failed outcome, including the invalid-argument
+   and cancellation paths the output projection never sees, and is total: a hostile
+   execution view preserves the content instead of replacing one failure with another.
+6. **Settings Seam:** the `raven-research` namespace registers with the composition entry
+   as its `base` layer; a resolved section takes effect on the next Source check, an
+   absent settings service leaves the entry authoritative, and no setting lowers a Task's
+   evidence floor.
 
 Tests assert canonical state and dispositions rather than brittle generated prose or
 a specific agent graph.
 
 ## Compatibility target
 
-Raven v1 targets DeepSeek Harness `0.1.0-rc.5` at commit
-`47f943859bef60e4160492346772ded9b24f765a`, Node `^22.19.0 || >=24`, and pnpm
+Raven v1 targets DeepSeek Harness `0.1.0-rc.7` at commit
+`99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`, Node `^22.19.0 || >=24`, and pnpm
 `11.21.0`. Release checks use built ESM and declarations, a real Loader-path smoke
 test against that checkout, and a packed clean-consumer install. The version is an
 RC, so the package claims only the exact tested compatibility family.

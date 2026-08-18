@@ -42,13 +42,50 @@ honestly.
 
 Raven v1 is pinned and tested against:
 
-- DeepSeek Harness `0.1.0-rc.5`;
-- Harness checkout commit `47f943859bef60e4160492346772ded9b24f765a`;
+- DeepSeek Harness `0.1.0-rc.7`;
+- Harness checkout commit `99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`;
 - Node.js `^22.19.0 || >=24.0.0`; and
 - pnpm `11.21.0`.
 
 DeepSeek Harness is currently an RC. Raven does not claim compatibility with untested
 Harness versions.
+
+Raven keeps one Task book per session and rebuilds it from the session log. A direct
+tool call carries the Task record as durable result metadata. A call made from inside a
+Code Mode `run_code` program receives no result card, so Raven publishes the same
+record itself as a `dsh-raven-research/task-state` session event. Either path restores
+the book when a session resumes, so a Task advanced from a program is not silently lost.
+
+A failed call reaches the model with the Task it has to correct against. The registry's
+own error text cannot know a Task is open, so Raven attaches a `<raven_task_recovery>`
+note through the tool-owned content finalizer — the one hook that also runs for
+invalid arguments and cancellations, where the output projection never runs at all.
+
+Raven takes two peer dependencies, both supplied by the Harness deployment:
+`@deepseek-ai/dsh-settings` and `@deepseek-ai/schemastery`.
+
+## Configuration
+
+Raven owns the `raven-research` settings namespace. Registering it is what exposes it:
+a Harness that composes a settings provider serves the namespace to every configuration
+surface, with nothing to add to the Harness itself.
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `sourceVerification` | `remote` | `structural-only` withholds every remote check. No Source can then be confirmed, so a Checkpoint that records Sources is refused with the policy named. Set it only where the network is genuinely out of reach. |
+| `sourceCheckTimeoutMs` | `0` | Deadline for one remote Source check, in milliseconds. `0` means no deadline. An exceeded deadline reports that one Source as unverifiable instead of holding the Checkpoint open. |
+
+No setting can lower a Task's evidence floor. Withholding checks makes evidence
+unverifiable, which refuses publication; it never turns unchecked Sources into
+confirmed ones.
+
+The composition entry in `cordis.yml` is the `base` layer. A value stored in the user's
+`settings.yaml` overrides it and takes effect on the next Source check, with no restart;
+if the settings service goes away, the composition entry becomes authoritative again.
+
+A browser card for this namespace is deferred: the client module system requires a
+`dsh.client` bundle in the loader's lazy-CJS factory format, and the preset that emits
+it is not published outside the Harness repository.
 
 ## Development
 

@@ -10,7 +10,13 @@
     "type": "git",
     "url": "git+https://github.com/wxxb789/dsh-raven-research.git"
   },
-  "keywords": ["deepseek-harness", "cordis", "research", "writing", "learning"],
+  "keywords": [
+    "deepseek-harness",
+    "cordis",
+    "research",
+    "writing",
+    "learning"
+  ],
   "sideEffects": false,
   "type": "module",
   "main": "lib/index.js",
@@ -43,7 +49,13 @@
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build",
     "check:release": "pnpm run check && pnpm run test:pack && pnpm run test:dsh"
   },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
   "devDependencies": {
+    "@deepseek-ai/dsh-settings": "0.0.1-rc.1",
+    "@deepseek-ai/schemastery": "3.18.1-rc.1",
     "@types/node": "22.20.0",
     "oxlint": "1.76.0",
     "tsdown": "0.22.2",
@@ -52,8 +64,8 @@
     "vitest": "4.1.8"
   },
   "dshRaven": {
-    "harnessVersion": "0.1.0-rc.5",
-    "harnessCommit": "47f943859bef60e4160492346772ded9b24f765a",
+    "harnessVersion": "0.1.0-rc.7",
+    "harnessCommit": "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca",
     "plane": "agent",
     "publishesService": false
   }

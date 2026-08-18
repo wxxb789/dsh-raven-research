@@ -30,6 +30,7 @@ describe('Source provenance integration', () => {
         },
       },
       systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
       get(name: string) {
         if (name !== 'web') return undefined
         return {
@@ -113,6 +114,7 @@ describe('Source provenance integration', () => {
         },
       },
       systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
       get(name: string) {
         if (name !== 'web') return undefined
         return {
@@ -198,6 +200,7 @@ describe('Source provenance integration', () => {
         },
       },
       systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
       get(name: string) {
         if (name !== 'web') return undefined
         return {
@@ -275,6 +278,7 @@ describe('Source provenance integration', () => {
         },
       },
       systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
       get(name: string) {
         if (name !== 'web') return undefined
         return {
@@ -373,6 +377,7 @@ describe('Source provenance integration', () => {
         },
       },
       systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
       get(name: string) {
         return name === 'web'
           ? { fetch: () => new Promise<never>(() => undefined) }

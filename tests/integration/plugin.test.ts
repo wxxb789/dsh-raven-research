@@ -20,6 +20,9 @@ describe('Raven Cordis plugin', () => {
           return vi.fn()
         },
       },
+      inject() {
+        return vi.fn()
+      },
       get() {
         return undefined
       },
@@ -80,6 +83,7 @@ describe('Raven Cordis plugin', () => {
           },
         },
         systemPrompt: { section() { return vi.fn() } },
+        inject() { return vi.fn() },
         get() { return undefined },
         on() { return vi.fn() },
       }
@@ -164,6 +168,7 @@ describe('Raven Cordis plugin', () => {
           },
         },
         systemPrompt: { section() { return vi.fn() } },
+        inject() { return vi.fn() },
         get() { return undefined },
         on() { return vi.fn() },
       } as never)
@@ -244,5 +249,222 @@ describe('Raven Cordis plugin', () => {
     expect(restoredA.state.checkpoints).toHaveLength(1)
     expect(restoredB.state.taskId).toBe(taskB.state.taskId)
     expect(restoredB.state.checkpoints).toHaveLength(1)
+  })
+
+  it('publishes durable Task state for a Code Mode sub-call that receives no result card', async () => {
+    interface TestTool extends Record<string, unknown> {
+      execute(args: unknown, exec: unknown): Promise<{
+        state: RavenPlugin.RavenTaskState
+        status: string
+      }>
+    }
+
+    const capture = () => {
+      let tool: TestTool | undefined
+      RavenPlugin.apply({
+        tools: {
+          register(definition: TestTool) {
+            tool = definition
+            return vi.fn()
+          },
+        },
+        systemPrompt: { section() { return vi.fn() } },
+        inject() { return vi.fn() },
+        get() { return undefined },
+        on() { return vi.fn() },
+      } as never)
+      if (tool === undefined) throw new Error('Raven tool did not register')
+      return tool
+    }
+
+    const tool = capture()
+    const signal = new AbortController().signal
+    const events: unknown[] = []
+    const agent = {
+      id: 'code-mode-session',
+      session: {
+        events,
+        append(type: string, data: unknown) {
+          events.push({ type, data: JSON.parse(JSON.stringify(data)) as unknown })
+        },
+      },
+    }
+    // The opaque token the Harness registry sets only for a nested dispatch.
+    const parent = Symbol('run_code')
+
+    const started = await tool.execute({
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Write one short note.',
+    }, { agent, signal })
+    expect(events).toHaveLength(0)
+
+    await tool.execute({
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'A draft published from a program.',
+      artifact: 'A draft written from a Code Mode program.',
+    }, { agent, signal, parent })
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'dsh-raven-research/task-state' }),
+    ])
+
+    const reloaded = capture()
+    const restored = await reloaded.execute({ action: 'status' }, {
+      agent: { id: 'code-mode-session', session: { events } },
+      signal,
+    })
+    expect(restored.state.taskId).toBe(started.state.taskId)
+    expect(restored.state.checkpoints).toHaveLength(1)
+    expect(restored.state.latestArtifact).toBe('A draft written from a Code Mode program.')
+  })
+
+  it('keeps a nested sub-call working when the host exposes a read-only session view', async () => {
+    interface TestTool extends Record<string, unknown> {
+      execute(args: unknown, exec: unknown): Promise<{
+        state: RavenPlugin.RavenTaskState
+        status: string
+      }>
+    }
+
+    let tool: TestTool | undefined
+    RavenPlugin.apply({
+      tools: {
+        register(definition: TestTool) {
+          tool = definition
+          return vi.fn()
+        },
+      },
+      systemPrompt: { section() { return vi.fn() } },
+      inject() { return vi.fn() },
+      get() { return undefined },
+      on() { return vi.fn() },
+    } as never)
+    if (tool === undefined) throw new Error('Raven tool did not register')
+
+    const started = await tool.execute({
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Write one short note without a durable session view.',
+    }, {
+      agent: { id: 'read-only-session', session: { events: [] } },
+      signal: new AbortController().signal,
+      parent: Symbol('run_code'),
+    })
+
+    expect(started.state.phase).toBe('active')
+  })
+
+  it('adds a Task-aware recovery hint to a failed outcome and preserves every other one', async () => {
+    interface TestTool extends Record<string, unknown> {
+      execute(args: unknown, exec: unknown): Promise<{
+        state: RavenPlugin.RavenTaskState
+        status: string
+      }>
+      output: { presentationMeta(args: unknown, value: unknown): unknown }
+      finalizeContent(exec: unknown, result: unknown): Array<{ type: string; text?: string }> | undefined
+    }
+
+    let tool: TestTool | undefined
+    RavenPlugin.apply({
+      tools: {
+        register(definition: TestTool) {
+          tool = definition
+          return vi.fn()
+        },
+      },
+      systemPrompt: { section() { return vi.fn() } },
+      inject() { return vi.fn() },
+      get() { return undefined },
+      on() { return vi.fn() },
+    } as never)
+    if (tool === undefined) throw new Error('Raven tool did not register')
+
+    const signal = new AbortController().signal
+    const events: unknown[] = []
+    const agent = { id: 'recovery-session', session: { events } }
+    const started = await tool.execute({
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Write one short note.',
+    }, { agent, signal })
+    events.push({ type: 'tool/result', data: { meta: tool.output.presentationMeta({}, started) } })
+
+    const failure = { isError: true, content: [{ type: 'text', text: 'raven_task: invalid arguments' }] }
+    const hinted = tool.finalizeContent({ agent, arguments: { action: 'not-an-action' } }, failure)
+    expect(hinted?.[0]).toEqual(failure.content[0])
+    expect(hinted?.[1]?.text).toContain('<raven_task_recovery>')
+    expect(hinted?.[1]?.text).toContain(started.state.taskId)
+    expect(hinted?.[1]?.text).toContain('instead of starting a replacement Task')
+
+    // Success keeps the rendered content the output projection already produced.
+    expect(tool.finalizeContent({ agent, arguments: {} }, {
+      isError: false,
+      content: [{ type: 'text', text: 'rendered' }],
+    })).toBeUndefined()
+    // Without an Agent there is no Task book, and without a Task there is nothing
+    // the registry's own error text does not already say.
+    expect(tool.finalizeContent({ arguments: {} }, failure)).toBeUndefined()
+    expect(tool.finalizeContent({
+      agent: { id: 'untouched-session', session: { events: [] } },
+      arguments: {},
+    }, failure)).toBeUndefined()
+    // Totality: a hostile execution view degrades to preserving the content.
+    expect(tool.finalizeContent({
+      agent: { id: 'hostile-session', get session(): never { throw new Error('no session') } },
+      arguments: {},
+    }, failure)).toBeUndefined()
+  })
+
+  it('names the Task the failed call addressed rather than the current one', async () => {
+    interface TestTool extends Record<string, unknown> {
+      execute(args: unknown, exec: unknown): Promise<{
+        state: RavenPlugin.RavenTaskState
+        status: string
+      }>
+      finalizeContent(exec: unknown, result: unknown): Array<{ type: string; text?: string }> | undefined
+    }
+
+    let tool: TestTool | undefined
+    RavenPlugin.apply({
+      tools: {
+        register(definition: TestTool) {
+          tool = definition
+          return vi.fn()
+        },
+      },
+      systemPrompt: { section() { return vi.fn() } },
+      inject() { return vi.fn() },
+      get() { return undefined },
+      on() { return vi.fn() },
+    } as never)
+    if (tool === undefined) throw new Error('Raven tool did not register')
+
+    const signal = new AbortController().signal
+    const agent = { id: 'two-task-session', session: { events: [] } }
+    const first = await tool.execute({
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Write note one.',
+    }, { agent, signal })
+    await tool.execute({ action: 'stop', taskId: first.state.taskId }, { agent, signal })
+    const second = await tool.execute({
+      action: 'start',
+      outcome: 'learning',
+      grounding: 'none',
+      request: 'Teach one concept.',
+    }, { agent, signal })
+
+    const failure = { isError: true, content: [{ type: 'text', text: 'raven_task: invalid arguments' }] }
+    const addressed = tool.finalizeContent({ agent, arguments: { taskId: first.state.taskId } }, failure)
+    expect(addressed?.[1]?.text).toContain(first.state.taskId)
+    expect(addressed?.[1]?.text).toContain('action=resume')
+    const current = tool.finalizeContent({ agent, arguments: {} }, failure)
+    expect(current?.[1]?.text).toContain(second.state.taskId)
   })
 })

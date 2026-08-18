@@ -47,12 +47,31 @@ await mkdir(staging, { recursive: true })
 await mkdir(packed, { recursive: true })
 await mkdir(consumer, { recursive: true })
 await mkdir(isolatedHome, { recursive: true })
-await writeFile(userConfig, [
-  'registry=https://registry.npmjs.org/',
-  'manage-package-manager-versions=false',
-  'package-manager-strict=false',
-  '',
-].join('\n'))
+// The consumer install reaches a registry for Raven's peers. RAVEN_PACK_USERCONFIG
+// lets a deployment behind a mirror supply its own credentials without either
+// storing them here or inheriting the developer's whole npm configuration.
+const inheritedUserConfig = process.env.RAVEN_PACK_USERCONFIG
+if (inheritedUserConfig !== undefined && inheritedUserConfig.trim().length > 0) {
+  await cp(inheritedUserConfig, userConfig)
+} else {
+  await writeFile(userConfig, [
+    'registry=https://registry.npmjs.org/',
+    'manage-package-manager-versions=false',
+    'package-manager-strict=false',
+    '',
+  ].join('\n'))
+}
+const rootManifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+  devDependencies?: Record<string, string>
+  peerDependencies?: Record<string, string>
+}
+// A Harness deployment supplies Raven's peers; the clean consumer models that by
+// installing them at the versions this repository builds and tests against.
+const peerSpecifiers = Object.keys(rootManifest.peerDependencies ?? {}).map((peer) => {
+  const pinned = rootManifest.devDependencies?.[peer]
+  if (pinned === undefined) throw new Error(`peer "${peer}" has no pinned devDependency to install`)
+  return `${peer}@${pinned}`
+})
 try {
   for (const file of [
     '.npmignore',
@@ -111,6 +130,8 @@ try {
     private: true,
     type: 'module',
   }, null, 2))
+  // The tarball itself installs offline with nothing auto-installed: Raven ships
+  // no runtime dependency of its own.
   await runProcess('pnpm', [
     'add',
     './raven.tgz',
@@ -125,6 +146,23 @@ try {
     timeoutMs: 120_000,
     env: isolatedPnpmEnv(),
   })
+  // Then the deployment supplies the peers. Auto-install carries their own peers
+  // (Cordis and its invariants), which is what a Harness deployment already has;
+  // this install re-links the tree, so it has to run after the tarball, not before.
+  if (peerSpecifiers.length > 0) {
+    await runProcess('pnpm', [
+      'add',
+      ...peerSpecifiers,
+      '--ignore-scripts',
+      '--config.auto-install-peers=true',
+      '--store-dir',
+      isolatedStore,
+    ], {
+      cwd: consumer,
+      timeoutMs: 180_000,
+      env: isolatedPnpmEnv(),
+    })
+  }
   const consumerLock = await readFile(join(consumer, 'pnpm-lock.yaml'), 'utf8')
   assert.doesNotMatch(consumerLock, /[A-Za-z]:[\\/]/, 'consumer lockfile contains a Windows absolute path')
   assert.doesNotMatch(consumerLock, /(?:file|link):\//, 'consumer lockfile contains a POSIX absolute file/link path')
@@ -138,15 +176,20 @@ assert.equal('default' in Raven, false)
 assert.equal(Raven.name, 'raven-research')
 const tools = []
 const sections = []
+const injected = []
 Raven.apply({
   tools: { register(value) { tools.push(value); return () => undefined } },
   systemPrompt: { section(value) { sections.push(value); return () => undefined } },
+  inject(dependencies) { injected.push(dependencies); return () => undefined },
   get() { return undefined },
   on() { return () => undefined },
 })
 assert.equal(tools.length, 1)
 assert.equal(tools[0].name, 'raven_task')
 assert.equal(sections.length, 1)
+assert.deepEqual(injected, [['settings']])
+assert.equal(Raven.RAVEN_SETTINGS_NAMESPACE, 'raven-research')
+assert.deepEqual(Raven.Config({}), { sourceVerification: 'remote', sourceCheckTimeoutMs: 0 })
 const value = await tools[0].execute(
   { action: 'start', outcome: 'learning', grounding: 'none', request: 'Teach one concept.' },
   { agent: { id: 'packed-session', session: { events: [] } }, signal: new AbortController().signal },

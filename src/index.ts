@@ -1,4 +1,6 @@
 export * from './domain.js'
+export { Config, RAVEN_SETTINGS_NAMESPACE, SOURCE_VERIFICATION_MODES } from './config.js'
+export type { RavenConfig, SourceVerificationMode } from './config.js'
 export { createRavenEngine, renderArtifact } from './engine.js'
 export { RAVEN_PROMPT } from './prompt.js'
 export { apply, inject, name } from './plugin.js'

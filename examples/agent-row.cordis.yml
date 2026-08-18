@@ -2,3 +2,9 @@
 # Do not edit a shipped DeepSeek Harness preset.
 - id: raven-research
   name: dsh-raven-research
+  # Optional. This entry is the base layer of the `raven-research` settings namespace;
+  # a value stored in the user's settings.yaml overrides it while a settings provider
+  # is composed, and the entry becomes authoritative again if that provider goes away.
+  # config:
+  #   sourceVerification: remote
+  #   sourceCheckTimeoutMs: 30000
