@@ -175,10 +175,24 @@ export interface RavenExecution {
   readonly signal: AbortSignal
 }
 
+/** One llm-wiki file Raven renders for the agent to write. */
+export interface RavenWikiPage {
+  readonly path: string
+  readonly content: string
+}
+
+/** Pages to write plus one entry to append; `log.md` is append-only, so it is never a page here. */
+export interface RavenWikiEmission {
+  readonly pages: readonly RavenWikiPage[]
+  readonly logEntry: string
+}
+
 export interface RavenDispatchResult {
   readonly status: 'active' | 'needs-revision' | 'stopped' | 'completed' | 'completed-with-limits'
   readonly state: RavenTaskState
   readonly message: string
   readonly issues: readonly string[]
   readonly renderedArtifact?: string
+  readonly wiki?: RavenWikiEmission
 }
+

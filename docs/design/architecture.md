@@ -304,6 +304,30 @@ available to the main agent. The prompt may recommend them proportionately, but 
 Raven package neither wraps nor requires them. Their topology never enters Raven
 Task state.
 
+## Durable output: llm-wiki emission
+
+A Task that only renders into chat evaporates at session end, so `export` projects the
+Task into llm-wiki page bytes: one artifact page under `wiki/queries`, one immutable
+`wiki/raw` page per Source, and one appendable `wiki/log.md` entry. `init` additionally
+seeds `SCHEMA.md`, `index.md`, and `log.md`, so a repository Raven starts is a valid
+llm-wiki rather than a Raven-specific format.
+
+The projection is pure and Raven never writes files; the agent writes the returned bytes
+with ordinary Harness file tools. That keeps the plugin free of a filesystem dependency
+and keeps the write inside the agent's existing approval and sandbox boundary.
+
+Frontmatter is derived, never asserted. `sources:` comes from the registered Sources,
+`contested: true` from Claim contradiction links, and `confidence` from the Task phase and
+its recorded limits — an unfinished Artifact is `low`, any limitation or deferral caps it
+at `medium`, so a page cannot silently harden into wiki fact. Each `raw/` page carries
+`capture: excerpt-only` and a `sha256` over exactly its own body: Raven stores the verified
+excerpt plus its verification receipt rather than a full page capture, so the digest detects
+drift in what was stored and the difference from a full-body llm-wiki ingest stays visible.
+
+Scale, quality, and insight machinery from that skill — lint/health scripts, index
+regeneration, tier promotion, stub materialization, log rotation — is deferred. See
+`docs/adr/0002-llm-wiki-repo-format.md`.
+
 ## Cordis lifetime and composition
 
 The plugin declares `inject = ["tools", "systemPrompt"]`. It registers one scoped

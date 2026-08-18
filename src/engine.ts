@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
+import { renderWikiPages } from './wiki.js'
 
 import {
   CLAIM_DISPOSITIONS,
@@ -53,6 +54,7 @@ const ACTION_FIELDS: Record<string, readonly string[]> = {
   status: ['action', 'taskId'],
   stop: ['action', 'taskId', 'reason'],
   resume: ['action', 'taskId'],
+  export: ['action', 'taskId', 'title', 'tags', 'init'],
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -714,6 +716,48 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           ...(state.latestArtifact === null
             ? {}
             : { renderedArtifact: renderArtifact(state.latestArtifact, state.sources, state.claims) }),
+        }
+      }
+
+      if (action === 'export') {
+        const state = requireTask(previous, args.taskId)
+        if (state.latestArtifact === null) {
+          return {
+            status: 'needs-revision',
+            state,
+            message: `Raven Task ${state.taskId} has no Artifact to export yet.`,
+            issues: ['publish a Checkpoint before exporting the Task to a wiki'],
+          }
+        }
+        const title = optionalBoundedText(args.title, 'title', RAVEN_LIMITS.summaryChars)
+          ?? state.request.split('\n')[0]?.slice(0, 120)
+          ?? state.taskId
+        const tags = optionalArray(args.tags, 'tags').map((raw) => {
+          const tag = requiredText(raw, 'tags[]')
+          if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(tag)) {
+            throw new TypeError('tags[] must be lowercase letters, digits, or hyphens and appear in the wiki taxonomy')
+          }
+          return tag
+        })
+        if (args.init !== undefined && typeof args.init !== 'boolean') {
+          throw new TypeError('init must be a boolean')
+        }
+        const wiki = renderWikiPages(
+          state,
+          renderArtifact(state.latestArtifact, state.sources, state.claims),
+          {
+            title,
+            tags: tags.length > 0 ? tags : [state.outcome],
+            init: args.init === true,
+            at: options.now(),
+          },
+        )
+        return {
+          status: state.phase === 'active' ? 'active' : state.phase,
+          state,
+          message: `Exported Raven Task ${state.taskId} as ${wiki.pages.length} llm-wiki page(s); write them and append the log entry.`,
+          issues: [],
+          wiki,
         }
       }
 

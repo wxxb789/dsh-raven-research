@@ -301,7 +301,7 @@ describe('Raven end-to-end acceptance', () => {
     const properties = raven.tool.parameters.properties as Record<string, unknown>
     const action = properties.action as { enum: string[] }
 
-    expect(action.enum).toEqual(['start', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume'])
+    expect(action.enum).toEqual(['start', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'])
     expect(action.enum).not.toContain('confirm')
     expect(action.enum).not.toContain('approve')
     expect(String(raven.sections[0]?.text)).toContain('Do not ask for approval between')

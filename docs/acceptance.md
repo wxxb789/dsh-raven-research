@@ -19,7 +19,8 @@ agent topology.
 | Criterion | Evidence |
 |---|---|
 | Clean install, load, and run against intended Harness | `pnpm test:pack` creates an external staging project with no `lib/`, links only the pinned toolchain, exercises real `prepack` without mutating the repository build, enforces the exact tarball allowlist, and installs it with an isolated pnpm home/store in a second external consumer before import/apply/execute; `pnpm test:dsh` requires the exact clean Harness commit, loads a real `cordis.yml` through Loader + Include, executes start/checkpoint/complete through the real tool registry and `ctx.web` seam, and removes the composition to verify disposal. |
-| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, 45 Vitest tests, and tsdown ESM/declaration build. |
+| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, 62 Vitest tests, and tsdown ESM/declaration build. |
+| Durable output as a valid llm-wiki | `tests/unit/wiki.test.ts` exports a completed Task as llm-wiki bytes: an artifact page with frontmatter, sources, and contested marking; one immutable `raw/` page per Source whose `sha256` covers exactly its own body; an appendable log entry; and SCHEMA/index/log seeds only under `init`. Raven emits bytes and never writes files, so the repository stays readable by the llm-wiki skill and Obsidian. |
 | Evidence-backed Keep / Change / Drop assessment | `docs/reverse-engineering/assessment.md` synthesizes the Hermes profile, nana-research, Harness, and skill-corpus reports — `hermes-research-skills.md` (all 258 files across 18 research skills), `hermes-r-round-references.md`, and `hermes-nana-wiki.md` — and maps preserved mechanisms to source files and line ranges. |
 | Four first-class Outcomes | `tests/acceptance/raven.acceptance.test.ts` has end-to-end scenarios for `research`, `general-writing`, `academic-writing`, and `learning` through the same tool and Task state. |
 | Progressive research and mid-run correction | The first acceptance scenario verifies one initial Source and publishes an active early Artifact before the second Source, broader collection, and final Completion verification; it then continues research, applies `steer`, emits a revised Checkpoint, and completes with the original Task ID. |
@@ -47,6 +48,12 @@ agent topology.
   - automatic Claim deferral after dependency failure;
   - dependency-aware partial failure;
   - stop/resume preservation.
+- `tests/unit/wiki.test.ts`
+  - llm-wiki artifact page with frontmatter, sources, and contested marking;
+  - immutable `raw/` page whose `sha256` covers exactly its own body;
+  - appendable log entry that never rewrites `wiki/log.md`;
+  - SCHEMA/index/log seeds only under `init`;
+  - confidence reported from Task phase and recorded limits.
 - `tests/unit/codec.test.ts`
   - complete JSON round-trip;
   - unknown-version and unknown-field rejection;
@@ -79,8 +86,15 @@ agent topology.
 
 ```powershell
 $env:DSH_CHECKOUT = 'Q:\repos\deepseek-harness'
+# Only where the default public registry is unreachable: point the clean-consumer
+# install at a reachable mirror without inheriting the developer's whole npm config.
+$env:RAVEN_PACK_USERCONFIG = "$HOME\.config\.npmrc"
 pnpm check:release
 ```
 
 This command runs the repository gate, the packed clean-consumer install, and the
 real Harness compatibility smoke test.
+
+`pnpm test:pack` reaches a registry on purpose: Raven declares its Harness packages as
+peer dependencies, and the clean consumer proves a real deployment can resolve them.
+An unreachable registry therefore fails that gate rather than silently skipping it.

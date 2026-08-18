@@ -411,6 +411,14 @@ function renderToolValue(value: RavenToolValue): string {
     `Task: ${value.state.taskId} | Outcome: ${value.state.outcome} | Phase: ${value.state.phase} | Revision: ${value.state.revision}`,
   ]
   if (value.issues.length > 0) lines.push(`Issues:\n${value.issues.map(issue => `- ${issue}`).join('\n')}`)
+  if (value.wiki !== undefined) {
+    // Exact bytes: the agent writes these files, so the render must not summarize them.
+    for (const page of value.wiki.pages) {
+      lines.push(`Write \`${page.path}\`:\n\n\`\`\`markdown\n${page.content}\`\`\``)
+    }
+    lines.push(`Append to \`wiki/log.md\`:\n\n\`\`\`markdown\n${value.wiki.logEntry}\`\`\``)
+    return lines.join('\n\n')
+  }
   if (value.renderedArtifact !== undefined) lines.push(value.renderedArtifact)
   else if (value.state.latestArtifact !== null && value.status === 'stopped') {
     lines.push(renderArtifact(value.state.latestArtifact, value.state.sources, value.state.claims))
@@ -480,8 +488,15 @@ function toolDefinition(
       additionalProperties: false,
       required: ['action'],
       properties: {
-        action: { type: 'string', enum: ['start', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume'] },
+        action: { type: 'string', enum: ['start', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'] },
         taskId: { type: 'string' },
+        title: { type: 'string', description: `Wiki page title for export, at most ${RAVEN_LIMITS.summaryChars} characters; defaults to the Task request.` },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Wiki tags for export; lowercase letters, digits, and hyphens, and each must exist in the wiki tag taxonomy.',
+        },
+        init: { type: 'boolean', description: 'Export also seeds wiki/SCHEMA.md, wiki/index.md, and wiki/log.md for a new repository.' },
         outcome: { type: 'string', enum: ['research', 'general-writing', 'academic-writing', 'learning'] },
         request: { type: 'string', description: `Task request, at most ${RAVEN_LIMITS.requestChars} characters.` },
         grounding: { type: 'string', enum: ['required', 'optional', 'none'] },
