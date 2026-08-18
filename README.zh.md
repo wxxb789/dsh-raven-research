@@ -1,18 +1,31 @@
+<div align="center">
+
+<img src="assets/banner.svg" width="820" alt="dsh-raven-research —— start / checkpoint / steer / complete / export：DeepSeek Harness 中一个渐进式、可溯源的 Task">
+
 # dsh-raven-research
 
-[English](README.md) | 中文
+**在 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 里，
+用一个渐进式、可溯源的 Task 完成深度研究、写作与学习。**
 
-[![CI](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml/badge.svg)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
-[![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-dsh--plugin-1a7f37)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.0-rc.7](https://img.shields.io/badge/harness-0.1.0--rc.7-4c6ef5)](https://github.com/deepseek-ai/deepseek-harness)
-[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6)](https://www.typescriptlang.org/)
-[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/wxxb789/dsh-raven-research?style=social)](https://github.com/wxxb789/dsh-raven-research/stargazers)
+中途可纠偏的早期 Checkpoint · 每条引用都对照真实抓取的字节校验 · 不引入第二个 agent runtime
 
-**Raven 把一次 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 会话变成一个渐进式、可溯源的
-Task，用于深度研究（deep research）、通用写作、学术写作与学习辅导 —— 过程中持续产出可用的 Checkpoint，支持中途纠偏，
-并且每一条引用都要与真实抓取到的字节对得上。**
+[![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
+[![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
+[![Harness 0.1.0-rc.7](https://img.shields.io/badge/harness-0.1.0--rc.7-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/wxxb789/dsh-raven-research?style=flat-square&logo=github&color=e3b341)](https://github.com/wxxb789/dsh-raven-research/stargazers)
+
+[English](README.md) · 中文
+
+[**TL;DR**](#tldr) · [**安装**](#安装) · [**使用**](#使用) · [**工作原理**](#工作原理-under-the-hood) · [**配置**](#配置) · [**FAQ**](#faq)
+
+</div>
+
+> [!IMPORTANT]
+> **v1 developer preview。** 锚定并针对 DeepSeek Harness `0.1.0-rc.7` 测试，而 Harness 本身仍是 RC、会有破坏性变更。
+> 尚未发布到 npm —— 请[从源码安装](#安装)。
 
 ## TL;DR
 
@@ -26,23 +39,6 @@ Task，用于深度研究（deep research）、通用写作、学术写作与学
 - **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再往用户自有的 agent preset 里加一行。
   见[安装](#安装)。
 - **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语，也没有独立 UI。见[使用](#使用)。
-- **状态：** v1 developer preview，锚定 Harness `0.1.0-rc.7`，尚未发布到 npm。
-
-## 目录
-
-- [为什么需要 Raven](#为什么需要-raven)
-- [特性](#特性)
-- [安装](#安装)
-- [升级](#升级)
-- [卸载](#卸载)
-- [使用](#使用)
-- [工作原理 (under the hood)](#工作原理-under-the-hood)
-- [配置](#配置)
-- [兼容性](#兼容性)
-- [开发](#开发)
-- [FAQ](#faq)
-- [v1 限制](#v1-限制)
-
 ## 为什么需要 Raven
 
 一个有分量的研究或写作请求，通常会掉进一条很长的批处理管线：你等很久，拿到一大块文字，而引用只是模型"记得"的字符串。
@@ -128,8 +124,9 @@ tarball 自身没有任何运行时依赖，两个 peer 由部署提供。发布
   #   sourceCheckTimeoutMs: 30000
 ```
 
-不要改 Harness 自带的 preset。Raven 不发布进程服务，因此这一行不需要 isolate realm；它消费 preset 作用域内的
-`tools` 与 `systemPrompt` 注册表，并在可以重开 source 时动态获取 `web`。
+> [!WARNING]
+> **不要改 Harness 自带的 preset** —— 先复制一份。Raven 不发布进程服务，因此这一行不需要 isolate realm；它消费
+> preset 作用域内的 `tools` 与 `systemPrompt` 注册表，并在可以重开 source 时动态获取 `web`。
 
 ### 4. 验证
 
@@ -161,7 +158,8 @@ pnpm 以完整性哈希标识本地 tarball，因此即便版本号没变也会�
   一个 RC，不宣称兼容未经测试的版本。
 - **配置。** 存在用户 `settings.yaml` 里的 `raven-research` 取值会在重装后保留；preset 的 `config:` 块只是 base 层。
 
-进行中的 Task 存在会话里而不是磁盘上。换构建之前，先把它完成或 `export` 出来。
+> [!WARNING]
+> 进行中的 Task 存在会话里而不是磁盘上。换构建之前，先把它完成或 `export` 出来。
 
 ## 卸载
 
@@ -294,7 +292,10 @@ Raven 是一个依赖极少的 ESM 包：一个 Cordis 插件、一个模型工�
 它刻意不做 GUI、模型宿主、向量库、自定义调度器、通用 agent 框架和 Raven 自有数据库。长期目标、subagent、workflow、
 文件与持久化仍归 Harness 负责。
 
-设计依据与决策记录：
+<details>
+<summary><b>设计依据与决策记录</b></summary>
+
+<br>
 
 - [`docs/design/architecture.md`](./docs/design/architecture.md)
 - [`docs/adr/0001-one-task-one-tool.md`](./docs/adr/0001-one-task-one-tool.md)
@@ -302,6 +303,8 @@ Raven 是一个依赖极少的 ESM 包：一个 Cordis 插件、一个模型工�
 - [`docs/acceptance.md`](./docs/acceptance.md)
 - [`docs/reverse-engineering/assessment.md`](./docs/reverse-engineering/assessment.md)
 - [`CONTEXT.md`](./CONTEXT.md)
+
+</details>
 
 ## 配置
 
@@ -313,8 +316,9 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 | `sourceVerification` | `remote` | `structural-only` 会屏蔽所有远程检查。此时没有 Source 能被确认，因此记录了 Source 的 Checkpoint 会被拒绝并指明该策略。仅在网络确实不可达时使用。 |
 | `sourceCheckTimeoutMs` | `0` | 单个远程 Source 检查的期限（毫秒）。`0` 表示不设期限。超时会把该 Source 报告为不可验证，而不是让 Checkpoint 一直挂着。 |
 
-任何配置都不能降低 Task 的证据底线。屏蔽检查只会让证据变成"不可验证"从而拒绝发布，绝不会把未检查的 Source 变成
-已确认。
+> [!NOTE]
+> 任何配置都不能降低 Task 的证据底线。屏蔽检查只会让证据变成"不可验证"从而拒绝发布，绝不会把未检查的 Source
+> 变成已确认。
 
 `cordis.yml` 中的组合条目是 `base` 层。用户 `settings.yaml` 中的值会覆盖它，并在下一次 Source 检查时生效、无需重启；
 若 settings 服务消失，组合条目重新成为权威。
@@ -360,7 +364,10 @@ pnpm check:release
 
 ### 验收覆盖
 
-Vitest 套件覆盖全部四种 Outcome，并验证 Raven：
+<details>
+<summary><b>Vitest 套件覆盖全部四种 Outcome，并验证 Raven ……</b></summary>
+
+<br>
 
 - 在最终校验前就暴露可用的中间研究 Artifact；
 - 在中途纠偏后继续精修同一个 Task；
@@ -371,6 +378,8 @@ Vitest 套件覆盖全部四种 Outcome，并验证 Raven：
 - 要求 Completion 字节等于最新一次 steer 之后的 Checkpoint；
 - 区分 Completion 与工具/worker 终止；以及
 - stop 与 resume 不丢失 Task、证据与 Artifact。
+
+</details>
 
 `pnpm test:pack` 会创建一个不含 `lib/` 的隔离 staging 工程，只链接锚定的开发工具链，跑真实的 `prepack` 生命周期
 而不污染仓库构建，校验恰好六个文件的白名单，并在第二个外部消费者中用隔离的 pnpm home/store 安装 tarball，然后执行
@@ -433,5 +442,10 @@ Claim 的判断仍由 agent 负责。
 
 ---
 
-**关键词：** DeepSeek Harness 插件 · dsh-plugin · Cordis plugin · AI 研究 agent · deep research · 深度研究 ·
-可溯源写作 · 引用校验 · 学术写作助手 · 学习助手 · RAG · 幻觉抑制 · TypeScript · Node.js
+<div align="center">
+
+[TL;DR](#tldr) · [安装](#安装) · [升级](#升级) · [卸载](#卸载) · [使用](#使用) · [工作原理](#工作原理-under-the-hood) · [FAQ](#faq)
+
+<sub><b>关键词：</b> DeepSeek Harness 插件 · dsh-plugin · Cordis plugin · AI 研究 agent · deep research · 深度研究 · 可溯源写作 · 引用校验 · 学术写作助手 · 学习助手 · RAG · 幻觉抑制 · TypeScript · Node.js</sub>
+
+</div>

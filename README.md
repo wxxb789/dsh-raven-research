@@ -1,18 +1,31 @@
+<div align="center">
+
+<img src="assets/banner.svg" width="820" alt="dsh-raven-research — start, checkpoint, steer, complete, export: one progressive, source-grounded Task inside DeepSeek Harness">
+
 # dsh-raven-research
 
-English | [中文](README.zh.md)
+**One progressive, source-grounded Task for deep research, writing, and learning —
+inside [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).**
 
-[![CI](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml/badge.svg)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
-[![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-dsh--plugin-1a7f37)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.0-rc.7](https://img.shields.io/badge/harness-0.1.0--rc.7-4c6ef5)](https://github.com/deepseek-ai/deepseek-harness)
-[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6)](https://www.typescriptlang.org/)
-[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/wxxb789/dsh-raven-research?style=social)](https://github.com/wxxb789/dsh-raven-research/stargazers)
+Early checkpoints you can steer mid-run · citations verified against the bytes actually retrieved · no second agent runtime.
 
-**Raven turns a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) session into one progressive,
-source-grounded Task for deep research, general writing, academic writing, and learning — with early useful
-checkpoints, mid-run steering, and citations verified against the bytes actually retrieved.**
+[![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
+[![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
+[![Harness 0.1.0-rc.7](https://img.shields.io/badge/harness-0.1.0--rc.7-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/wxxb789/dsh-raven-research?style=flat-square&logo=github&color=e3b341)](https://github.com/wxxb789/dsh-raven-research/stargazers)
+
+English · [中文](README.zh.md)
+
+[**TL;DR**](#tldr) · [**Install**](#install) · [**Usage**](#usage) · [**How it works**](#how-it-works-under-the-hood) · [**Configuration**](#configuration) · [**FAQ**](#faq)
+
+</div>
+
+> [!IMPORTANT]
+> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.0-rc.7`, which is itself an RC and ships
+> breaking changes. Not published to npm yet — [install from a checkout](#install).
 
 ## TL;DR
 
@@ -26,23 +39,6 @@ checkpoints, mid-run steering, and citations verified against the bytes actually
 - **Install:** `pnpm build && pnpm pack`, add the tarball to your Harness deployment, append one row to a
   user-authored agent preset. See [Install](#install).
 - **Use:** talk to the Harness agent normally — no launch phrase, no separate UI. See [Usage](#usage).
-- **Status:** v1 developer preview, pinned to Harness `0.1.0-rc.7`, not published to npm yet.
-
-## Contents
-
-- [Why Raven](#why-raven)
-- [Features](#features)
-- [Install](#install)
-- [Upgrade](#upgrade)
-- [Uninstall](#uninstall)
-- [Usage](#usage)
-- [How it works (under the hood)](#how-it-works-under-the-hood)
-- [Configuration](#configuration)
-- [Compatibility](#compatibility)
-- [Development](#development)
-- [FAQ](#faq)
-- [v1 limits](#v1-limits)
-
 ## Why Raven
 
 A substantial research or writing request usually disappears into a long batch pipeline: you wait, you get one wall
@@ -133,9 +129,10 @@ Create or copy a **user-authored** agent preset, then append the row from
   #   sourceCheckTimeoutMs: 30000
 ```
 
-Do not edit a shipped Harness preset. Raven publishes no process service, so this row needs no isolate realm. It
-consumes the preset's scoped `tools` and `systemPrompt` registries and obtains `web` dynamically when source
-reopening is available.
+> [!WARNING]
+> **Never edit a shipped Harness preset** — copy it first. Raven publishes no process service, so this row needs no
+> isolate realm. It consumes the preset's scoped `tools` and `systemPrompt` registries and obtains `web` dynamically
+> when source reopening is available.
 
 ### 4. Verify
 
@@ -168,7 +165,8 @@ Two things to check before upgrading:
 - **Settings.** `raven-research` values stored in the user's `settings.yaml` survive the reinstall; the preset
   `config:` block is only the base layer.
 
-An in-flight Task lives in the session, not on disk. Finish it or `export` it before swapping the build.
+> [!WARNING]
+> An in-flight Task lives in the session, not on disk. Finish it or `export` it before swapping the build.
 
 ## Uninstall
 
@@ -316,7 +314,10 @@ It deliberately excludes a GUI, model host, vector store, custom scheduler, gene
 Raven-owned database. Long-running goals, subagents, workflows, files, and persistence remain Harness
 responsibilities.
 
-Design evidence and decisions:
+<details>
+<summary><b>Design evidence and decisions</b></summary>
+
+<br>
 
 - [`docs/design/architecture.md`](./docs/design/architecture.md)
 - [`docs/adr/0001-one-task-one-tool.md`](./docs/adr/0001-one-task-one-tool.md)
@@ -328,6 +329,8 @@ Design evidence and decisions:
 - [`docs/reverse-engineering/hermes-nana-wiki.md`](./docs/reverse-engineering/hermes-nana-wiki.md)
 - [`CONTEXT.md`](./CONTEXT.md)
 
+</details>
+
 ## Configuration
 
 Raven owns the `raven-research` settings namespace. Registering it is what exposes it: a Harness that composes a
@@ -338,8 +341,9 @@ settings provider serves the namespace to every configuration surface.
 | `sourceVerification` | `remote` | `structural-only` withholds every remote check. No Source can then be confirmed, so a Checkpoint that records Sources is refused with the policy named. Set it only where the network is genuinely out of reach. |
 | `sourceCheckTimeoutMs` | `0` | Deadline for one remote Source check, in milliseconds. `0` means no deadline. An exceeded deadline reports that one Source as unverifiable instead of holding the Checkpoint open. |
 
-No setting can lower a Task's evidence floor. Withholding checks makes evidence unverifiable, which refuses
-publication; it never turns unchecked Sources into confirmed ones.
+> [!NOTE]
+> No setting can lower a Task's evidence floor. Withholding checks makes evidence unverifiable, which refuses
+> publication; it never turns unchecked Sources into confirmed ones.
 
 The composition entry in `cordis.yml` is the `base` layer. A value stored in the user's `settings.yaml` overrides it
 and takes effect on the next Source check, with no restart; if the settings service goes away, the composition entry
@@ -389,7 +393,10 @@ pnpm check:release
 
 ### Acceptance coverage
 
-The Vitest suite covers all four Outcomes and verifies that Raven:
+<details>
+<summary><b>The Vitest suite covers all four Outcomes and verifies that Raven …</b></summary>
+
+<br>
 
 - exposes a useful intermediate research Artifact before final verification;
 - refines the same Task after a mid-run user correction;
@@ -400,6 +407,8 @@ The Vitest suite covers all four Outcomes and verifies that Raven:
 - requires Completion bytes to equal the latest post-steer Checkpoint;
 - distinguishes Completion from tool/worker termination; and
 - stops and resumes without losing the Task, evidence, or Artifact.
+
+</details>
 
 `pnpm test:pack` creates an isolated staging project with no `lib/`, links only the pinned development toolchain,
 exercises the real `prepack` lifecycle without mutating the repository build, checks the exact six-file allowlist,
@@ -470,6 +479,10 @@ If Raven saves you a rewrite, a ⭐ helps other DeepSeek Harness users find it �
 
 ---
 
-**Keywords:** DeepSeek Harness plugin · dsh-plugin · Cordis plugin · AI research agent · deep research · agentic
-research · source grounding · citation verification · evidence-based writing · academic writing assistant ·
-learning assistant · retrieval-augmented generation · hallucination mitigation · TypeScript · Node.js
+<div align="center">
+
+[TL;DR](#tldr) · [Install](#install) · [Upgrade](#upgrade) · [Uninstall](#uninstall) · [Usage](#usage) · [How it works](#how-it-works-under-the-hood) · [FAQ](#faq)
+
+<sub><b>Keywords:</b> DeepSeek Harness plugin · dsh-plugin · Cordis plugin · AI research agent · deep research · agentic research · source grounding · citation verification · evidence-based writing · academic writing assistant · learning assistant · retrieval-augmented generation · hallucination mitigation · TypeScript · Node.js</sub>
+
+</div>
