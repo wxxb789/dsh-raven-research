@@ -98,3 +98,9 @@ real Harness compatibility smoke test.
 `pnpm test:pack` reaches a registry on purpose: Raven declares its Harness packages as
 peer dependencies, and the clean consumer proves a real deployment can resolve them.
 An unreachable registry therefore fails that gate rather than silently skipping it.
+
+Where the feed is an authenticated mirror whose token expires, refresh the credential
+before the gate rather than treating the fetch failure as a Raven defect. On a machine
+whose shell provides an `aznpm`-style refresh helper, that helper rewrites the user
+`.npmrc` and the mirrored config `RAVEN_PACK_USERCONFIG` points at. A shell started
+without the user profile must load it before the helper is callable.
