@@ -46,7 +46,14 @@ interface RavenEngine {
   ): Promise<RavenDispatchResult>
 }
 
-const ACTION_FIELDS: Record<string, readonly string[]> = {
+/**
+ * The exact field set each action accepts. This is the single source of truth
+ * for both halves of the boundary: the runtime rejects anything outside it, and
+ * the model-facing parameter schema derives its per-action guidance from it. A
+ * flat schema that advertises every action's fields at once invites a caller to
+ * send one action's field to another, so the two must never drift apart.
+ */
+export const ACTION_FIELDS: Record<string, readonly string[]> = {
   start: ['action', 'outcome', 'request', 'grounding'],
   checkpoint: ['action', 'taskId', 'stage', 'summary', 'artifact', 'sources', 'claims', 'failures'],
   steer: ['action', 'taskId', 'correction'],
@@ -66,7 +73,15 @@ function record(value: unknown, label: string): Record<string, unknown> {
 
 function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const unknown = Object.keys(value).filter(key => !allowed.includes(key))
-  if (unknown.length > 0) throw new TypeError(`${label} contains unknown field(s): ${unknown.join(', ')}`)
+  // Name the accepted set too: a caller that only learns which field was wrong
+  // has to guess the right one, and the fields it guesses are usually another
+  // action's fields.
+  if (unknown.length > 0) {
+    throw new TypeError(
+      `${label} contains unknown field(s): ${unknown.join(', ')}. `
+      + `Accepted field(s): ${allowed.join(', ')}`,
+    )
+  }
 }
 
 function requiredText(value: unknown, label: string): string {

@@ -2,7 +2,7 @@ import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 
 import { decodeRavenTaskState } from './codec.js'
 import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig } from './config.js'
-import { createRavenEngine, renderArtifact } from './engine.js'
+import { ACTION_FIELDS, createRavenEngine, renderArtifact } from './engine.js'
 import { RAVEN_PROMPT } from './prompt.js'
 import { sameSourceIdentity } from './url.js'
 import { RAVEN_LIMITS } from './domain.js'
@@ -16,6 +16,13 @@ import type {
 
 const META_KIND = 'dsh-raven-research/task-state'
 const TOOL_NAME = 'raven_task'
+/**
+ * Rendered from the runtime allow-list so the advertised per-action field sets
+ * cannot drift from the ones the engine enforces.
+ */
+const ACTION_FIELD_SUMMARY = Object.entries(ACTION_FIELDS)
+  .map(([action, fields]) => `${action}(${fields.filter(field => field !== 'action').join(', ') || 'no other field'})`)
+  .join('; ')
 /**
  * Plugin-owned session event carrying the record `presentationMeta` publishes.
  * A nested Code Mode sub-call has no result card, so the Harness registry computes
@@ -488,37 +495,53 @@ function toolDefinition(
       additionalProperties: false,
       required: ['action'],
       properties: {
-        action: { type: 'string', enum: ['start', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'] },
-        taskId: { type: 'string' },
-        title: { type: 'string', description: `Wiki page title for export, at most ${RAVEN_LIMITS.summaryChars} characters; defaults to the Task request.` },
+        action: {
+          type: 'string',
+          enum: ['start', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'],
+          description: `Requested Task action. Each action accepts only its own fields — ${ACTION_FIELD_SUMMARY} — and any other field fails the call.`,
+        },
+        taskId: { type: 'string', description: 'Existing Raven Task ID. Required by every action except start.' },
+        title: { type: 'string', description: `Wiki page title for export, at most ${RAVEN_LIMITS.summaryChars} characters; defaults to the Task request. Only with action=export.` },
         tags: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Wiki tags for export; lowercase letters, digits, and hyphens, and each must exist in the wiki tag taxonomy.',
+          description: 'Wiki tags for export; lowercase letters, digits, and hyphens, and each must exist in the wiki tag taxonomy. Only with action=export.',
         },
-        init: { type: 'boolean', description: 'Export also seeds wiki/SCHEMA.md, wiki/index.md, and wiki/log.md for a new repository.' },
-        outcome: { type: 'string', enum: ['research', 'general-writing', 'academic-writing', 'learning'] },
-        request: { type: 'string', description: `Task request, at most ${RAVEN_LIMITS.requestChars} characters.` },
-        grounding: { type: 'string', enum: ['required', 'optional', 'none'] },
-        stage: { type: 'string', enum: ['discover', 'read', 'analyze', 'draft', 'verify', 'refine'] },
-        summary: { type: 'string', description: `Checkpoint summary, at most ${RAVEN_LIMITS.summaryChars} characters.` },
-        artifact: { type: 'string', description: `Artifact bytes, at most ${RAVEN_LIMITS.artifactChars} characters.` },
-        correction: { type: 'string', description: `Steering correction, at most ${RAVEN_LIMITS.correctionChars} characters.` },
-        reason: { type: 'string', description: `Stop reason, at most ${RAVEN_LIMITS.limitationDetailChars} characters.` },
+        init: { type: 'boolean', description: 'Export also seeds wiki/SCHEMA.md, wiki/index.md, and wiki/log.md for a new repository. Only with action=export.' },
+        outcome: {
+          type: 'string',
+          enum: ['research', 'general-writing', 'academic-writing', 'learning'],
+          description: 'Kind of useful result this Task owes the user. Only with action=start.',
+        },
+        request: { type: 'string', description: `Task request, at most ${RAVEN_LIMITS.requestChars} characters. Only with action=start.` },
+        grounding: {
+          type: 'string',
+          enum: ['required', 'optional', 'none'],
+          description: 'Evidence policy for this Task. Only with action=start; defaults from the outcome.',
+        },
+        stage: {
+          type: 'string',
+          enum: ['discover', 'read', 'analyze', 'draft', 'verify', 'refine'],
+          description: 'Stage this Checkpoint reports. Only with action=checkpoint.',
+        },
+        summary: { type: 'string', description: `Checkpoint summary, at most ${RAVEN_LIMITS.summaryChars} characters. Only with action=checkpoint; completion carries no summary of its own.` },
+        artifact: { type: 'string', description: `Artifact bytes, at most ${RAVEN_LIMITS.artifactChars} characters. With action=checkpoint or action=complete; completion must carry the exact latest Checkpoint bytes.` },
+        correction: { type: 'string', description: `Steering correction, at most ${RAVEN_LIMITS.correctionChars} characters. Only with action=steer.` },
+        reason: { type: 'string', description: `Stop reason, at most ${RAVEN_LIMITS.limitationDetailChars} characters. Only with action=stop.` },
         sources: {
           type: 'array',
           items: SOURCE_SCHEMA,
-          description: `Source contributions; Task state retains at most ${RAVEN_LIMITS.sources}.`,
+          description: `Source contributions; Task state retains at most ${RAVEN_LIMITS.sources}. Only with action=checkpoint.`,
         },
         claims: {
           type: 'array',
           items: CLAIM_SCHEMA,
-          description: `Claim contributions; Task state retains at most ${RAVEN_LIMITS.claims}.`,
+          description: `Claim contributions; Task state retains at most ${RAVEN_LIMITS.claims}. Only with action=checkpoint.`,
         },
         failures: {
           type: 'array',
           items: FAILURE_SCHEMA,
-          description: `Failure contributions; Task state retains at most ${RAVEN_LIMITS.limitations} Limitations.`,
+          description: `Failure contributions; Task state retains at most ${RAVEN_LIMITS.limitations} Limitations. Only with action=checkpoint.`,
         },
       },
     },
