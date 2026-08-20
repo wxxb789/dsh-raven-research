@@ -36,7 +36,7 @@ describe('Raven Cordis plugin', () => {
     expect(RavenPlugin.name).toBe('raven-research')
     expect(RavenPlugin.inject).toEqual(['tools', 'systemPrompt'])
 
-    RavenPlugin.apply(ctx)
+    RavenPlugin.apply(ctx as never)
 
     expect(tools).toHaveLength(1)
     expect(tools[0]?.name).toBe('raven_task')

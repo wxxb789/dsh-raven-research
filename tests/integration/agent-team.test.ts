@@ -87,13 +87,13 @@ describe('Raven inside an Agent Team', () => {
     const fromLead = await tool.execute({ action: 'status' }, { agent: lead, signal })
     expect(fromLead.state.latestArtifact).toBe('A draft the whole Team owns.')
 
-    const decision = await preStep({ agent: teammate }, () => Promise.resolve({ kind: 'enter' }))
+    const decision = await preStep({ agent: teammate }, () => Promise.resolve({ kind: 'enter', messages: [] }))
     const injected = decision.messages?.[0]?.content[0]?.text ?? ''
     expect(injected).toContain('Agent Team member "reader"')
     expect(injected).toContain('never start a competing Task')
 
     // The Lead is told to continue its Task, without the teammate-only instruction.
-    const leadDecision = await preStep({ agent: lead }, () => Promise.resolve({ kind: 'enter' }))
+    const leadDecision = await preStep({ agent: lead }, () => Promise.resolve({ kind: 'enter', messages: [] }))
     expect(leadDecision.messages?.[0]?.content[0]?.text ?? '').not.toContain('Agent Team member')
   })
 

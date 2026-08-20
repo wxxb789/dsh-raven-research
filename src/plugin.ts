@@ -1,6 +1,12 @@
 import { Buffer } from 'node:buffer'
 
+import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { WebFetchResult, WebRuntime, WebSearchResult } from '@deepseek-ai/dsh-web'
 
 import { decodeRavenTaskState } from './codec.js'
 import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig } from './config.js'
@@ -56,104 +62,13 @@ const LEGACY_STATE_EVENT = META_KIND
 /** Handoff slots kept while sub-dispatches settle; bounded so a lost waterfall cannot leak. */
 const PENDING_LOG_STATE_LIMIT = 64
 
-interface PromptSection extends Record<string, unknown> {
-  readonly name: string
-  readonly order: number
-  readonly text: string
-}
-
-interface ToolOutput {
-  readonly schema: { readonly type: 'object'; readonly additionalProperties: true }
-  render(args: unknown, value: RavenToolValue): Array<{ readonly type: 'text'; readonly text: string }>
-  presentationMeta(args: unknown, value: RavenToolValue): RavenTaskMeta
-}
-
-interface ContentBlockLike extends Record<string, unknown> {
-  readonly type: string
-}
-
-/** The normalized outcome the Harness hands to `finalizeContent`, narrowed to what Raven reads. */
-interface ToolOutcomeLike {
-  readonly isError: boolean
-  readonly content: readonly ContentBlockLike[]
-}
-
-/** Execution identity as `finalizeContent` sees it: no signal, no context deferral. */
-interface ToolIdentityLike {
-  readonly agent?: AgentLike
-  readonly arguments?: unknown
-}
-
-interface RavenToolDefinition extends Record<string, unknown> {
-  readonly name: string
-  readonly description: string
-  readonly parameters: Record<string, unknown>
-  readonly output: ToolOutput
-  execute(args: unknown, exec: ToolExecutionLike): Promise<RavenToolValue>
-  finalizeContent(exec: ToolIdentityLike, result: ToolOutcomeLike): ContentBlockLike[] | undefined
-}
-
-/**
- * Raven reads the session log and never writes to it: every durable record rides a
- * Harness-owned event, so a read-only session view costs nothing.
- */
-interface SessionLike {
-  readonly events: readonly unknown[]
-}
-
-interface AgentLike {
-  readonly id: string
-  readonly session: SessionLike
-}
-
-interface ToolExecutionLike {
-  readonly agent?: AgentLike
-  /** Present only for a nested sub-call, such as a Code Mode dispatch inside `run_code`. */
-  readonly parent?: unknown
-  /** For a nested sub-call this is the sub-call id the durable-log waterfall reports. */
-  readonly callId?: unknown
-  readonly signal: AbortSignal
-}
-
-interface WebFetchResultLike {
-  readonly url: string
-  readonly statusCode: number
-  readonly body: {
-    readonly kind: 'html' | 'text'
-    readonly content: string
-  }
-  /** The Harness fetch contract caps body size; a cut-off tail is a retrieval limit, not missing evidence. */
-  readonly truncated?: boolean
-}
-
-interface WebSearchSourceLike {
-  readonly url: string
-  readonly title?: string
-  readonly snippet?: string
-  readonly publishedAt?: string
-}
-
-interface WebSearchResultLike {
-  /** Provider-generated answer text, when the selected backend produces any. */
-  readonly content?: string
-  readonly sources: readonly WebSearchSourceLike[]
-  readonly truncated: boolean
-}
-
-interface WebLike {
-  fetch(request: { readonly url: string }, signal?: AbortSignal): Promise<WebFetchResultLike>
-  /** The same seam's search half; a deployment may compose fetch without a search provider. */
-  search?(
-    request: { readonly query: string; readonly maxResults?: number },
-    signal?: AbortSignal,
-  ): Promise<WebSearchResultLike>
-}
-
 /**
  * The parts of the experimental `ctx.agentTeams` service Raven reads, mirrored
  * structurally on purpose: the Harness Team packages are private and unpublished,
  * so an out-of-repo plugin may consume the capability only by duck typing and must
- * keep working in every deployment that composes no Team at all.
+ * keep working in every deployment that composes no Team at all. Every other seam
+ * Raven touches is imported from its published Service Definition package instead,
+ * so a contract change breaks the build rather than the running Task.
  */
 interface TeamMembershipLike {
   /** The Team id, which is the Lead Agent's session id. */
@@ -164,43 +79,6 @@ interface TeamMembershipLike {
 
 interface AgentTeamsLike {
   tryMembership(agent: unknown): TeamMembershipLike | undefined
-}
-
-interface PreStepInput {
-  readonly agent: AgentLike
-}
-
-interface PreStepDecision {
-  readonly kind: 'reject' | 'enter'
-  readonly messages?: readonly unknown[]
-}
-
-/** One settled `run_code` sub-dispatch, as the durable-log waterfall presents it. */
-interface CodeDispatchLogLike {
-  readonly agent: AgentLike
-  readonly subCallId: string
-  readonly name: string
-  readonly isError: boolean
-  readonly content: readonly ContentBlockLike[]
-}
-
-interface ContextLike {
-  readonly tools: { register(definition: RavenToolDefinition): () => void }
-  readonly systemPrompt: { section(section: PromptSection): () => void }
-  /** Cordis dependency gate; the settings wiring rides it so an absent service simply never runs. */
-  inject(dependencies: readonly string[], callback: (ctx: ContextLike) => void): unknown
-  get(name: string): unknown
-  on(
-    event: 'agent/pre-step',
-    listener: (input: PreStepInput, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>,
-  ): unknown
-  on(
-    event: 'tools/code-dispatch-log',
-    listener: (
-      dispatch: CodeDispatchLogLike,
-      next: () => Promise<ContentBlockLike[]>,
-    ) => Promise<ContentBlockLike[]>,
-  ): unknown
 }
 
 interface RavenToolValue extends RavenDispatchResult {
@@ -298,7 +176,7 @@ function mergeSessionRecords(book: SessionTaskBook, events: readonly unknown[]):
  * capability. Contained on every path: an experimental service must never be able
  * to fail a Raven Task step, and its absence is the ordinary case.
  */
-function teamMembership(ctx: ContextLike, agent: AgentLike): TeamMembershipLike | undefined {
+function teamMembership(ctx: Context, agent: Agent): TeamMembershipLike | undefined {
   const service = asRecord(ctx.get('agentTeams'))
   if (typeof service?.tryMembership !== 'function') return undefined
   try {
@@ -315,15 +193,15 @@ function teamMembership(ctx: ContextLike, agent: AgentLike): TeamMembershipLike 
  * start a competing one, which is exactly the single-identity contract a Raven Task
  * already promises across workers.
  */
-function bookKeyFor(agent: AgentLike, membership: TeamMembershipLike | undefined): string {
+function bookKeyFor(agent: Agent, membership: TeamMembershipLike | undefined): string {
   return membership === undefined ? `agent:${agent.id}` : `team:${membership.id}`
 }
 
 /** The Task book for this Agent, folding its own durable log in the first time it is seen. */
 function taskBookFor(
-  ctx: ContextLike,
+  ctx: Context,
   books: Map<string, SessionTaskBook>,
-  agent: AgentLike,
+  agent: Agent,
 ): SessionTaskBook {
   const key = bookKeyFor(agent, teamMembership(ctx, agent))
   const existing = books.get(key)
@@ -336,7 +214,7 @@ function taskBookFor(
   return book
 }
 
-function requireAgent(exec: ToolExecutionLike): AgentLike {
+function requireAgent(exec: ToolRunContext): Agent {
   if (exec.agent === undefined) throw new Error('raven_task requires an Agent-backed session')
   return exec.agent
 }
@@ -346,16 +224,21 @@ function compactError(error: unknown): string {
   return text.replaceAll(/\s+/g, ' ').slice(0, 300)
 }
 
-function webCapability(value: unknown): WebLike | undefined {
-  const candidate = asRecord(value)
-  return typeof candidate?.fetch === 'function' ? value as WebLike : undefined
-}
-
-function searchCapability(value: unknown): Required<Pick<WebLike, 'search'>> | undefined {
-  const candidate = asRecord(value)
-  return typeof candidate?.search === 'function'
-    ? value as Required<Pick<WebLike, 'search'>>
-    : undefined
+/**
+ * The two halves of the web seam are probed separately because a deployment may
+ * compose one without the other, and they answer different questions: fetch
+ * confirms recorded evidence, search finds candidates. Requiring both would make
+ * a fetch-only deployment silently lose Source verification.
+ *
+ * The structural probe also survives the version skew an out-of-repo plugin
+ * lives with: `ctx.get` answers from a service store this package does not own,
+ * so a renamed or reshaped seam degrades to "not composed" rather than crashing
+ * a Task step on a missing method.
+ */
+function webHalf<K extends 'fetch' | 'search'>(ctx: Context, method: K): Pick<WebRuntime, K> | undefined {
+  const service: unknown = ctx.get('web')
+  const candidate = asRecord(service)
+  return typeof candidate?.[method] === 'function' ? service as Pick<WebRuntime, K> : undefined
 }
 
 /** Identity used to fold one candidate returned by several queries into one Lead. */
@@ -388,7 +271,7 @@ interface MutableLead {
 
 /** One query's outcome; a failure is data, not a rejection, so siblings still land. */
 type QueryOutcome =
-  | { readonly query: string; readonly result: WebSearchResultLike }
+  | { readonly query: string; readonly result: WebSearchResult }
   | { readonly query: string; readonly detail: string }
 
 /**
@@ -453,7 +336,7 @@ function mergeLeads(outcomes: readonly QueryOutcome[], cap: number): {
  * own deadline, and a failure becomes a recorded Limitation instead of a batch
  * error. Caller cancellation stays a real cancellation on every path.
  */
-function sourceSearcher(ctx: ContextLike, settings: () => RavenConfig): SourceSearcher {
+function sourceSearcher(ctx: Context, settings: () => RavenConfig): SourceSearcher {
   return {
     async search(request: LeadSearchRequest, signal: AbortSignal): Promise<LeadSearchResult> {
       const config = settings()
@@ -470,7 +353,7 @@ function sourceSearcher(ctx: ContextLike, settings: () => RavenConfig): SourceSe
           + ' (raven-research.sourceDiscovery=disabled)',
         )
       }
-      const web = searchCapability(ctx.get('web'))
+      const web = webHalf(ctx, 'search')
       if (web === undefined) return unavailable('DeepSeek Harness web search capability is not composed')
       const timeoutMs = config.searchTimeoutMs ?? 0
       signal.throwIfAborted()
@@ -553,7 +436,7 @@ const BLOCK_LEVEL_TAGS = new Set([
   'summary', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
 ])
 
-function fetchedVisibleText(result: WebFetchResultLike): string {
+function fetchedVisibleText(result: WebFetchResult): string {
   if (result.body.kind === 'text') return result.body.content
   return result.body.content
     .replaceAll(/<!--[\s\S]*?-->/g, ' ')
@@ -628,7 +511,7 @@ function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise
 }
 
 function sourceVerifier(
-  ctx: ContextLike,
+  ctx: Context,
   now: () => string,
   settings: () => RavenConfig,
 ): SourceVerifier {
@@ -652,7 +535,7 @@ function sourceVerifier(
           + ' (raven-research.sourceVerification=structural-only)',
         )
       }
-      const web = webCapability(ctx.get('web'))
+      const web = webHalf(ctx, 'fetch')
       if (web === undefined) return unverifiable('DeepSeek Harness web capability is not composed')
       const timeoutMs = config.sourceCheckTimeoutMs ?? 0
       const results: SourceCheckResult[] = []
@@ -806,11 +689,11 @@ const FAILURE_SCHEMA = {
 } as const
 
 function toolDefinition(
-  ctx: ContextLike,
+  ctx: Context,
   engine: ReturnType<typeof createRavenEngine>,
   books: Map<string, SessionTaskBook>,
   pendingLogState: Map<string, RavenTaskMeta>,
-): RavenToolDefinition {
+): ToolDefinition {
   return {
     name: TOOL_NAME,
     description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover Leads with a batch of complementary queries; publish useful Checkpoints before exhaustive work; apply user corrections with steer on the same taskId; record inspected Sources, Claims, and partial failures; stop/resume without loss; and complete only against the exact final Artifact. Inside an Agent Team the Task belongs to the Team, so every member continues the same one. Normal research stages need no approval.',
@@ -876,8 +759,11 @@ function toolDefinition(
     },
     output: {
       schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => [{ type: 'text', text: renderToolValue(value) }],
-      presentationMeta: (_args, value) => taskStateMeta(value),
+      // The registry types a canonical tool value as lossless JSON, which is
+      // exactly what it is on the wire; only this tool knows the shape it wrote,
+      // so the two casts are the boundary, not a shortcut around it.
+      render: (_args, value) => [{ type: 'text', text: renderToolValue(value as unknown as RavenToolValue) }],
+      presentationMeta: (_args, value) => taskStateMeta(value as unknown as RavenToolValue) as unknown as JsonValue,
     },
     finalizeContent(exec, result) {
       // Total by contract: a throw here would replace a real outcome with a
@@ -994,7 +880,7 @@ function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike
 export const name = 'raven-research'
 export const inject = ['tools', 'systemPrompt'] as const
 
-export function apply(ctx: ContextLike, config: RavenConfig = {}): void {
+export function apply(ctx: Context, config: RavenConfig = {}): void {
   const now = () => new Date().toISOString()
   const books = new Map<string, SessionTaskBook>()
   // The composition entry stays authoritative until a settings service attaches;
@@ -1052,12 +938,13 @@ export function apply(ctx: ContextLike, config: RavenConfig = {}): void {
     return {
       kind: 'enter',
       messages: [
-        ...(decision.messages ?? []),
-        {
-          role: 'user',
+        ...decision.messages,
+        // The factory mints the message identity the loop and the durable log
+        // both key on; a hand-built literal silently omitted it.
+        createUserMessage({
           content: [{ type: 'text', text: activeTaskContext(state, teamMembership(ctx, agent)) }],
           source: { kind: 'plugin', plugin: name, form: 'instructions' },
-        },
+        }),
       ],
     }
   })
