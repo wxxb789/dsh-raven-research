@@ -1,16 +1,23 @@
+import { Buffer } from 'node:buffer'
+
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 
 import { decodeRavenTaskState } from './codec.js'
 import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig } from './config.js'
-import { ACTION_FIELDS, createRavenEngine, renderArtifact } from './engine.js'
+import { ACTION_FIELDS, createRavenEngine, renderArtifact, renderLeads, type RavenSearchLimits } from './engine.js'
 import { RAVEN_PROMPT } from './prompt.js'
-import { sameSourceIdentity } from './url.js'
+import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { RAVEN_LIMITS } from './domain.js'
 import type {
+  LeadSearchFailure,
+  LeadSearchRequest,
+  LeadSearchResult,
   RavenDispatchResult,
+  RavenLead,
   RavenTaskState,
   SourceCheckRequest,
   SourceCheckResult,
+  SourceSearcher,
   SourceVerifier,
 } from './domain.js'
 
@@ -24,14 +31,30 @@ const ACTION_FIELD_SUMMARY = Object.entries(ACTION_FIELDS)
   .map(([action, fields]) => `${action}(${fields.filter(field => field !== 'action').join(', ') || 'no other field'})`)
   .join('; ')
 /**
- * Plugin-owned session event carrying the record `presentationMeta` publishes.
  * A nested Code Mode sub-call has no result card, so the Harness registry computes
  * no presentation metadata for it and the dispatch bridge logs rendered content
- * without any. Task steps taken from inside a `run_code` program would then vanish
- * from a resumed session while the in-memory book still looked complete. The event
- * type intentionally repeats the metadata kind: both name the same durable record.
+ * without any. Task steps taken from inside a `run_code` program would otherwise
+ * vanish from a resumed session while the in-memory book still looked complete.
+ *
+ * The record therefore rides the durable copy of the sub-dispatch itself, through
+ * the `tools/code-dispatch-log` waterfall, inside an HTML comment appended to the
+ * logged content. It deliberately does NOT ride a plugin-owned session event type:
+ * the Harness persistence read path refuses to interpret any log carrying an event
+ * type it does not know unless the writer marked it `ignorable`, and `Session.append`
+ * gives an out-of-repo plugin no way to set that marker — so one Code Mode Task step
+ * would make the whole session unloadable. A known event type keeps the session
+ * loadable by construction; if a deployment's spill policy replaces the logged copy,
+ * the step simply is not restored, which is the honest degradation.
  */
-const STATE_EVENT = META_KIND
+const STATE_LOG_PREFIX = `<!-- ${META_KIND} `
+const STATE_LOG_SUFFIX = ' -->'
+/**
+ * The event type earlier Raven builds appended directly. Still read so an in-memory
+ * session that predates this build keeps its Code Mode steps; never written again.
+ */
+const LEGACY_STATE_EVENT = META_KIND
+/** Handoff slots kept while sub-dispatches settle; bounded so a lost waterfall cannot leak. */
+const PENDING_LOG_STATE_LIMIT = 64
 
 interface PromptSection extends Record<string, unknown> {
   readonly name: string
@@ -70,10 +93,12 @@ interface RavenToolDefinition extends Record<string, unknown> {
   finalizeContent(exec: ToolIdentityLike, result: ToolOutcomeLike): ContentBlockLike[] | undefined
 }
 
+/**
+ * Raven reads the session log and never writes to it: every durable record rides a
+ * Harness-owned event, so a read-only session view costs nothing.
+ */
 interface SessionLike {
   readonly events: readonly unknown[]
-  /** Absent on a host that exposes a read-only session view; durability then rests on result metadata alone. */
-  append?(type: string, data: unknown): unknown
 }
 
 interface AgentLike {
@@ -85,6 +110,8 @@ interface ToolExecutionLike {
   readonly agent?: AgentLike
   /** Present only for a nested sub-call, such as a Code Mode dispatch inside `run_code`. */
   readonly parent?: unknown
+  /** For a nested sub-call this is the sub-call id the durable-log waterfall reports. */
+  readonly callId?: unknown
   readonly signal: AbortSignal
 }
 
@@ -99,8 +126,44 @@ interface WebFetchResultLike {
   readonly truncated?: boolean
 }
 
+interface WebSearchSourceLike {
+  readonly url: string
+  readonly title?: string
+  readonly snippet?: string
+  readonly publishedAt?: string
+}
+
+interface WebSearchResultLike {
+  /** Provider-generated answer text, when the selected backend produces any. */
+  readonly content?: string
+  readonly sources: readonly WebSearchSourceLike[]
+  readonly truncated: boolean
+}
+
 interface WebLike {
   fetch(request: { readonly url: string }, signal?: AbortSignal): Promise<WebFetchResultLike>
+  /** The same seam's search half; a deployment may compose fetch without a search provider. */
+  search?(
+    request: { readonly query: string; readonly maxResults?: number },
+    signal?: AbortSignal,
+  ): Promise<WebSearchResultLike>
+}
+
+/**
+ * The parts of the experimental `ctx.agentTeams` service Raven reads, mirrored
+ * structurally on purpose: the Harness Team packages are private and unpublished,
+ * so an out-of-repo plugin may consume the capability only by duck typing and must
+ * keep working in every deployment that composes no Team at all.
+ */
+interface TeamMembershipLike {
+  /** The Team id, which is the Lead Agent's session id. */
+  readonly id: string
+  readonly role: 'lead' | 'teammate'
+  readonly name: string
+}
+
+interface AgentTeamsLike {
+  tryMembership(agent: unknown): TeamMembershipLike | undefined
 }
 
 interface PreStepInput {
@@ -112,6 +175,15 @@ interface PreStepDecision {
   readonly messages?: readonly unknown[]
 }
 
+/** One settled `run_code` sub-dispatch, as the durable-log waterfall presents it. */
+interface CodeDispatchLogLike {
+  readonly agent: AgentLike
+  readonly subCallId: string
+  readonly name: string
+  readonly isError: boolean
+  readonly content: readonly ContentBlockLike[]
+}
+
 interface ContextLike {
   readonly tools: { register(definition: RavenToolDefinition): () => void }
   readonly systemPrompt: { section(section: PromptSection): () => void }
@@ -121,6 +193,13 @@ interface ContextLike {
   on(
     event: 'agent/pre-step',
     listener: (input: PreStepInput, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>,
+  ): unknown
+  on(
+    event: 'tools/code-dispatch-log',
+    listener: (
+      dispatch: CodeDispatchLogLike,
+      next: () => Promise<ContentBlockLike[]>,
+    ) => Promise<ContentBlockLike[]>,
   ): unknown
 }
 
@@ -139,6 +218,8 @@ interface RavenTaskMeta {
 interface SessionTaskBook {
   currentTaskId?: string
   readonly tasks: Map<string, RavenTaskState>
+  /** Agent ids whose own session log is already folded in; a Team book folds several. */
+  readonly seeded: Set<string>
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -147,15 +228,44 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-/** The durable Task record an event carries, from either publication path. */
-function readTaskStateMeta(event: Record<string, unknown>): Record<string, unknown> | undefined {
-  if (event.type === 'tool/result') return asRecord(asRecord(event.data)?.meta)
-  if (event.type === STATE_EVENT) return asRecord(event.data)
+/** The Task record embedded in one logged Code Mode sub-dispatch, when it survived. */
+function readDispatchTaskState(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  const data = asRecord(event.data)
+  if (data?.name !== TOOL_NAME || !Array.isArray(data.content)) return undefined
+  for (const raw of data.content) {
+    const block = asRecord(raw)
+    if (block?.type !== 'text' || typeof block.text !== 'string') continue
+    const start = block.text.indexOf(STATE_LOG_PREFIX)
+    if (start === -1) continue
+    const end = block.text.indexOf(STATE_LOG_SUFFIX, start + STATE_LOG_PREFIX.length)
+    if (end === -1) continue
+    try {
+      const payload = block.text.slice(start + STATE_LOG_PREFIX.length, end).trim()
+      return asRecord(JSON.parse(Buffer.from(payload, 'base64').toString('utf8')))
+    } catch {
+      // A truncated or reshaped log copy loses this step, never the whole session.
+      return undefined
+    }
+  }
   return undefined
 }
 
-function restoreTaskBook(events: readonly unknown[]): SessionTaskBook {
-  const book: SessionTaskBook = { tasks: new Map() }
+/** The durable Task record an event carries, from any publication path. */
+function readTaskStateMeta(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (event.type === 'tool/result') return asRecord(asRecord(event.data)?.meta)
+  if (event.type === 'tool/code-dispatch') return readDispatchTaskState(event)
+  if (event.type === LEGACY_STATE_EVENT) return asRecord(event.data)
+  return undefined
+}
+
+/**
+ * Fold one session's durable Raven records into `book`. Merging rather than
+ * replacing is what lets an Agent Team share one Task: each member contributes its
+ * own log, the highest revision of a Task wins, and the first folded session keeps
+ * the current-Task pointer so a teammate joining later continues that Task instead
+ * of redirecting it.
+ */
+function mergeSessionRecords(book: SessionTaskBook, events: readonly unknown[]): void {
   const currentDeclarations: string[] = []
   let lastStateTaskId: string | undefined
   for (const raw of events) {
@@ -174,24 +284,56 @@ function restoreTaskBook(events: readonly unknown[]): SessionTaskBook {
       : state.taskId)
     lastStateTaskId = state.taskId
   }
+  if (book.currentTaskId !== undefined) return
   for (const taskId of currentDeclarations.toReversed()) {
     if (!book.tasks.has(taskId)) continue
     book.currentTaskId = taskId
-    break
+    return
   }
-  if (book.currentTaskId === undefined && lastStateTaskId !== undefined) {
-    book.currentTaskId = lastStateTaskId
-  }
-  return book
+  if (lastStateTaskId !== undefined) book.currentTaskId = lastStateTaskId
 }
 
-/** The session's Task book, restored from the durable log the first time this Agent is seen. */
-function taskBookFor(books: Map<string, SessionTaskBook>, agent: AgentLike): SessionTaskBook {
-  const existing = books.get(agent.id)
-  if (existing !== undefined) return existing
-  const restored = restoreTaskBook(agent.session.events)
-  books.set(agent.id, restored)
-  return restored
+/**
+ * The Agent's Team membership, read structurally from the optional experimental
+ * capability. Contained on every path: an experimental service must never be able
+ * to fail a Raven Task step, and its absence is the ordinary case.
+ */
+function teamMembership(ctx: ContextLike, agent: AgentLike): TeamMembershipLike | undefined {
+  const service = asRecord(ctx.get('agentTeams'))
+  if (typeof service?.tryMembership !== 'function') return undefined
+  try {
+    const membership = (service as unknown as AgentTeamsLike).tryMembership(agent)
+    return typeof membership?.id === 'string' && membership.id.length > 0 ? membership : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Which book this Agent reads. A Team member resolves to the Lead's Team id, so one
+ * Raven Task spans the whole Team: a teammate continues the Lead's Task and cannot
+ * start a competing one, which is exactly the single-identity contract a Raven Task
+ * already promises across workers.
+ */
+function bookKeyFor(agent: AgentLike, membership: TeamMembershipLike | undefined): string {
+  return membership === undefined ? `agent:${agent.id}` : `team:${membership.id}`
+}
+
+/** The Task book for this Agent, folding its own durable log in the first time it is seen. */
+function taskBookFor(
+  ctx: ContextLike,
+  books: Map<string, SessionTaskBook>,
+  agent: AgentLike,
+): SessionTaskBook {
+  const key = bookKeyFor(agent, teamMembership(ctx, agent))
+  const existing = books.get(key)
+  const book = existing ?? { tasks: new Map<string, RavenTaskState>(), seeded: new Set<string>() }
+  if (existing === undefined) books.set(key, book)
+  if (!book.seeded.has(agent.id)) {
+    book.seeded.add(agent.id)
+    mergeSessionRecords(book, agent.session.events)
+  }
+  return book
 }
 
 function requireAgent(exec: ToolExecutionLike): AgentLike {
@@ -207,6 +349,170 @@ function compactError(error: unknown): string {
 function webCapability(value: unknown): WebLike | undefined {
   const candidate = asRecord(value)
   return typeof candidate?.fetch === 'function' ? value as WebLike : undefined
+}
+
+function searchCapability(value: unknown): Required<Pick<WebLike, 'search'>> | undefined {
+  const candidate = asRecord(value)
+  return typeof candidate?.search === 'function'
+    ? value as Required<Pick<WebLike, 'search'>>
+    : undefined
+}
+
+/** Identity used to fold one candidate returned by several queries into one Lead. */
+function leadKey(url: string): string {
+  try {
+    return canonicalSourceUrl(url)
+  } catch {
+    return url
+  }
+}
+
+/**
+ * Bound one backend-supplied field. A search backend is third-party text: an
+ * unbounded title, snippet, or answer would let one verbose provider decide how
+ * much of the Task step its own output occupies.
+ */
+function boundedField(value: unknown, maximum: number): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  return text.length === 0 ? undefined : text.slice(0, maximum)
+}
+
+interface MutableLead {
+  readonly url: string
+  readonly title?: string
+  readonly snippet?: string
+  readonly publishedAt?: string
+  readonly queries: string[]
+}
+
+/** One query's outcome; a failure is data, not a rejection, so siblings still land. */
+type QueryOutcome =
+  | { readonly query: string; readonly result: WebSearchResultLike }
+  | { readonly query: string; readonly detail: string }
+
+/**
+ * Merge one batch: round-robin by rank across the queries so a single prolific
+ * backend page cannot crowd out the other angles, deduplicated on canonical URL,
+ * and bounded. A candidate returned by several queries records all of them —
+ * breadth evidence for the agent's next move, never corroboration of a Claim.
+ */
+function mergeLeads(outcomes: readonly QueryOutcome[], cap: number): {
+  readonly leads: readonly RavenLead[]
+  readonly dropped: boolean
+} {
+  const byKey = new Map<string, MutableLead>()
+  const order: string[] = []
+  let dropped = false
+  for (let rank = 0; ; rank += 1) {
+    let seen = false
+    for (const outcome of outcomes) {
+      if (!('result' in outcome)) continue
+      const source = outcome.result.sources[rank]
+      if (source === undefined) continue
+      seen = true
+      const key = leadKey(source.url)
+      const existing = byKey.get(key)
+      if (existing !== undefined) {
+        if (!existing.queries.includes(outcome.query)) existing.queries.push(outcome.query)
+        continue
+      }
+      if (order.length >= cap) {
+        dropped = true
+        continue
+      }
+      const title = boundedField(source.title, RAVEN_LIMITS.leadTitleChars)
+      const snippet = boundedField(source.snippet, RAVEN_LIMITS.leadSnippetChars)
+      const publishedAt = boundedField(source.publishedAt, RAVEN_LIMITS.sourceAsOfChars)
+      byKey.set(key, {
+        url: source.url.slice(0, 2048),
+        ...(title === undefined ? {} : { title }),
+        ...(snippet === undefined ? {} : { snippet }),
+        ...(publishedAt === undefined ? {} : { publishedAt }),
+        queries: [outcome.query],
+      })
+      order.push(key)
+    }
+    if (!seen) break
+  }
+  const leads = order
+    .map(key => byKey.get(key))
+    .filter((lead): lead is MutableLead => lead !== undefined)
+    .map(lead => ({ ...lead, queries: [...lead.queries] }))
+  return { leads, dropped }
+}
+
+/**
+ * Lead discovery over the Harness `ctx.web` search half.
+ *
+ * Deliberately different from the Harness `web_search` tool in one respect: that
+ * tool cancels every sibling query as soon as one fails, because a model-facing
+ * search either answers or errors. A Raven Task cannot afford that — a batch is a
+ * Task step, and losing three good angles because a fourth backend call failed
+ * would discard work the Task already paid for. Each query therefore carries its
+ * own deadline, and a failure becomes a recorded Limitation instead of a batch
+ * error. Caller cancellation stays a real cancellation on every path.
+ */
+function sourceSearcher(ctx: ContextLike, settings: () => RavenConfig): SourceSearcher {
+  return {
+    async search(request: LeadSearchRequest, signal: AbortSignal): Promise<LeadSearchResult> {
+      const config = settings()
+      const unavailable = (detail: string): LeadSearchResult => ({
+        leads: [],
+        failures: [],
+        truncated: false,
+        notes: [],
+        unavailable: detail,
+      })
+      if ((config.sourceDiscovery ?? 'seam') === 'disabled') {
+        return unavailable(
+          'Lead discovery is disabled for this deployment'
+          + ' (raven-research.sourceDiscovery=disabled)',
+        )
+      }
+      const web = searchCapability(ctx.get('web'))
+      if (web === undefined) return unavailable('DeepSeek Harness web search capability is not composed')
+      const timeoutMs = config.searchTimeoutMs ?? 0
+      signal.throwIfAborted()
+      const outcomes = await Promise.all(request.queries.map(async (query): Promise<QueryOutcome> => {
+        // One deadline per query: a slow backend costs that angle, not the batch.
+        const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+        const attempt = deadline === undefined ? signal : AbortSignal.any([signal, deadline])
+        try {
+          const result = await settleWithAbort(
+            web.search({ query, maxResults: request.maxResults }, attempt),
+            attempt,
+          )
+          return { query, result }
+        } catch (error) {
+          // Caller cancellation is cancellation, never a per-query limitation.
+          signal.throwIfAborted()
+          return {
+            query,
+            detail: deadline?.aborted === true
+              ? `the query exceeded the configured ${timeoutMs}ms deadline`
+              : compactError(error),
+          }
+        }
+      }))
+      signal.throwIfAborted()
+      const cap = Math.min(request.queries.length * request.maxResults, RAVEN_LIMITS.leads)
+      const { leads, dropped } = mergeLeads(outcomes, cap)
+      const failures: LeadSearchFailure[] = []
+      const notes: { query: string; content: string }[] = []
+      let truncated = dropped
+      for (const outcome of outcomes) {
+        if (!('result' in outcome)) {
+          failures.push({ query: outcome.query, detail: outcome.detail })
+          continue
+        }
+        if (outcome.result.truncated) truncated = true
+        const content = boundedField(outcome.result.content, RAVEN_LIMITS.leadNoteChars)
+        if (content !== undefined) notes.push({ query: outcome.query, content })
+      }
+      return { leads, failures, truncated, notes }
+    },
+  }
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -297,7 +603,12 @@ function excerptMismatchDetail(body: string, excerpt: string, locator: string): 
 }
 
 function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted()
+  if (signal.aborted) {
+    // The operation promise already exists; refusing it without a rejection sink
+    // would surface the provider's own abort as an unhandled rejection.
+    void operation.catch(() => undefined)
+    signal.throwIfAborted()
+  }
   return new Promise<T>((resolve, reject) => {
     let settled = false
     const finish = (callback: () => void) => {
@@ -403,6 +714,16 @@ function sourceVerifier(
   }
 }
 
+/**
+ * The record as one opaque token. Base64 keeps the payload out of the comment's
+ * own grammar: a Task Artifact may legitimately contain `-->`, and a raw JSON
+ * body would let that text close the comment and corrupt the record.
+ */
+function encodeStateLog(meta: RavenTaskMeta): string {
+  const payload = Buffer.from(JSON.stringify(meta), 'utf8').toString('base64')
+  return `${STATE_LOG_PREFIX}${payload}${STATE_LOG_SUFFIX}`
+}
+
 function taskStateMeta(value: RavenToolValue): RavenTaskMeta {
   return {
     kind: META_KIND,
@@ -426,6 +747,7 @@ function renderToolValue(value: RavenToolValue): string {
     lines.push(`Append to \`wiki/log.md\`:\n\n\`\`\`markdown\n${value.wiki.logEntry}\`\`\``)
     return lines.join('\n\n')
   }
+  if (value.leads !== undefined) lines.push(renderLeads(value.leads))
   if (value.renderedArtifact !== undefined) lines.push(value.renderedArtifact)
   else if (value.state.latestArtifact !== null && value.status === 'stopped') {
     lines.push(renderArtifact(value.state.latestArtifact, value.state.sources, value.state.claims))
@@ -484,12 +806,14 @@ const FAILURE_SCHEMA = {
 } as const
 
 function toolDefinition(
+  ctx: ContextLike,
   engine: ReturnType<typeof createRavenEngine>,
   books: Map<string, SessionTaskBook>,
+  pendingLogState: Map<string, RavenTaskMeta>,
 ): RavenToolDefinition {
   return {
     name: TOOL_NAME,
-    description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; publish useful Checkpoints before exhaustive work; apply user corrections with steer on the same taskId; record inspected Sources, Claims, and partial failures; stop/resume without loss; and complete only against the exact final Artifact. Normal research stages need no approval.',
+    description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover Leads with a batch of complementary queries; publish useful Checkpoints before exhaustive work; apply user corrections with steer on the same taskId; record inspected Sources, Claims, and partial failures; stop/resume without loss; and complete only against the exact final Artifact. Inside an Agent Team the Task belongs to the Team, so every member continues the same one. Normal research stages need no approval.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -497,7 +821,7 @@ function toolDefinition(
       properties: {
         action: {
           type: 'string',
-          enum: ['start', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'],
+          enum: ['start', 'discover', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'],
           description: `Requested Task action. Each action accepts only its own fields — ${ACTION_FIELD_SUMMARY} — and any other field fails the call.`,
         },
         taskId: { type: 'string', description: 'Existing Raven Task ID. Required by every action except start.' },
@@ -514,6 +838,11 @@ function toolDefinition(
           description: 'Kind of useful result this Task owes the user. Only with action=start.',
         },
         request: { type: 'string', description: `Task request, at most ${RAVEN_LIMITS.requestChars} characters. Only with action=start.` },
+        queries: {
+          type: 'array',
+          items: { type: 'string' },
+          description: `Complementary search queries for one discovery batch, at most ${RAVEN_LIMITS.searchQueries} by default and ${RAVEN_LIMITS.searchQueryChars} characters each. Only with action=discover. Send several angles in ONE call — they share a deadline, are deduplicated against each other, and a failing query never cancels the rest. Results are Leads, never Sources: open a Lead and record a verbatim excerpt before it can support a Claim.`,
+        },
         grounding: {
           type: 'string',
           enum: ['required', 'optional', 'none'],
@@ -557,7 +886,7 @@ function toolDefinition(
         if (!result.isError) return undefined
         const agent = exec.agent
         if (agent === undefined) return undefined
-        const book = taskBookFor(books, agent)
+        const book = taskBookFor(ctx, books, agent)
         const requested = asRecord(exec.arguments)?.taskId
         const state = (typeof requested === 'string' ? book.tasks.get(requested) : undefined)
           ?? (book.currentTaskId === undefined ? undefined : book.tasks.get(book.currentTaskId))
@@ -569,7 +898,7 @@ function toolDefinition(
     },
     async execute(args, exec) {
       const agent = requireAgent(exec)
-      const book = taskBookFor(books, agent)
+      const book = taskBookFor(ctx, books, agent)
       const input = asRecord(args)
       const action = input?.action
       const requestedTaskId = typeof input?.taskId === 'string' ? input.taskId : undefined
@@ -602,9 +931,19 @@ function toolDefinition(
         : result
       const value: RavenToolValue = { kind: 'raven-task-result', currentTaskId, ...withStatusArtifact }
       // A direct call publishes its state through `presentationMeta` on the durable
-      // tool result. A nested sub-call gets neither, so it publishes the same record
-      // itself; appending on both paths would store every Task twice.
-      if (exec.parent !== undefined) agent.session.append?.(STATE_EVENT, taskStateMeta(value))
+      // tool result. A nested sub-call gets no result card, so its record is handed
+      // to the durable-log waterfall keyed by this sub-call id; publishing on both
+      // paths would store every Task twice.
+      if (exec.parent !== undefined && typeof exec.callId === 'string') {
+        pendingLogState.set(exec.callId, taskStateMeta(value))
+        // A dispatch that never reaches the waterfall (no agent, contained listener
+        // failure, abandoned run) must not accumulate; the map is a handoff, not a store.
+        while (pendingLogState.size > PENDING_LOG_STATE_LIMIT) {
+          const oldest = pendingLogState.keys().next()
+          if (oldest.done === true) break
+          pendingLogState.delete(oldest.value)
+        }
+      }
       return value
     },
   }
@@ -629,13 +968,17 @@ function taskRecoveryHint(state: RavenTaskState): string {
   ].join('\n')
 }
 
-function activeTaskContext(state: RavenTaskState): string {
+function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike | undefined): string {
   const latest = state.checkpoints.at(-1)
   return [
     '<raven_task_context>',
     state.phase === 'stopped'
       ? `Raven Task ${state.taskId} is stopped. Preserve it and resume only if the current user explicitly asks.`
       : `Continue Raven Task ${state.taskId}; do not start a replacement Task.`,
+    ...(membership === undefined || membership.role !== 'teammate'
+      ? []
+      : [`You are Agent Team member "${membership.name}". This Raven Task belongs to the whole Team, not to you:`
+        + ' contribute Sources, Claims, and Checkpoints to it, and never start a competing Task of your own.']),
     `Outcome: ${state.outcome}. Phase: ${state.phase}. Task revision: ${state.revision}. Steering revision: ${state.steeringRevision}.`,
     `Evidence: ${state.sources.length} Source(s), ${state.claims.length} Claim(s), ${state.limitations.length} Limitation(s).`,
     latest === undefined
@@ -671,14 +1014,39 @@ export function apply(ctx: ContextLike, config: RavenConfig = {}): void {
       onChange: () => undefined,
     },
   )
-  const engine = createRavenEngine({ now, sourceVerifier: sourceVerifier(ctx, now, () => settings()) })
+  const searchLimits = (): RavenSearchLimits => {
+    const config = settings()
+    return {
+      maxQueries: config.searchMaxQueries ?? RAVEN_LIMITS.searchQueries,
+      maxResults: config.searchMaxResults ?? RAVEN_LIMITS.searchResults,
+    }
+  }
+  const engine = createRavenEngine({
+    now,
+    sourceVerifier: sourceVerifier(ctx, now, () => settings()),
+    sourceSearcher: sourceSearcher(ctx, () => settings()),
+    searchLimits,
+  })
+  const pendingLogState = new Map<string, RavenTaskMeta>()
 
   ctx.systemPrompt.section({ name: 'tool:raven-task', order: 116, text: RAVEN_PROMPT })
-  ctx.tools.register(toolDefinition(engine, books))
+  ctx.tools.register(toolDefinition(ctx, engine, books, pendingLogState))
+  // The durable half of the Code Mode path: attach the Task record to the logged
+  // copy of Raven's own sub-dispatch. Total by contract — the bridge contains a
+  // throwing listener by logging the original content, but a Task step must not
+  // depend on that, so nothing here can fail.
+  ctx.on('tools/code-dispatch-log', async (dispatch, next) => {
+    const content = await next()
+    if (dispatch.name !== TOOL_NAME) return content
+    const record = pendingLogState.get(dispatch.subCallId)
+    if (record === undefined) return content
+    pendingLogState.delete(dispatch.subCallId)
+    return [...content, { type: 'text', text: encodeStateLog(record) }]
+  })
   ctx.on('agent/pre-step', async ({ agent }, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
-    const book = taskBookFor(books, agent)
+    const book = taskBookFor(ctx, books, agent)
     const state = book.currentTaskId === undefined ? undefined : book.tasks.get(book.currentTaskId)
     if (state === undefined || (state.phase !== 'active' && state.phase !== 'stopped')) return decision
     return {
@@ -687,7 +1055,7 @@ export function apply(ctx: ContextLike, config: RavenConfig = {}): void {
         ...(decision.messages ?? []),
         {
           role: 'user',
-          content: [{ type: 'text', text: activeTaskContext(state) }],
+          content: [{ type: 'text', text: activeTaskContext(state, teamMembership(ctx, agent)) }],
           source: { kind: 'plugin', plugin: name, form: 'instructions' },
         },
       ],

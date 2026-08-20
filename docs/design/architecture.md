@@ -76,6 +76,7 @@ type RavenTaskAction =
       claims?: ClaimInput[]
       failures?: FailureInput[]
     }
+  | { action: "discover"; taskId: string; queries: string[] }
   | { action: "steer"; taskId: string; correction: string }
   | { action: "complete"; taskId: string; artifact: string }
   | { action: "status"; taskId?: string }
@@ -100,6 +101,15 @@ registry.
   `academic-writing` default to `required` and may be narrowed to `optional`, but
   never to `none`. An executor that could switch its own floor off could relabel
   ungrounded prose as research and still complete cleanly.
+- `discover` runs ONE batch of complementary queries through the Harness `ctx.web`
+  search half and returns Leads. It is a separate action rather than a `checkpoint`
+  field because finding candidates and committing evidence are different authorities:
+  a Lead has been located, not read, so it may never reach a Claim, an Artifact
+  citation, or the evidence floor. The batch is the unit on purpose — several angles
+  share one deadline, deduplicate against each other, and cost one Task step, which is
+  what makes a wide first sweep cheaper than a sequence of narrow ones. A query that
+  fails becomes a `tool` Limitation on the Task instead of aborting the batch, so the
+  Task keeps the angles that worked and still records the angle it lost.
 - `checkpoint` atomically commits an independently useful Artifact plus the evidence
   and failures that inform it. Stages are observations, never approval gates.
 - `steer` appends a Steering Revision to the same Task and invalidates stale final
@@ -129,6 +139,16 @@ One compact JSON state contains:
 
 Task phases are `active`, `stopped`, `completed`, and `completed-with-limits`.
 Normal research stages do not appear as phases.
+
+### Lead
+
+A Lead is a candidate Raven located but did not inspect: URL, optional title,
+snippet, and publication label, plus the queries that surfaced it. Leads are returned
+by `discover` and never enter Task state — they are not evidence, they do not
+survive a session reload, and re-running discovery is cheaper than storing them. A
+candidate returned by several queries is one Lead recording all of them: breadth
+information for the agent's next move, explicitly not corroboration, because one
+backend answering twice is still one observation.
 
 ### Source
 
@@ -245,9 +265,33 @@ next state, validates invariants, and returns either the next state or an action
 non-mutating result. It owns all lifecycle, revision, Checkpoint, Source, Claim,
 citation, and completion semantics.
 
+### Source searcher Seam
+
+Discovery is a second Raven-owned Seam over the SAME official capability:
+
+```ts
+interface SourceSearcher {
+  search(request: { queries: readonly string[]; maxResults: number }, signal: AbortSignal):
+    Promise<LeadSearchResult>
+}
+```
+
+`HarnessWebSourceSearcher` reads the optional `ctx.web` search half dynamically, like
+the verifier reads its fetch half. It mirrors the Harness `web_search` tool where the
+semantics are the tool's to define — the batch bound is applied before deduplication,
+the per-query source bound is passed through, and candidates merge round-robin by rank
+with exact-URL deduplication — and departs from it in exactly one place, deliberately:
+the Harness tool cancels every sibling query as soon as one fails, because a
+model-facing search either answers or errors, while a Raven batch is a Task step whose
+successful angles are already paid for. Each query therefore carries its own deadline,
+one failure yields a `tool` Limitation rather than a batch error, and only caller
+cancellation aborts everything. Withheld discovery (`sourceDiscovery=disabled`) and an
+uncomposed search provider report the same way an absent capability does — unavailable
+with the reason named — because an empty result set would read as "nothing exists".
+
 ### Source verifier Seam
 
-This is the one Raven-owned infrastructure Seam in v1:
+This is the second Raven-owned infrastructure Seam:
 
 ```ts
 interface SourceVerifier {
@@ -298,6 +342,26 @@ active in a Session, status inspection of history does not change the current Ta
 resuming an older Task requires the current one to be stopped, and new Task ordinals
 use the Session-wide maximum. An in-memory registry covers calls before results are
 durably appended; replay metadata remains the restart source of truth.
+
+A Code Mode sub-call gets no result card, so its record cannot ride `tool/result.meta`.
+It rides the durable copy of the sub-dispatch instead, through the official
+`tools/code-dispatch-log` waterfall, as a base64 payload inside an HTML comment on the
+Harness-owned `tool/code-dispatch` event. A plugin-owned session event type is
+explicitly rejected as the mechanism: the Harness persistence read path refuses to
+interpret a stored log containing an event type it does not know unless the writer
+marked it `ignorable`, and `Session.append` exposes no way for an out-of-repo plugin to
+set that marker, so one Code Mode Task step would make the whole session unloadable.
+Base64 keeps a Task Artifact that happens to contain `-->` from closing the comment.
+The path degrades safely rather than exactly: a spill policy that replaces an oversized
+log copy loses that one step, and the next direct call republishes the complete record.
+
+Agent Teams is consumed the same way `web` is — dynamically, never injected — but with
+one additional constraint: the Harness Team packages are `private: true`, excluded from
+the release payload, and carry no stability promise, so Raven may not import their
+types or declare a peer dependency. It mirrors structurally the one method it reads,
+`tryMembership(agent)`, contains every call, and keys the Task book by the returned
+Team id so a Team shares one Task. Every failure mode — no capability, no membership, a
+throwing probe — degrades to the single-agent book.
 
 Long-running continuation, subagents, and workflows remain ordinary Harness tools
 available to the main agent. The prompt may recommend them proportionately, but the
@@ -390,8 +454,8 @@ a specific agent graph.
 
 ## Compatibility target
 
-Raven v1 targets DeepSeek Harness `0.1.0-rc.7` at commit
-`99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`, Node `^22.19.0 || >=24`, and pnpm
+Raven v1 targets DeepSeek Harness `0.1.0-rc.8` at commit
+`141eb6fef83422698aef7a981029e843e8161534`, Node `^22.19.0 || >=24`, and pnpm
 `11.21.0`. Release checks use built ESM and declarations, a real Loader-path smoke
 test against that checkout, and a packed clean-consumer install. The version is an
 RC, so the package claims only the exact tested compatibility family.

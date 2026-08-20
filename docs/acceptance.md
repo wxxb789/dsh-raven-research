@@ -64,7 +64,22 @@ agent topology.
 - `tests/integration/plugin.test.ts`
   - named Cordis exports, bounded schema annotations, and one prompt/tool/listener registration;
   - compact Task reconstruction from durable `tool/result.meta` after plugin reload;
-  - preservation and replay of multiple historical Task identities in one Session.
+  - preservation and replay of multiple historical Task identities in one Session;
+  - a Code Mode step recorded on the known `tool/code-dispatch` event and NO plugin-owned
+    session event type, an Artifact carrying `-->` surviving the record, and a replaced
+    (spilled) log copy losing that step without failing the session.
+- `tests/integration/discovery.test.ts`
+  - one batch of complementary queries issued through the `ctx.web` search half;
+  - the batch bound applied before deduplication, and an empty batch refused;
+  - a failing query recorded as a `tool` Limitation while its siblings keep their Leads;
+  - one URL returned by several queries folded into one Lead recording both;
+  - per-query deadlines, withheld discovery, an uncomposed search provider, and caller
+    cancellation reported as cancellation rather than as a per-query failure.
+- `tests/integration/agent-team.test.ts`
+  - one Task shared across an Agent Team, and a teammate's competing `start` refused;
+  - each member's own durable records merged into the shared Task book;
+  - the teammate-only pre-step instruction;
+  - single-agent behaviour where no Team capability is composed or its probe throws.
 - `tests/integration/source-provenance.test.ts`
   - real loopback HTTP retrieval;
   - truncated retrieval reported as unverifiable rather than as fabrication;
@@ -80,7 +95,7 @@ agent topology.
   - Learning;
   - fabricated/unregistered URL rejection;
   - known-broken cited Source rejection;
-  - absence of normal-stage confirmation actions.
+  - absence of normal-stage confirmation actions (discovery included).
 
 ## Release gate
 

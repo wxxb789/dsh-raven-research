@@ -17,6 +17,7 @@ import {
   type ClaimImportance,
   type ClaimKind,
   type GroundingPolicy,
+  type LeadSearchResult,
   type RavenClaimRecord,
   type RavenDispatchResult,
   type RavenExecution,
@@ -30,12 +31,37 @@ import {
   type RavenVerificationReceipt,
   type SourceCheckResult,
   type SourceRole,
+  type SourceSearcher,
   type SourceVerifier,
 } from './domain.js'
+
+/** Deployment-owned discovery bounds, read per call so a settings change needs no restart. */
+export interface RavenSearchLimits {
+  readonly maxQueries: number
+  readonly maxResults: number
+}
 
 interface RavenEngineOptions {
   readonly now: () => string
   readonly sourceVerifier: SourceVerifier
+  /** Omitted where the embedder composes no discovery: `discover` then reports the absence instead of failing. */
+  readonly sourceSearcher?: SourceSearcher
+  readonly searchLimits?: () => RavenSearchLimits
+}
+
+const NO_SEARCHER: SourceSearcher = {
+  search: () => Promise.resolve({
+    leads: [],
+    failures: [],
+    truncated: false,
+    notes: [],
+    unavailable: 'this Raven deployment composed no Lead discovery seam',
+  }),
+}
+
+const DEFAULT_SEARCH_LIMITS: RavenSearchLimits = {
+  maxQueries: RAVEN_LIMITS.searchQueries,
+  maxResults: RAVEN_LIMITS.searchResults,
 }
 
 interface RavenEngine {
@@ -55,6 +81,7 @@ interface RavenEngine {
  */
 export const ACTION_FIELDS: Record<string, readonly string[]> = {
   start: ['action', 'outcome', 'request', 'grounding'],
+  discover: ['action', 'taskId', 'queries'],
   checkpoint: ['action', 'taskId', 'stage', 'summary', 'artifact', 'sources', 'claims', 'failures'],
   steer: ['action', 'taskId', 'correction'],
   complete: ['action', 'taskId', 'artifact'],
@@ -565,6 +592,61 @@ async function checkSources(
  * the agent, so this annotates the rendered trace instead of blocking Completion.
  */
 /** Preserved disagreement: a contested Claim must never read as settled fact. */
+function leadLabel(lead: { readonly url: string; readonly title?: string }): string {
+  if (lead.title !== undefined && lead.title.trim().length > 0) return markdownText(lead.title)
+  try {
+    return new URL(lead.url).hostname
+  } catch {
+    return lead.url
+  }
+}
+
+/**
+ * Render one discovery batch. Leads are labelled as uninspected on every path so
+ * the batch can never read as an evidence set: the render is the only place the
+ * agent sees them, and a list that looks like Sources invites citing them.
+ */
+export function renderLeads(outcome: LeadSearchResult): string {
+  const lines: string[] = []
+  if (outcome.unavailable !== undefined) {
+    lines.push(`Lead discovery did not run: ${outcome.unavailable}`)
+  }
+  if (outcome.leads.length > 0) {
+    lines.push('## Leads (uninspected candidates, not Sources)')
+    outcome.leads.forEach((lead, index) => {
+      lines.push(`${index + 1}. [${leadLabel(lead)}](${lead.url})`)
+      const facts = [
+        ...(lead.publishedAt === undefined ? [] : [`published ${markdownText(lead.publishedAt)}`]),
+        `found by: ${lead.queries.map(query => markdownText(query)).join(' | ')}`,
+      ]
+      lines.push(`   - ${facts.join(' · ')}`)
+      if (lead.snippet !== undefined && lead.snippet.trim().length > 0) {
+        lines.push(`   - snippet: ${markdownText(lead.snippet)}`)
+      }
+    })
+  } else if (outcome.unavailable === undefined) {
+    lines.push('## Leads (uninspected candidates, not Sources)')
+    lines.push('No candidate was returned.')
+  }
+  if (outcome.notes.length > 0) {
+    lines.push('## Backend answer text (context only, never evidence)')
+    for (const note of outcome.notes) {
+      lines.push(`### ${markdownText(note.query)}`)
+      lines.push(markdownText(note.content))
+    }
+  }
+  if (outcome.failures.length > 0) {
+    lines.push('## Failed queries (recorded as Limitations)')
+    for (const failure of outcome.failures) {
+      lines.push(`- ${markdownText(failure.query)} — ${markdownText(failure.detail)}`)
+    }
+  }
+  if (outcome.truncated) {
+    lines.push('Candidates were dropped to stay inside the batch bound; the visible set is not exhaustive.')
+  }
+  return lines.join('\n')
+}
+
 function contestedNote(claim: RavenClaimRecord): string {
   const contested = claim.contradicts ?? []
   if (contested.length === 0) return ''
@@ -702,6 +784,78 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           state: previous,
           message: `Raven Task ${previous.taskId} is ${previous.phase}.`,
           issues: [],
+        }
+      }
+
+      if (action === 'discover') {
+        const state = requireActiveTask(previous, args.taskId)
+        const limits = options.searchLimits?.() ?? DEFAULT_SEARCH_LIMITS
+        const maxQueries = limits.maxQueries > 0 ? limits.maxQueries : RAVEN_LIMITS.searchQueries
+        const maxResults = limits.maxResults > 0 ? limits.maxResults : RAVEN_LIMITS.searchResults
+        const raw = optionalArray(args.queries, 'queries')
+        if (raw.length === 0) throw new TypeError('queries must contain at least one query')
+        // Bound the batch BEFORE deduplicating, exactly as the Harness web_search
+        // tool does: repeating one query spends its slot instead of buying extra
+        // breadth, so the advertised bound means the same thing on both sides.
+        if (raw.length > maxQueries) {
+          throw new TypeError(
+            `queries must contain at most ${maxQueries} ${maxQueries === 1 ? 'query' : 'queries'};`
+            + ' issue complementary queries in one call rather than one query per call',
+          )
+        }
+        const queries = [...new Set(raw.map((query, index) =>
+          boundedText(query, `queries[${index}]`, RAVEN_LIMITS.searchQueryChars)))]
+        const outcome = await (options.sourceSearcher ?? NO_SEARCHER).search({ queries, maxResults }, execution.signal)
+        execution.signal.throwIfAborted()
+        const at = options.now()
+        const limitations = [...state.limitations]
+        const addLimitation = (detail: string): void => {
+          const bounded = detail.slice(0, RAVEN_LIMITS.limitationDetailChars)
+          if (limitations.some(item => item.kind === 'tool' && item.detail === bounded)) return
+          if (limitations.length >= RAVEN_LIMITS.limitations) return
+          limitations.push({
+            limitationId: `tool-${limitations.length + 1}`,
+            kind: 'tool',
+            detail: bounded,
+            createdAt: at,
+          })
+        }
+        if (outcome.unavailable !== undefined) {
+          addLimitation(`Lead discovery is unavailable: ${outcome.unavailable}`)
+        }
+        for (const failure of outcome.failures) {
+          addLimitation(`Lead discovery query "${failure.query}" failed: ${failure.detail}`)
+        }
+        // A failed batch is a Task fact, so it changes the Task; a clean batch
+        // discovers nothing the Task owns yet and leaves the revision alone.
+        const changed = limitations.length !== state.limitations.length
+        const next: RavenTaskState = changed
+          ? { ...state, limitations, revision: state.revision + 1, updatedAt: at }
+          : state
+        const issues: string[] = [
+          'Leads are not Sources: open each Lead and record a verbatim excerpt before it can support a Claim.',
+        ]
+        if (outcome.failures.length > 0) {
+          issues.push(
+            `${outcome.failures.length} quer${outcome.failures.length === 1 ? 'y' : 'ies'} failed and are recorded as Limitations;`
+            + ' a query that could not run is not evidence that nothing exists',
+          )
+        }
+        if (outcome.truncated) {
+          issues.push('the candidate list was truncated; narrow or re-aim the queries instead of treating the visible set as exhaustive')
+        }
+        if (outcome.leads.length === 0 && outcome.unavailable === undefined && outcome.failures.length === 0) {
+          issues.push('no candidate was returned; rephrase or widen the queries, and record a coverage failure only after searching for material that would exist if the claim were true')
+        }
+        const message = outcome.unavailable === undefined
+          ? `Raven Task ${state.taskId}: ${outcome.leads.length} Lead(s) from ${queries.length} quer${queries.length === 1 ? 'y' : 'ies'}.`
+          : `Lead discovery did not run for Raven Task ${state.taskId}.`
+        return {
+          status: 'active',
+          state: next,
+          message,
+          issues,
+          leads: outcome,
         }
       }
 

@@ -15,6 +15,13 @@ export const RAVEN_LIMITS = {
   limitations: 256,
   checkpoints: 128,
   steeringRevisions: 128,
+  searchQueries: 4,
+  searchResults: 8,
+  searchQueryChars: 512,
+  leads: 32,
+  leadTitleChars: 512,
+  leadSnippetChars: 512,
+  leadNoteChars: 2_000,
 } as const
 
 export const OUTCOMES = [
@@ -163,6 +170,49 @@ export interface SourceCheckResult {
   readonly detail?: string
 }
 
+/**
+ * One candidate Raven has NOT inspected. Discovery returns Leads, never Sources:
+ * a search hit is only a lead until the agent opens it and records a verbatim
+ * excerpt, so a Lead can never carry a Claim or reach an Artifact citation.
+ */
+export interface RavenLead {
+  readonly url: string
+  readonly title?: string
+  readonly snippet?: string
+  readonly publishedAt?: string
+  /** Queries that surfaced this Lead, in issue order; repetition across queries is a breadth signal, never corroboration. */
+  readonly queries: readonly string[]
+}
+
+export interface LeadSearchRequest {
+  /** Distinct, already-bounded queries to issue in one batch. */
+  readonly queries: readonly string[]
+  /** Upper bound the backend is asked for per query. */
+  readonly maxResults: number
+}
+
+/** One query that could not be answered. The batch survives it; the Task records it. */
+export interface LeadSearchFailure {
+  readonly query: string
+  readonly detail: string
+}
+
+export interface LeadSearchResult {
+  readonly leads: readonly RavenLead[]
+  readonly failures: readonly LeadSearchFailure[]
+  /** True when either a backend or Raven's own merge dropped candidates. */
+  readonly truncated: boolean
+  /** Provider-generated answer text per query, when the backend returns any. Context only: never evidence. */
+  readonly notes: readonly { readonly query: string; readonly content: string }[]
+  /** Set when discovery could not run at all — absent capability or deployment policy — so every query shares one reason. */
+  readonly unavailable?: string
+}
+
+/** Retrieval seam for Lead discovery. Kept separate from {@link SourceVerifier}: finding candidates and confirming evidence are different authorities. */
+export interface SourceSearcher {
+  search(request: LeadSearchRequest, signal: AbortSignal): Promise<LeadSearchResult>
+}
+
 export interface SourceVerifier {
   verify(
     sources: readonly SourceCheckRequest[],
@@ -194,5 +244,6 @@ export interface RavenDispatchResult {
   readonly issues: readonly string[]
   readonly renderedArtifact?: string
   readonly wiki?: RavenWikiEmission
+  readonly leads?: LeadSearchResult
 }
 

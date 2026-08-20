@@ -8,3 +8,7 @@
   # config:
   #   sourceVerification: remote
   #   sourceCheckTimeoutMs: 30000
+  #   sourceDiscovery: seam
+  #   searchMaxQueries: 4
+  #   searchMaxResults: 8
+  #   searchTimeoutMs: 30000

@@ -189,13 +189,32 @@ assert.equal(tools[0].name, 'raven_task')
 assert.equal(sections.length, 1)
 assert.deepEqual(injected, [['settings']])
 assert.equal(Raven.RAVEN_SETTINGS_NAMESPACE, 'raven-research')
-assert.deepEqual(Raven.Config({}), { sourceVerification: 'remote', sourceCheckTimeoutMs: 0 })
+assert.deepEqual(Raven.Config({}), {
+  sourceVerification: 'remote',
+  sourceCheckTimeoutMs: 0,
+  sourceDiscovery: 'seam',
+  searchMaxQueries: 4,
+  searchMaxResults: 8,
+  searchTimeoutMs: 30000,
+})
+assert.deepEqual(Raven.SOURCE_DISCOVERY_MODES, ['seam', 'disabled'])
+assert.equal(typeof Raven.renderLeads, 'function')
+const agent = { id: 'packed-session', session: { events: [] } }
+const signal = new AbortController().signal
 const value = await tools[0].execute(
   { action: 'start', outcome: 'learning', grounding: 'none', request: 'Teach one concept.' },
-  { agent: { id: 'packed-session', session: { events: [] } }, signal: new AbortController().signal },
+  { agent, signal },
 )
 assert.equal(value.status, 'active')
-console.log('packed install: isolated staged prepack, exact files, isolated install, import, apply, and tool execution passed')
+// A deployment with no web capability must report discovery as unavailable rather
+// than as an empty search the agent could read as "nothing exists".
+const found = await tools[0].execute(
+  { action: 'discover', taskId: value.state.taskId, queries: ['one angle', 'another angle'] },
+  { agent, signal },
+)
+assert.match(found.leads.unavailable, /web search capability is not composed/)
+assert.equal(found.state.limitations.length, 1)
+console.log('packed install: isolated staged prepack, exact files, isolated install, import, apply, settings defaults, discovery degradation, and tool execution passed')
 `)
   await runProcess(process.execPath, ['verify.mjs'], {
     cwd: consumer,

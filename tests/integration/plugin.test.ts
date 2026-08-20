@@ -59,7 +59,8 @@ describe('Raven Cordis plugin', () => {
       expect.objectContaining({ name: 'tool:raven-task', order: 116 }),
     ])
     expect(String(sections[0]?.text)).toContain('one continuing Raven Task')
-    expect(listeners.map(listener => listener.event)).toEqual(['agent/pre-step'])
+    expect(listeners.map(listener => listener.event)).toEqual(['tools/code-dispatch-log', 'agent/pre-step'])
+    expect(parameters.properties.queries?.description).toContain('Leads, never Sources')
   })
 
   it('reconstructs compact Task state from durable tool-result metadata after plugin reload', async () => {
@@ -259,8 +260,14 @@ describe('Raven Cordis plugin', () => {
       }>
     }
 
+    type DispatchLogListener = (
+      dispatch: Record<string, unknown>,
+      next: () => Promise<Array<Record<string, unknown>>>,
+    ) => Promise<Array<Record<string, unknown>>>
+
     const capture = () => {
       let tool: TestTool | undefined
+      let shapeLog: DispatchLogListener | undefined
       RavenPlugin.apply({
         tools: {
           register(definition: TestTool) {
@@ -271,26 +278,31 @@ describe('Raven Cordis plugin', () => {
         systemPrompt: { section() { return vi.fn() } },
         inject() { return vi.fn() },
         get() { return undefined },
-        on() { return vi.fn() },
+        on(event: string, listener: unknown) {
+          if (event === 'tools/code-dispatch-log') shapeLog = listener as DispatchLogListener
+          return vi.fn()
+        },
       } as never)
-      if (tool === undefined) throw new Error('Raven tool did not register')
-      return tool
+      if (tool === undefined || shapeLog === undefined) throw new Error('Raven did not register its Code Mode durability path')
+      return { tool, shapeLog }
     }
 
-    const tool = capture()
+    const { tool, shapeLog } = capture()
     const signal = new AbortController().signal
     const events: unknown[] = []
+    const appended: unknown[] = []
     const agent = {
       id: 'code-mode-session',
       session: {
         events,
         append(type: string, data: unknown) {
-          events.push({ type, data: JSON.parse(JSON.stringify(data)) as unknown })
+          appended.push({ type, data: JSON.parse(JSON.stringify(data)) as unknown })
         },
       },
     }
     // The opaque token the Harness registry sets only for a nested dispatch.
     const parent = Symbol('run_code')
+    const callId = 'root:code:1'
 
     const started = await tool.execute({
       action: 'start',
@@ -298,27 +310,53 @@ describe('Raven Cordis plugin', () => {
       grounding: 'none',
       request: 'Write one short note.',
     }, { agent, signal })
-    expect(events).toHaveLength(0)
+    expect(appended).toHaveLength(0)
 
     await tool.execute({
       action: 'checkpoint',
       taskId: started.state.taskId,
       stage: 'draft',
       summary: 'A draft published from a program.',
-      artifact: 'A draft written from a Code Mode program.',
-    }, { agent, signal, parent })
-    expect(events).toEqual([
-      expect.objectContaining({ type: 'dsh-raven-research/task-state' }),
-    ])
+      // A Task step whose Artifact closes an HTML comment must not corrupt the record.
+      artifact: 'A draft written from a Code Mode program --> with a comment closer.',
+    }, { agent, signal, parent, callId })
+    // The record never rides a plugin-owned session event type: one would make the
+    // whole persisted session unloadable on the Harness read path.
+    expect(appended).toHaveLength(0)
+
+    const rendered = [{ type: 'text', text: 'rendered sub-call content' }]
+    const logged = await shapeLog(
+      { agent, subCallId: callId, name: 'raven_task', isError: false, content: rendered },
+      () => Promise.resolve(rendered),
+    )
+    expect(logged[0]).toEqual(rendered[0])
+    expect(String(logged[1]?.text)).toContain('<!-- dsh-raven-research/task-state ')
+    events.push({
+      type: 'tool/code-dispatch',
+      data: { name: 'raven_task', content: JSON.parse(JSON.stringify(logged)) as unknown },
+    })
 
     const reloaded = capture()
-    const restored = await reloaded.execute({ action: 'status' }, {
+    const restored = await reloaded.tool.execute({ action: 'status' }, {
       agent: { id: 'code-mode-session', session: { events } },
       signal,
     })
     expect(restored.state.taskId).toBe(started.state.taskId)
     expect(restored.state.checkpoints).toHaveLength(1)
-    expect(restored.state.latestArtifact).toBe('A draft written from a Code Mode program.')
+    expect(restored.state.latestArtifact).toBe('A draft written from a Code Mode program --> with a comment closer.')
+
+    // A log copy a spill policy replaced loses the step, never the session.
+    const spilled = capture()
+    const withoutRecord = await spilled.tool.execute({ action: 'status' }, {
+      agent: {
+        id: 'code-mode-session',
+        session: {
+          events: [{ type: 'tool/code-dispatch', data: { name: 'raven_task', content: [{ type: 'text', text: 'preview + locator' }] } }],
+        },
+      },
+      signal,
+    }).then(() => 'restored', (error: unknown) => (error as Error).message)
+    expect(withoutRecord).toContain('No Raven Task exists in this session')
   })
 
   it('keeps a nested sub-call working when the host exposes a read-only session view', async () => {

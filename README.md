@@ -11,7 +11,7 @@ Early checkpoints you can steer mid-run · citations verified against the bytes 
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.0-rc.7](https://img.shields.io/badge/harness-0.1.0--rc.7-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Harness 0.1.0-rc.8](https://img.shields.io/badge/harness-0.1.0--rc.8-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -24,7 +24,7 @@ English · [中文](README.zh.md)
 </div>
 
 > [!IMPORTANT]
-> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.0-rc.7`, which is itself an RC and ships
+> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.0-rc.8`, which is itself an RC and ships
 > breaking changes. Not published to npm yet — [install from a checkout](#install).
 
 ## TL;DR
@@ -59,6 +59,13 @@ external/destructive/sensitive side effect.
 
 ## Features
 
+- **Batched discovery over the official search seam.** `discover` sends several complementary queries in one Task
+  step through the Harness `web` search capability, folds one URL returned by several queries into one Lead, and
+  keeps every sibling's results when a query fails — the failure is recorded as a Limitation, not an aborted batch.
+  What comes back are **Leads**, never Sources: nothing can be cited until it has been opened and excerpted.
+- **Agent Teams reuse.** Where the deployment composes the Harness Agent Teams capability, the Raven Task belongs to
+  the Team: every member reads and extends the same Task, a teammate cannot start a competing one, and each member's
+  own durable records merge into one Task book. Where no Team is composed, nothing changes.
 - **Progressive delivery.** A Checkpoint is useful on its own and is published while the Task is still running, so
   you can redirect the work before the expensive part.
 - **Steering instead of restarts.** `steer` applies a user correction to the live Task and preserves prior evidence.
@@ -89,7 +96,7 @@ you never edit a Harness checkout or a shipped preset.
 
 | Requirement | Version |
 | --- | --- |
-| DeepSeek Harness | `0.1.0-rc.7` (checkout `99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`) |
+| DeepSeek Harness | `0.1.0-rc.8` (checkout `141eb6fef83422698aef7a981029e843e8161534`) |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
 | Peer dependencies | `@deepseek-ai/dsh-settings`, `@deepseek-ai/schemastery` — supplied by the Harness deployment |
@@ -222,6 +229,7 @@ manage:
 | Action | What it does |
 | --- | --- |
 | `start` | Opens one Task with an Outcome (`research`, `general-writing`, `academic-writing`, `learning`) and a grounding level (`required`, `optional`, `none`). |
+| `discover` | Runs one batch of complementary queries through the Harness `web` search seam and returns **Leads** — uninspected candidates, never Sources. A failing query becomes a Limitation instead of losing the batch. |
 | `checkpoint` | Publishes a user-visible Artifact version with new Sources, Claims, and recorded failures, and verifies grounded evidence. |
 | `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. |
 | `complete` | Validates citation identity, material Claim links, matched excerpts, Source reachability, and the exact Artifact fingerprint against the latest post-steer Checkpoint. |
@@ -261,25 +269,47 @@ and `apply`) and keeps `apply` thin. It registers:
 
 - one `raven_task` model tool through `ctx.tools`;
 - one compact static section through `ctx.systemPrompt`;
-- one `agent/pre-step` listener that puts the live Task book in front of the model before each step; and
+- one `agent/pre-step` listener that puts the live Task book in front of the model before each step;
+- one `tools/code-dispatch-log` listener that keeps a Code Mode Task step durable (see below); and
 - the `raven-research` settings section, gated behind `ctx.inject` so a deployment without a settings service simply
   never runs that wiring.
 
-`web` is deliberately not injected: it is fetched dynamically from the context when a Source has to be reopened, so
-a deployment without it still loads and still writes. Every registration returns a disposer owned by the calling
-fiber, which is what makes [uninstall](#uninstall) clean.
+`web` is deliberately not injected: it is fetched dynamically from the context when a Source has to be reopened or a
+discovery batch runs, so a deployment without it still loads and still writes. The experimental `agentTeams`
+capability is read the same way and is never a dependency: it is private and unpublished upstream, so Raven mirrors
+only the shape it reads and degrades to single-agent behaviour everywhere else. Every registration returns a
+disposer owned by the calling fiber, which is what makes [uninstall](#uninstall) clean.
 
 ### One Task book, two durability paths
 
-Raven keeps one Task book per session and rebuilds it from the session log rather than from storage of its own:
+Raven keeps one Task book per session — or per Agent Team — and rebuilds it from the session log rather than from
+storage of its own:
 
 - A **direct tool call** carries the Task record as durable result metadata (`tool/result.meta`, kind
   `dsh-raven-research/task-state`).
 - A call made **inside a Code Mode `run_code` program** is a nested sub-call with no result card, so the Harness
-  computes no presentation metadata for it. Raven therefore publishes the same record itself as a
-  `dsh-raven-research/task-state` session event.
+  computes no presentation metadata for it. Raven attaches the same record to the durable copy of that sub-dispatch
+  instead, through the `tools/code-dispatch-log` waterfall, as an HTML comment on the Harness-owned
+  `tool/code-dispatch` event.
+
+> [!IMPORTANT]
+> Raven writes **no plugin-owned session event type**. The Harness persistence read path refuses to interpret any
+> stored log containing an event type it does not know unless the writer marked that event `ignorable`, and
+> `Session.append` gives an out-of-repo plugin no way to set that marker — so a single Code Mode Task step written
+> under a plugin-owned type would make the entire session unloadable. Riding a known event type keeps the session
+> loadable by construction. If a deployment's spill policy replaces an oversized log copy, that one step is simply
+> not restored; the session still loads, and the next direct call republishes the whole record.
 
 Either path restores the book when a session resumes, so a Task advanced from inside a program is not silently lost.
+
+### One Task per Agent Team
+
+Where the deployment composes the Harness Agent Teams capability, Raven keys the Task book by the Team id rather
+than by the Agent id, so the Lead and every teammate share one Task identity, one evidence set, and one Artifact.
+A teammate's `start` is refused while the Team's Task is active, its Checkpoints land on that Task, and each
+member's own durable records merge into the shared book as that member is first seen. Raven reads the capability
+structurally through `ctx.get('agentTeams')` and contains every call: the Team packages are private, unpublished,
+and carry no stability promise upstream, so the absence — or a throwing probe — must never fail a Task step.
 
 ### The failure path carries the Task too
 
@@ -307,8 +337,9 @@ fingerprint, and appends the independence-aware Claim trace.
 ### Package surface and non-goals
 
 Raven ships as one dependency-light ESM package: one Cordis plugin, one model tool, one prompt section, a pure
-TypeScript Task engine, compact same-session replay through official `tool/result.meta`, and one `SourceVerifier`
-seam.
+TypeScript Task engine, compact same-session replay through official `tool/result.meta` and `tool/code-dispatch`,
+and two seams over the official `ctx.web` capability — a `SourceSearcher` for Leads and a `SourceVerifier` for
+evidence.
 
 It deliberately excludes a GUI, model host, vector store, custom scheduler, general agent framework, and
 Raven-owned database. Long-running goals, subagents, workflows, files, and persistence remain Harness
@@ -340,6 +371,10 @@ settings provider serves the namespace to every configuration surface.
 | --- | --- | --- |
 | `sourceVerification` | `remote` | `structural-only` withholds every remote check. No Source can then be confirmed, so a Checkpoint that records Sources is refused with the policy named. Set it only where the network is genuinely out of reach. |
 | `sourceCheckTimeoutMs` | `0` | Deadline for one remote Source check, in milliseconds. `0` means no deadline. An exceeded deadline reports that one Source as unverifiable instead of holding the Checkpoint open. |
+| `sourceDiscovery` | `seam` | `disabled` withholds `action=discover` entirely: the call reports discovery as unavailable and records a Limitation rather than returning an empty result the agent could mistake for "nothing exists". The agent keeps its own Harness tools. |
+| `searchMaxQueries` | `4` | Upper bound on queries in one `discover` batch, mirroring the Harness `web_search` batch bound. The bound is applied **before** deduplication, so repeating a query spends its slot. |
+| `searchMaxResults` | `8` | Upper bound on candidates requested per query, mirroring the Harness `web_search` source bound. The merged Lead list is bounded separately. |
+| `searchTimeoutMs` | `30000` | Deadline for one discovery query, in milliseconds. `0` means no deadline. An exceeded query is recorded as a failed query and a Limitation; its siblings still return their Leads. |
 
 > [!NOTE]
 > No setting can lower a Task's evidence floor. Withholding checks makes evidence unverifiable, which refuses
@@ -356,8 +391,8 @@ loader's lazy-CJS factory format, and the preset that emits it is not published 
 
 Raven v1 is pinned and tested against:
 
-- DeepSeek Harness `0.1.0-rc.7`;
-- Harness checkout commit `99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`;
+- DeepSeek Harness `0.1.0-rc.8`;
+- Harness checkout commit `141eb6fef83422698aef7a981029e843e8161534`;
 - Node.js `^22.19.0 || >=24.0.0`; and
 - pnpm `11.21.0`.
 
@@ -398,6 +433,10 @@ pnpm check:release
 
 <br>
 
+- batches complementary discovery queries, folds one URL into one Lead, and survives a failing query;
+- refuses to present Leads as evidence, and reports withheld or absent discovery instead of an empty search;
+- shares one Task across an Agent Team and refuses a teammate's competing Task;
+- keeps a Code Mode Task step durable without writing any plugin-owned session event type;
 - exposes a useful intermediate research Artifact before final verification;
 - refines the same Task after a mid-run user correction;
 - proceeds through normal stages without a confirmation action;
@@ -424,6 +463,16 @@ with its own tools and its own model.
 **Do I need a vector database, an index, or an embedding pipeline?**
 No. Raven has no store of its own. Sources are recorded by stable identity and reopened over the Harness `web`
 capability when verification runs.
+
+**Does Raven search the web itself, or does the agent?**
+Both, on purpose. `action=discover` runs a batch of complementary queries through the same `ctx.web` search seam
+that backs the Harness `web_search` tool, so the queries and their failures become part of the Task record instead
+of disappearing into the transcript. The agent keeps its own retrieval tools for everything else, and it is still
+the agent that opens a Lead and records the excerpt — discovery never produces evidence.
+
+**Does it work inside an Agent Team?**
+Yes. The Raven Task belongs to the Team rather than to one member. Agent Teams is an experimental, unpublished
+Harness capability, so Raven consumes it optionally: without it, every Agent simply owns its own Task book.
 
 **Does it work without web access?**
 Yes, for non-grounded writing and learning. Without a composed Harness `web` capability, external Claims are not

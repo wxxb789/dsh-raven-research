@@ -6,8 +6,8 @@ import { pathToFileURL } from 'node:url'
 
 import { runProcess } from './process.js'
 
-const EXPECTED_VERSION = '0.1.0-rc.7'
-const EXPECTED_COMMIT = '99f6f02fecdb7dff40c3fbc9470f5907c29f74ca'
+const EXPECTED_VERSION = '0.1.0-rc.8'
+const EXPECTED_COMMIT = '141eb6fef83422698aef7a981029e843e8161534'
 const checkout = process.env.DSH_CHECKOUT
 if (checkout === undefined || checkout.trim().length === 0) {
   throw new Error('Set DSH_CHECKOUT to the DeepSeek Harness checkout under test.')
@@ -111,6 +111,22 @@ try {
       }
     },
   })
+  const searched: string[] = []
+  ctx.web.registerSearchProvider({
+    id: 'raven-smoke-search',
+    available: () => true,
+    async search(request: { query: string; maxResults?: number }) {
+      searched.push(request.query)
+      if (request.query === 'broken query') throw new Error('backend refused the query')
+      return {
+        sources: [
+          { url: 'https://evidence.test/source', title: 'Harness smoke evidence' },
+          { url: `https://evidence.test/${encodeURIComponent(request.query)}`, title: request.query },
+        ],
+        truncated: false,
+      }
+    },
+  })
 
   const appended: Array<{ type: string; data: { kind?: string; state?: { taskId?: string } } }> = []
   const agent = {
@@ -156,6 +172,19 @@ try {
   assert.match(started, /Started Raven Task/)
   const taskId = /Task: (rvn-[a-f0-9]{12}-1)/.exec(started)?.[1]
   assert.ok(taskId)
+  // Discovery runs the real `ctx.web` search half: one batch, several angles, one
+  // failing query recorded as a Limitation instead of losing the whole batch.
+  const discovered = await execute({
+    action: 'discover',
+    taskId,
+    queries: ['durable acknowledgement', 'write-ahead durability', 'broken query'],
+  })
+  assert.deepEqual(searched, ['durable acknowledgement', 'write-ahead durability', 'broken query'])
+  assert.match(discovered, /Leads \(uninspected candidates, not Sources\)/)
+  assert.match(discovered, /backend refused the query/)
+  // One URL returned by two queries is one Lead that records both.
+  assert.equal((discovered.match(/https:\/\/evidence\.test\/source/g) ?? []).length, 1)
+
   const checkpoint = await execute({
     action: 'checkpoint',
     taskId,
@@ -189,17 +218,59 @@ try {
   assert.match(completed, /Harness smoke evidence/)
 
   // Task state has two publication paths because the registry gives a nested
-  // sub-call no result card: a direct call carries the record as result
-  // metadata, and a Code Mode dispatch publishes the same record itself.
+  // sub-call no result card: a direct call carries the record as result metadata,
+  // and a Code Mode dispatch carries it on the durable copy of the sub-dispatch.
   const direct = await run({ action: 'status', taskId })
   assert.notEqual(direct.meta, undefined, 'a direct call must publish Task state as durable result metadata')
   assert.equal(appended.length, 0, 'a direct call must not duplicate the record its tool result already carries')
-  const nested = await run({ action: 'status', taskId }, Symbol('raven-code-mode'))
+  const nestedCallId = 'raven-dsh-smoke-nested-' + String(++call)
+  const nested = await ctx.tools.execute({
+    callId: nestedCallId,
+    name: 'raven_task',
+    arguments: { action: 'status', taskId },
+    agent,
+    signal,
+    parent: Symbol('raven-code-mode'),
+  })
+  assert.equal(nested.isError, false)
   assert.equal(nested.meta, undefined, 'the registry computes no presentation metadata for a nested sub-call')
-  assert.equal(appended.length, 1, 'a nested sub-call must publish its own durable Task state')
-  assert.equal(appended[0]?.type, 'dsh-raven-research/task-state')
-  assert.equal(appended[0]?.data.kind, 'dsh-raven-research/task-state')
-  assert.equal(appended[0]?.data.state?.taskId, taskId)
+  // The Harness persistence read path refuses a stored log carrying an event type
+  // it does not know unless the writer marked it ignorable, and `Session.append`
+  // gives a plugin no way to set that marker. Raven therefore appends no event of
+  // its own: one Code Mode step must never make a whole session unloadable.
+  assert.equal(appended.length, 0, 'Raven must not append a plugin-owned session event type')
+
+  // The record rides the `tools/code-dispatch-log` waterfall instead, on the known
+  // `tool/code-dispatch` event the Code Mode bridge appends.
+  const settledContent = [{ type: 'text' as const, text: 'rendered sub-call content' }]
+  const loggedContent = await ctx.waterfall(
+    'tools/code-dispatch-log',
+    { exec: { agent }, agent, subCallId: nestedCallId, name: 'raven_task', isError: false, content: settledContent },
+    () => Promise.resolve(settledContent),
+  ) as Array<{ type: string; text?: string }>
+  assert.equal(loggedContent.length, 2, 'the durable log copy must carry the Task record next to the rendered content')
+  assert.ok(String(loggedContent[1]?.text).startsWith('<!-- dsh-raven-research/task-state '))
+
+  // A resumed session rebuilds that step from the known event alone.
+  const resumed = await ctx.tools.execute({
+    callId: 'raven-dsh-smoke-resume-' + String(++call),
+    name: 'raven_task',
+    arguments: { action: 'status' },
+    agent: {
+      id: 'raven-dsh-smoke-resumed',
+      session: {
+        events: [{
+          type: 'tool/code-dispatch',
+          seq: 0,
+          time: 0,
+          data: { name: 'raven_task', content: loggedContent },
+        }],
+      },
+    },
+    signal,
+  })
+  assert.equal(resumed.isError, false, 'a Code Mode Task step must survive a session reload')
+  assert.ok(textOf(resumed).includes(taskId), 'the restored Task must be the one the program worked on')
 
   // An unknown action is rejected by argument validation, before `execute` and
   // outside `tools/post-execute`. The tool-owned content finalizer still runs, so
@@ -264,7 +335,7 @@ try {
   assert.equal(ctx.get('systemPrompt'), undefined, 'removing the composition must dispose Raven prompt contributions')
   assert.equal(ctx.get('web'), undefined, 'removing the composition must dispose the web verification seam')
   assert.equal(ctx.get('settings'), undefined, 'removing the composition must dispose the settings provider and Raven registration')
-  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, and disposal passed`)
+  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, and disposal passed`)
 } finally {
   await ctx.fiber.dispose()
   await rm(compositionRoot, { recursive: true, force: true })
