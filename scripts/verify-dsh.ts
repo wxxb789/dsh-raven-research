@@ -357,7 +357,30 @@ try {
     'the bundle patch must compose to exactly one row naming this package',
   )
 
-  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, Profile Bundle composition, and disposal passed`)
+  // The browser half's slot contract, checked against the Harness under test.
+  //
+  // `src/client/slot-contract.ts` restates an augmentation Raven cannot import,
+  // and the published copy of the declaring package lags this checkout: at
+  // 0.1.0-rc.6 the slot is `kind: 'list'`, here it is `kind: 'keyed'` with the
+  // settings namespace as the key. A card registered under the wrong shape
+  // compiles and then never renders, with nothing logged anywhere — so the drift
+  // has to break this gate instead of the browser.
+  const slotContract = await readFile(
+    join(root, 'packages/client/ui-settings-plugins/src/client/slot-contract.ts'),
+    'utf8',
+  )
+  assert.match(
+    slotContract,
+    /'settings\.plugin\.item':\s*\{\s*kind:\s*'keyed';\s*scope:\s*'root'/,
+    'the settings.plugin.item slot is no longer a root-scoped keyed slot; src/client/slot-contract.ts must be restated',
+  )
+  assert.match(
+    slotContract,
+    /keyed by the settings namespace/,
+    'the settings.plugin.item key is no longer the settings namespace; the card would register under a key the tab never dispatches',
+  )
+
+  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot contract, and disposal passed`)
 } finally {
   await ctx.fiber.dispose()
   await rm(compositionRoot, { recursive: true, force: true })

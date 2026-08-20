@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { layoutProse, proseLayoutReport, type ProseLayoutOptions, type ProseLayoutReport } from './prose.js'
+import { formatDraftRoute } from './route.js'
 import { renderWikiPages } from './wiki.js'
 
 import {
@@ -636,22 +637,9 @@ function leadLabel(lead: { readonly url: string; readonly title?: string }): str
   }
 }
 
-/**
- * Split a configured `provider/model` route on its FIRST separator: a provider
- * route never contains one, while a model id routinely does
- * (`deepseek/deepseek-chat`), so splitting on the last would silently reroute
- * every namespaced model to the wrong provider.
- */
-export function parseDraftRoute(spec: string): RavenDraftRoute | undefined {
-  const trimmed = spec.trim()
-  const separator = trimmed.indexOf('/')
-  if (separator <= 0 || separator >= trimmed.length - 1) return undefined
-  return { provider: trimmed.slice(0, separator), model: trimmed.slice(separator + 1) }
-}
-
-export function formatDraftRoute(route: RavenDraftRoute): string {
-  return `${route.provider}/${route.model}`
-}
+// The route vocabulary lives in a dependency-free module so the browser
+// settings card can share it without pulling `node:crypto` into the page.
+export { formatDraftRoute, parseDraftRoute } from './route.js'
 
 /**
  * Render one comparison round. Every variant is labelled a candidate on every

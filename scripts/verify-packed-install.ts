@@ -16,6 +16,8 @@ const userConfig = join(isolatedHome, '.npmrc')
 const expectedFiles = [
   'cordis.patch.yml',
   'examples/agent-row.cordis.yml',
+  'lib/client.js',
+  'lib/client.js.map',
   'lib/index.d.ts',
   'lib/index.js',
   'LICENSE',
@@ -188,6 +190,19 @@ assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml')
 const patch = readFileSync(new URL('./cordis.patch.yml', new URL('file://' + installed.replaceAll('\\\\', '/'))), 'utf8')
 assert.match(patch, /- insert:/)
 assert.match(patch, /name: dsh-raven-research/)
+
+// The browser half survives packing too: the manifest field the module scan
+// matches on, and the artifact the ./client subpath points at. A platform other
+// than 'web' would fail silently in the page, so it is asserted here instead.
+assert.deepEqual(manifest.dsh?.client, { platform: 'web' })
+assert.equal(manifest.exports['./client'], './lib/client.js')
+const client = readFileSync(require_.resolve('dsh-raven-research/client'), 'utf8')
+// Executed rather than string-matched: the bundler is free to reformat the
+// banner, and only running it proves the artifact registers what it claims.
+let registered
+new Function('window', client)({ __ModuleLoader__: { load: (entry) => { registered = entry } } })
+assert.equal(registered?.id, 'dsh-raven-research', 'the packed browser artifact must register under the package name')
+assert.equal(typeof registered?.factory, 'function')
 
 const tools = []
 const sections = []

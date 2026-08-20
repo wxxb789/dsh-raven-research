@@ -3,6 +3,7 @@ import z from '@deepseek-ai/schemastery'
 
 import { RAVEN_LIMITS } from './domain.js'
 import type { ProseFormat, ProseLayout } from './prose.js'
+import type { SourceDiscoveryMode, SourceVerificationMode } from './route.js'
 
 /**
  * The settings namespace Raven owns. Registering it is what exposes it: a Harness
@@ -11,13 +12,14 @@ import type { ProseFormat, ProseLayout } from './prose.js'
  */
 export const RAVEN_SETTINGS_NAMESPACE: SettingsNamespace = settingsNamespace('raven-research')
 
-export const SOURCE_VERIFICATION_MODES = ['remote', 'structural-only'] as const
-
-export type SourceVerificationMode = typeof SOURCE_VERIFICATION_MODES[number]
-
-export const SOURCE_DISCOVERY_MODES = ['seam', 'disabled'] as const
-
-export type SourceDiscoveryMode = typeof SOURCE_DISCOVERY_MODES[number]
+// Re-exported rather than declared here: the browser settings card needs the
+// same option lists, and this module reaches for the Harness settings runtime.
+export {
+  SOURCE_DISCOVERY_MODES,
+  SOURCE_VERIFICATION_MODES,
+  type SourceDiscoveryMode,
+  type SourceVerificationMode,
+} from './route.js'
 
 /**
  * Deployment-owned Raven policy.

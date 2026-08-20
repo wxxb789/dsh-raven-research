@@ -1,4 +1,5 @@
 import type { ProseLayout } from './prose.js'
+import type { RavenDraftRoute } from './route.js'
 
 export const RAVEN_LIMITS = {
   requestChars: 20_000,
@@ -139,10 +140,7 @@ export const DRAFT_STATUSES = ['drafted', 'failed'] as const
 export type RavenDraftStatus = typeof DRAFT_STATUSES[number]
 
 /** One model route asked for a Draft Variant. Identity is the pair, never the model alone. */
-export interface RavenDraftRoute {
-  readonly provider: string
-  readonly model: string
-}
+export type { RavenDraftRoute } from './route.js'
 
 /**
  * One candidate rendering of the same writing task, produced by one route.

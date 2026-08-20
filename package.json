@@ -42,10 +42,14 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "client": {
+      "platform": "web"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
@@ -69,7 +73,7 @@
     "test": "vitest run",
     "test:dsh": "pnpm run build && tsx scripts/run-dsh-test.ts",
     "test:pack": "tsx scripts/verify-packed-install.ts",
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test",
     "check:release": "pnpm run check && pnpm run test:pack && pnpm run test:dsh"
   },
   "peerDependencies": {
@@ -86,6 +90,11 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-settings": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-settings-plugins": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
     "@deepseek-ai/dsh-session": "0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "0.1.0-rc.6",
@@ -94,7 +103,9 @@
     "@deepseek-ai/dsh-web": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "3.18.1",
     "@types/node": "22.20.0",
+    "@types/react": "19.2.2",
     "oxlint": "1.76.0",
+    "react": "19.2.0",
     "tsdown": "0.22.2",
     "tsx": "4.22.4",
     "typescript": "6.0.3",
