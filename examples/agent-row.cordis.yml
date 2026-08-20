@@ -1,5 +1,14 @@
-# Append this row to a copied, user-authored agent preset.
+# Scope Raven to ONE agent preset. Append this row to a copied, user-authored preset.
 # Do not edit a shipped DeepSeek Harness preset.
+#
+# This is the alternative to installing Raven as a Profile Bundle
+# (`dsh plugin add dsh-raven-research`), which mounts it on the Host plane for every
+# agent. Choose one. Mounting both registers `raven_task` twice, into two different
+# layers, because `tools` is host+per-scope layered.
+#
+# A preset-scoped mount also serves the `raven-research` settings namespace only while
+# a session using this preset is alive, so the Settings > Plugins card appears and
+# disappears with such a session. Prefer the Bundle where that card matters.
 - id: raven-research
   name: dsh-raven-research
   # Optional. This entry is the base layer of the `raven-research` settings namespace;
@@ -12,3 +21,10 @@
   #   searchMaxQueries: 4
   #   searchMaxResults: 8
   #   searchTimeoutMs: 30000
+  #   # Writing: one sentence per line makes a LINE the smallest edit unit.
+  #   proseLayout: sentence-per-line
+  #   proseFormat: markdown
+  #   # Draft Variants stay off until a deployment names the routes they may spend.
+  #   draftRoutes: []
+  #   draftMaxTokens: 4000
+  #   draftTimeoutMs: 120000

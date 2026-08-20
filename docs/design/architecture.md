@@ -56,7 +56,9 @@ user-visible tasks or stages.
 ## External Interface
 
 The Cordis plugin exports named `name`, `inject`, and `apply` values. It has no
-default export, no client half, and no provided process service.
+default export and provides no process Service. It ships two halves in one
+package: the Host half above, and a browser half at `./client` whose only
+contribution is one card on the Settings › Plugins page.
 
 ```ts
 type RavenTaskAction =
@@ -77,11 +79,13 @@ type RavenTaskAction =
       failures?: FailureInput[]
     }
   | { action: "discover"; taskId: string; queries: string[] }
+  | { action: "draft"; taskId: string; instruction: string; routes?: string[] }
   | { action: "steer"; taskId: string; correction: string }
   | { action: "complete"; taskId: string; artifact: string }
   | { action: "status"; taskId?: string }
   | { action: "stop"; taskId: string; reason?: string }
   | { action: "resume"; taskId: string }
+  | { action: "export"; taskId: string; title?: string; tags?: string[]; init?: boolean }
 ```
 
 The tool is exclusive by default because it does not opt into Harness parallel tool
@@ -112,6 +116,14 @@ registry.
   Task keeps the angles that worked and still records the angle it lost.
 - `checkpoint` atomically commits an independently useful Artifact plus the evidence
   and failures that inform it. Stages are observations, never approval gates.
+- `draft` asks every configured model route for the same bounded instruction and
+  returns the candidates side by side. It is a separate action for the same reason
+  `discover` is: producing candidate wording and committing evidence are different
+  authorities. A Draft Variant has been written, not verified, so it may never reach
+  a Claim, an Artifact citation, or the evidence floor. The deployment owns the route
+  list and the agent may only select a subset of it, because naming a model is naming
+  spend and a data path. A route that fails becomes one labelled variant rather than a
+  failed round, so the comparison survives one dead provider.
 - `steer` appends a Steering Revision to the same Task and invalidates stale final
   verification.
 - `complete` verifies the exact candidate Artifact and recorded source references.
@@ -265,6 +277,33 @@ next state, validates invariants, and returns either the next state or an action
 non-mutating result. It owns all lifecycle, revision, Checkpoint, Source, Claim,
 citation, and completion semantics.
 
+### Prose Layout
+
+A pure, total, idempotent Module normalizes every submitted Artifact into the Task's
+canonical line shape before it is hashed and stored. Idempotence is a hard requirement
+rather than an elegance: Completion compares Artifact byte hashes, so a caller must be
+able to resend either its own packed text or the bytes Raven returned without being
+told it made an unauthorized final edit. See [ADR 0003](../adr/0003-prose-layout.md).
+
+### Draft generator Seam
+
+Drafting is a third Raven-owned Seam, kept separate from both evidence Seams because
+producing candidate wording and confirming evidence are different authorities:
+
+```ts
+interface DraftGenerator {
+  generate(request: DraftRequest, signal: AbortSignal): Promise<DraftResult>
+}
+```
+
+`HarnessLlmDraftGenerator` reads `ctx.llm` dynamically and runs every route
+concurrently under its own deadline. Two properties of that seam shape the Adapter. It
+reports adapter, dispatch, and iteration failure through a terminal `finish` chunk
+rather than by throwing, so the finish reason is inspected explicitly — a drafter that
+only wrapped the loop in `try`/`catch` would accept an empty or truncated draft as a
+real one. And it applies no retry or metering to a plugin-initiated call, which is
+recorded here rather than assumed. See [ADR 0004](../adr/0004-draft-variants.md).
+
 ### Source searcher Seam
 
 Discovery is a second Raven-owned Seam over the SAME official capability:
@@ -408,21 +447,73 @@ remain untouched.
 ```text
 src/
   domain.ts       # owned JSON types and guards
+  route.ts        # dependency-free model-route and mode vocabulary, shared by both halves
+  prose.ts        # pure, idempotent, Markdown-aware Prose Layout
   engine.ts       # deep Task Module
+  codec.ts        # replay validation of the compact snapshot
+  wiki.ts         # llm-wiki page projection
+  config.ts       # deployment settings schema
   prompt.ts       # concise stable protocol
-  plugin.ts       # direct Harness registrations and web Adapter
+  plugin.ts       # direct Harness registrations and the web, model, and settings Adapters
   index.ts        # named Cordis exports
+  client/         # browser half: one Settings > Plugins card
+    card-state.ts # pure form model: validity, override detection, save planning
+    controller.ts # staged edits and writes over the settings scope
+    Card.tsx      # presentation only
+    slot-contract.ts # the targeted slot augmentation, restated (see below)
+    index.ts      # named browser Cordis exports
 
 tests/
-  unit/           # engine invariants and verifier observations
+  unit/           # engine invariants, Prose Layout, card form model, bundle manifest
   acceptance/     # four Outcomes and progressive/steering/failure scenarios
-  integration/    # plugin load/replay/packed-consumer checks
+  integration/    # plugin load/replay/packed-consumer/browser-artifact checks
 ```
 
-One ESM package is the release unit. It has no runtime npm dependencies beyond Node
-built-ins and compatible Harness peers supplied by the deployment. Splitting a core,
-service, tool, storage provider, or client package is deferred until a second real
-consumer or Adapter exists.
+The package is one ESM release unit shipping two halves, and it declares no runtime
+npm dependency of its own.
+
+The Host half never bundles a Harness package. A profile installs plugins with
+`nodeLinker: hoisted` and `autoInstallPeers: false` precisely so an out-of-tree
+plugin's peers fall through to the running installation and every plugin shares ONE
+cordis instance; a bundled copy would give this plugin a second instance whose
+services the Harness cannot resolve, and that failure looks like an absent service
+rather than a build error.
+
+The browser half inverts that rule: it inlines everything except the eight specifiers
+the shell seeds into its own module table, because `require` inside the generated
+factory is that table's shim rather than Node's resolver, and an unanswerable
+specifier is a guaranteed runtime throw.
+
+### Browser half and the restated slot contract
+
+The card reaches the page through the keyed `settings.plugin.item` slot, whose key is
+the settings namespace. That keying is what lets a plugin distributed outside the
+Harness repository contribute a card at all: the Host half registers the namespace,
+the browser half registers a card under the same key, and the tab pairs them without
+ever learning what the namespace means.
+
+The declaring package's own augmentation cannot be imported across the client
+bundle-purity boundary, and its published copy lags the running Harness — at
+`0.1.0-rc.6` the slot is `kind: 'list'`, at `0.1.0-rc.8` it is `kind: 'keyed'`. A card
+registered under the older shape compiles and then never renders, with nothing logged
+anywhere. `src/client/slot-contract.ts` therefore restates the targeted augmentation,
+and `scripts/verify-dsh.ts` asserts that shape against the Harness checkout under
+test, so the drift breaks the release gate rather than the browser.
+
+The Harness card chrome and staged-form model are likewise off limits as values, so
+the card reimplements them. All of that logic lives in `card-state.ts` and is pure — a
+reimplementation is exactly the thing that drifts, and purity is what makes every rule
+in it testable in Node without a browser.
+
+### Composition surfaces
+
+The package declares `dsh.bundle.patch`, so `dsh plugin add` appends it to a profile's
+bundle list and `cordis.patch.yml` inserts one host-plane row. Host plane rather than
+an Agent Preset, deliberately: Raven publishes no Service, but its settings namespace
+and its `tools/code-dispatch-log` waterfall are both process-wide, and a namespace
+served only while a session using one preset happens to be alive would appear and
+vanish in the settings UI. `examples/agent-row.cordis.yml` remains the preset-scoped
+alternative; mounting both registers `raven_task` twice into two different layers.
 
 ## Agreed test Seams
 

@@ -800,7 +800,7 @@ function toolDefinition(
 ): ToolDefinition {
   return {
     name: TOOL_NAME,
-    description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover Leads with a batch of complementary queries; publish useful Checkpoints before exhaustive work; apply user corrections with steer on the same taskId; record inspected Sources, Claims, and partial failures; stop/resume without loss; and complete only against the exact final Artifact. Inside an Agent Team the Task belongs to the Team, so every member continues the same one. Normal research stages need no approval.',
+    description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover Leads with a batch of complementary queries; draft candidate wording from several configured models at once; publish useful Checkpoints before exhaustive work; apply user corrections with steer on the same taskId; record inspected Sources, Claims, and partial failures; stop/resume without loss; and complete only against the exact final Artifact. The stored Artifact is Markdown laid out one sentence per line, so a LINE is the smallest edit unit and the returned bytes are the ones to edit next. Inside an Agent Team the Task belongs to the Team, so every member continues the same one. Normal research stages need no approval.',
     parameters: {
       type: 'object',
       additionalProperties: false,

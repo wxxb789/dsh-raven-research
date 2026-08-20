@@ -24,6 +24,14 @@ A user correction or change of emphasis applied to the existing Raven Task. A St
 
 A candidate Raven has located but not inspected. A Lead records where something might be, never what it says. Discovery produces Leads; only inspection turns one into a Source. A Lead can never carry a Claim, appear in an Artifact citation, or count toward the evidence floor.
 
+## Draft Variant
+
+One candidate rendering of the same writing instruction, produced by one model route. A Draft Variant is a candidate in exactly the sense a Lead is: it carries no evidence of its own, can never be cited, and joins the Raven Task only when its wording is adopted into a Checkpoint that Raven verifies against real Sources. Comparing variants chooses phrasing; it never establishes a fact, and a sentence every variant agrees on is still unsupported until a Source excerpt supports it.
+
+## Prose Layout
+
+The canonical line shape of a stored Artifact. Raven owns it rather than the executor, because Completion compares Artifact bytes: if each writer laid out its own text, one model's line-wrapping habits would decide whether a final Artifact matches its Checkpoint. Under the default layout each sentence occupies its own line, which makes a line the smallest edit unit — a revision then reads as the sentences that changed rather than as rewritten paragraphs. A Prose Layout never alters meaning and never reflows document structure.
+
 ## Source
 
 An external item that Raven has actually inspected and can identify again. A Source records a stable identity and enough location information to revisit the relevant material. A search result or remembered citation is only a lead until inspected.

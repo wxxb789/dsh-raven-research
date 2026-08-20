@@ -23,6 +23,7 @@ const expectedFiles = [
   'LICENSE',
   'package.json',
   'README.md',
+  'README.zh.md',
 ]
 
 function isolatedPnpmEnv(): NodeJS.ProcessEnv {
@@ -82,6 +83,7 @@ try {
     'cordis.patch.yml',
     'LICENSE',
     'README.md',
+    'README.zh.md',
     'package.json',
     'pnpm-lock.yaml',
     'pnpm-workspace.yaml',

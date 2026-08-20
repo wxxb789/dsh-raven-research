@@ -7,6 +7,7 @@ import {
   parseDraftRoute,
   type RavenDraftLimits,
 } from '../../src/engine.js'
+import { RAVEN_LIMITS } from '../../src/domain.js'
 import type {
   DraftGenerator,
   DraftRequest,
@@ -194,6 +195,28 @@ describe('Draft Variants', () => {
 
     const replayed = decodeRavenTaskState(JSON.parse(JSON.stringify(round.state)))
     expect(replayed?.drafts).toEqual(rounds)
+  })
+
+  it('rotates rounds at the bound while keeping ordinals strictly increasing for replay', async () => {
+    const drafter = recordingDrafter(() => ({ status: 'drafted', text: 'A sentence.' }))
+    const engine = harness({ draft: drafter.generator })
+    let state = (await startedTask(engine, 'session-draft-rotate')).state
+    const taskId = state.taskId
+    for (let round = 0; round < RAVEN_LIMITS.draftRounds + 8; round += 1) {
+      state = (await engine.dispatch(state, {
+        action: 'draft',
+        taskId,
+        instruction: `round ${round}`,
+      }, { sessionId: 'session-draft-rotate', signal })).state
+    }
+    const rounds = state.drafts ?? []
+    expect(rounds).toHaveLength(RAVEN_LIMITS.draftRounds)
+    // Trimming from the front must not restart the numbering: the replay codec
+    // requires strictly increasing ordinals, so a reset would make the whole
+    // Task unreadable after a long writing session.
+    expect(rounds.at(-1)?.ordinal).toBe(RAVEN_LIMITS.draftRounds + 8)
+    expect(rounds.every((entry, index) => index === 0 || entry.ordinal > (rounds[index - 1]?.ordinal ?? 0))).toBe(true)
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(state)))).not.toBeUndefined()
   })
 
   it('never lets a variant reach the evidence floor', async () => {

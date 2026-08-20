@@ -17,9 +17,10 @@ export interface RavenDraftRoute {
 
 /**
  * Split a configured `provider/model` route on its FIRST separator: a provider
- * route never contains one, while a model id routinely does
- * (`deepseek/deepseek-chat`), so splitting on the last would silently reroute
- * every namespaced model to the wrong provider.
+ * route never contains one, while a model id may. `openrouter/deepseek/deepseek-chat`
+ * is the provider `openrouter` and the model `deepseek/deepseek-chat`; splitting on
+ * the last separator would read it as the provider `openrouter/deepseek` and silently
+ * reroute every namespaced model to a provider that does not exist.
  */
 export function parseDraftRoute(spec: string): RavenDraftRoute | undefined {
   const trimmed = spec.trim()

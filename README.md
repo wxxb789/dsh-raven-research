@@ -33,12 +33,13 @@ English · [中文](README.zh.md)
   deep research, general writing, academic writing, and learning.
 - **Why it matters:** you get a useful Checkpoint early, you steer it mid-run instead of restarting, and every
   citation is checked against the bytes actually retrieved — not against what the model remembers.
-- **How it is built:** one host-only [Cordis](https://github.com/cordiverse/cordis) plugin, one model-facing
-  `raven_task` tool, one compact prompt section. No second agent runtime, no model host, no vector store, no
-  database. The Harness agent keeps researching and writing with its normal tools.
-- **Install:** `pnpm build && pnpm pack`, add the tarball to your Harness deployment, append one row to a
-  user-authored agent preset. See [Install](#install).
-- **Use:** talk to the Harness agent normally — no launch phrase, no separate UI. See [Usage](#usage).
+- **How it is built:** one [Cordis](https://github.com/cordiverse/cordis) plugin on the host plane, one
+  model-facing `raven_task` tool, one compact prompt section, and one settings card in the Web GUI. No second
+  agent runtime, no model host, no vector store, no database. The Harness agent keeps researching and writing
+  with its normal tools.
+- **Install:** `pnpm build && pnpm pack`, add the tarball to your Harness deployment, then
+  `dsh plugin --profile <name> add dsh-raven-research`. See [Install](#install).
+- **Use:** talk to the Harness agent normally — no launch phrase, no separate Task UI. See [Usage](#usage).
 ## Why Raven
 
 A substantial research or writing request usually disappears into a long batch pipeline: you wait, you get one wall
@@ -81,8 +82,19 @@ external/destructive/sensitive side effect.
   silently downgrading to "unchecked".
 - **Session-durable Task book.** Works from a direct tool call and from inside a Code Mode `run_code` program, and
   survives stop/resume — see [One Task book, two durability paths](#one-task-book-two-durability-paths).
+- **One sentence per line.** Every stored Artifact is normalized so each sentence occupies its own line, making a
+  **line** the smallest edit unit: a revision diffs as the sentences that actually changed instead of as whole
+  rewritten paragraphs. The transform is Markdown-structure-aware and idempotent — fenced code, tables, headings,
+  thematic breaks, link definitions, math blocks, YAML frontmatter, hard line breaks, and list/blockquote
+  continuation prefixes are copied through untouched.
+- **Draft Variants.** `draft` asks every configured `provider/model` route for the same bounded instruction and
+  returns the candidates, each laid out one sentence per line so they diff line by line. A Draft Variant is a
+  candidate exactly as a Lead is: it carries no evidence, can never be cited, and never counts toward the evidence
+  floor. Off until a deployment configures routes.
 - **First-class settings namespace.** Registering the plugin exposes `raven-research` to every configuration surface
   a Harness deployment composes; there is nothing to add to the Harness itself.
+- **A settings card in the Web GUI.** Raven ships a browser half that registers a card under Settings › Plugins for
+  its own namespace — see [Configuration](#configuration) for what that requires.
 - **Durable export.** `export` emits a valid [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) repository — artifact
   page, immutable `raw/` source pages with verification receipts, and an appendable `log.md` — that the agent writes
   with ordinary file tools. Raven never touches the filesystem itself.
@@ -99,7 +111,7 @@ you never edit a Harness checkout or a shipped preset.
 | DeepSeek Harness | `0.1.0-rc.8` (checkout `141eb6fef83422698aef7a981029e843e8161534`) |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
-| Peer dependencies | `@deepseek-ai/dsh-settings`, `@deepseek-ai/schemastery` — supplied by the Harness deployment |
+| Peer dependencies | Nine `@deepseek-ai/*` packages — the cordis framework, the schema library, and seven Harness Service Definitions (`cordis`, `dsh-agent`, `dsh-llm`, `dsh-session`, `dsh-settings`, `dsh-system-prompt`, `dsh-tools`, `dsh-web`, `schemastery`) — supplied by the Harness deployment, never bundled |
 
 ### 1. Build and pack
 
@@ -119,13 +131,41 @@ Run this from the deployment root; the package only has to be resolvable in that
 pnpm add /path/to/dsh-raven-research-0.1.0.tgz
 ```
 
-The tarball installs with no runtime dependency of its own; the deployment supplies the two peers. Once the package
+The tarball installs with no runtime dependency of its own; the deployment supplies the peers. They are peers rather than dependencies on purpose: a profile installs plugins with `autoInstallPeers: false` so they fall through to the running installation and every plugin shares one cordis instance. Once the package
 is published, the equivalent dependency is `dsh-raven-research@0.1.0`.
 
-### 3. Enable it in a user-authored agent preset
+### 3. Enable it
 
-Create or copy a **user-authored** agent preset, then append the row from
-[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) to its `cordis.yml`:
+Raven declares a Profile Bundle (`dsh.bundle.patch` in `package.json`), so the Harness CLI can mount it for you:
+
+```bash
+dsh plugin --profile <name> add dsh-raven-research
+```
+
+That appends the package to the profile's `dsh.profile.bundles`, and the bundled
+[`cordis.patch.yml`](./cordis.patch.yml) inserts one row on the **host plane**:
+
+```yaml
+- insert:
+    - id: raven-research
+      name: dsh-raven-research
+```
+
+Host plane is deliberate. Raven publishes no Service, so the usual host-plane criterion does not apply; what does
+apply is that two of the things it registers are process-wide. Its settings namespace can only be offered while
+something serves it — mounted only inside a preset, `raven-research` would appear in the settings UI exactly while
+a session using that preset happened to be alive, and vanish between sessions. The `tools/code-dispatch-log`
+waterfall, which carries the durable record of a Task step taken from inside `run_code`, is process-wide for the
+same reason. Because `tools` and `system-prompt` are layered registries, a host row lands in the global layer and
+every agent sees `raven_task` without opting in.
+
+<details>
+<summary><b>Alternative: scope Raven to one agent preset</b></summary>
+
+<br>
+
+To give Raven to a single preset instead, skip the bundle and append the row from
+[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) to that preset's `cordis.yml`:
 
 ```yaml
 - id: raven-research
@@ -140,6 +180,12 @@ Create or copy a **user-authored** agent preset, then append the row from
 > **Never edit a shipped Harness preset** — copy it first. Raven publishes no process service, so this row needs no
 > isolate realm. It consumes the preset's scoped `tools` and `systemPrompt` registries and obtains `web` dynamically
 > when source reopening is available.
+
+</details>
+
+> [!WARNING]
+> **Do not do both.** The same package mounted on the host plane and inside a preset registers `raven_task` twice,
+> into two different layers.
 
 ### 4. Verify
 
@@ -177,7 +223,14 @@ Two things to check before upgrading:
 
 ## Uninstall
 
-1. Remove the `- id: raven-research` row from your agent preset's `cordis.yml`.
+1. Remove Raven from the profile bundle:
+
+   ```bash
+   dsh plugin --profile <name> remove dsh-raven-research
+   ```
+
+   If you mounted the preset row instead, delete the `- id: raven-research` row from that preset's `cordis.yml`.
+
 2. Remove the package from the deployment:
 
    ```bash
@@ -186,10 +239,11 @@ Two things to check before upgrading:
 
 3. Optional: drop the `raven-research` section from the user's `settings.yaml`.
 
-Every Raven registration — the `raven_task` tool, the prompt section, the `agent/pre-step` listener, and the settings
-section — is disposer-backed and owned by its Cordis fiber, so unloading removes all of it and leaves no orphaned
-tool or prompt text (`pnpm test:dsh` exercises exactly that disposal path against a real Harness Loader). Restart
-the Harness if your deployment does not reload the preset on change.
+Every Raven registration — the `raven_task` tool, the prompt section, the `agent/pre-step` listener, the
+`tools/code-dispatch-log` listener, the settings section, and the browser card — is disposer-backed and owned by its
+Cordis fiber, so unloading removes all of it and leaves no orphaned tool or prompt text (`pnpm test:dsh` exercises
+exactly that disposal path against a real Harness Loader). Restart the Harness if your deployment does not reload
+the composition on change.
 
 Nothing else is left behind: Raven owns no database, no cache, and no files. Task state lives in the Harness session
 log, and anything you exported is a plain llm-wiki repository you already own.
@@ -230,6 +284,7 @@ manage:
 | --- | --- |
 | `start` | Opens one Task with an Outcome (`research`, `general-writing`, `academic-writing`, `learning`) and a grounding level (`required`, `optional`, `none`). |
 | `discover` | Runs one batch of complementary queries through the Harness `web` search seam and returns **Leads** — uninspected candidates, never Sources. A failing query becomes a Limitation instead of losing the batch. |
+| `draft` | Asks every configured `provider/model` route for the same bounded instruction and returns the candidates for comparison. A **Draft Variant** carries no evidence and can never be cited. |
 | `checkpoint` | Publishes a user-visible Artifact version with new Sources, Claims, and recorded failures, and verifies grounded evidence. |
 | `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. |
 | `complete` | Validates citation identity, material Claim links, matched excerpts, Source reachability, and the exact Artifact fingerprint against the latest post-steer Checkpoint. |
@@ -237,6 +292,33 @@ manage:
 | `stop` | Ends the Task with a recorded reason; explicitly not Completion. |
 | `resume` | Reopens a stopped Task — including an older one — without losing evidence or Artifact. |
 | `export` | Returns llm-wiki page bytes for the agent to write with ordinary file tools. |
+
+### One sentence per line
+
+Raven stores every Artifact in the Task's Prose Layout rather than in whatever line shape the model submitted.
+Under the default `sentence-per-line` layout each sentence occupies its own line, so a **line** is the smallest
+edit unit and a revision diffs as the sentences that actually changed. Markdown structure is never reflowed:
+fenced code, tables, headings, thematic breaks, link definitions, math blocks, YAML frontmatter, hard line breaks,
+and list or blockquote continuation prefixes are copied through as written.
+
+The transform is idempotent, and the stored bytes are the ones Completion compares against — so the returned
+Artifact, not the submitted one, is what the model edits next. Set `proseLayout: as-written` to store exactly what
+the agent wrote, or `proseFormat: plain` where Artifacts are not Markdown.
+
+### Comparing wording: Draft Variants
+
+`action=draft` sends one bounded instruction — a section, a paragraph, an abstract — to every configured
+`provider/model` route and returns the results together, each laid out one sentence per line so they diff line by
+line. A route that fails or times out costs its own variant, never the round.
+
+A Draft Variant is a **candidate**, exactly as a Lead is. It carries no evidence, may never be cited, and never
+counts toward the evidence floor; a sentence every variant agrees on is still unsupported until a recorded Source
+excerpt supports it. Adopt phrasing, never facts.
+
+The deployment owns the route list: the agent may select a subset of `draftRoutes` and nothing else, because naming
+a model is naming spend and a data path. An unknown route is refused with the configured set named rather than
+quietly substituted. Drafting is **off** until a deployment sets `draftRoutes`; until then the call reports that
+instead of drafting from the session model.
 
 ### Keeping the result after the session: llm-wiki export
 
@@ -265,7 +347,7 @@ flowchart LR
 ### What the plugin registers
 
 Raven exports plain Cordis plugin metadata (`name`, `inject = ['tools', 'systemPrompt']`, a Schemastery `Config`,
-and `apply`) and keeps `apply` thin. It registers:
+and `apply`) and keeps `apply` thin. On the host plane it registers:
 
 - one `raven_task` model tool through `ctx.tools`;
 - one compact static section through `ctx.systemPrompt`;
@@ -273,6 +355,13 @@ and `apply`) and keeps `apply` thin. It registers:
 - one `tools/code-dispatch-log` listener that keeps a Code Mode Task step durable (see below); and
 - the `raven-research` settings section, gated behind `ctx.inject` so a deployment without a settings service simply
   never runs that wiring.
+
+The package also ships a browser half (`dsh.client`, exported as `./client`) whose only contribution is one card in
+the keyed `settings.plugin.item` slot, registered under the key `raven-research` — the same string the host half
+registers as its settings namespace. That keying is what lets a plugin distributed outside the Harness repository
+contribute a card at all: the tab pairs the two halves without ever learning what the namespace means. The browser
+half mirrors no Task state; the tool, the evidence checks, the model calls, and the durable record are all host
+concerns.
 
 `web` is deliberately not injected: it is fetched dynamically from the context when a Source has to be reopened or a
 discovery batch runs, so a deployment without it still loads and still writes. The experimental `agentTeams`
@@ -337,11 +426,11 @@ fingerprint, and appends the independence-aware Claim trace.
 ### Package surface and non-goals
 
 Raven ships as one dependency-light ESM package: one Cordis plugin, one model tool, one prompt section, a pure
-TypeScript Task engine, compact same-session replay through official `tool/result.meta` and `tool/code-dispatch`,
-and two seams over the official `ctx.web` capability — a `SourceSearcher` for Leads and a `SourceVerifier` for
-evidence.
+TypeScript Task engine, a browser half contributing a single settings card, compact same-session replay through
+official `tool/result.meta` and `tool/code-dispatch`, and three seams over official Harness capabilities — a
+`SourceSearcher` for Leads and a `SourceVerifier` for evidence over `ctx.web`, and a drafter for Draft Variants.
 
-It deliberately excludes a GUI, model host, vector store, custom scheduler, general agent framework, and
+It deliberately excludes a Task GUI, model host, vector store, custom scheduler, general agent framework, and
 Raven-owned database. Long-running goals, subagents, workflows, files, and persistence remain Harness
 responsibilities.
 
@@ -353,6 +442,9 @@ responsibilities.
 - [`docs/design/architecture.md`](./docs/design/architecture.md)
 - [`docs/adr/0001-one-task-one-tool.md`](./docs/adr/0001-one-task-one-tool.md)
 - [`docs/adr/0002-llm-wiki-repo-format.md`](./docs/adr/0002-llm-wiki-repo-format.md)
+- [`docs/adr/0003-prose-layout.md`](./docs/adr/0003-prose-layout.md)
+- [`docs/adr/0004-draft-variants.md`](./docs/adr/0004-draft-variants.md)
+- [`docs/adr/0005-bundle-and-settings-card.md`](./docs/adr/0005-bundle-and-settings-card.md)
 - [`docs/acceptance.md`](./docs/acceptance.md)
 - [`docs/reverse-engineering/assessment.md`](./docs/reverse-engineering/assessment.md)
 - [`docs/reverse-engineering/hermes-research-skills.md`](./docs/reverse-engineering/hermes-research-skills.md)
@@ -375,6 +467,11 @@ settings provider serves the namespace to every configuration surface.
 | `searchMaxQueries` | `4` | Upper bound on queries in one `discover` batch, mirroring the Harness `web_search` batch bound. The bound is applied **before** deduplication, so repeating a query spends its slot. |
 | `searchMaxResults` | `8` | Upper bound on candidates requested per query, mirroring the Harness `web_search` source bound. The merged Lead list is bounded separately. |
 | `searchTimeoutMs` | `30000` | Deadline for one discovery query, in milliseconds. `0` means no deadline. An exceeded query is recorded as a failed query and a Limitation; its siblings still return their Leads. |
+| `proseLayout` | `sentence-per-line` | How every stored Artifact is laid out. The default puts one sentence on each line, making a line the smallest edit unit. `as-written` stores exactly what the agent submitted. |
+| `proseFormat` | `markdown` | The Artifact format Raven assumes. `markdown` is the documented default final output format and is what makes the layout structure-aware. `plain` treats every line as prose, so a deployment whose Artifacts are not Markdown does not get its headings and code reflowed as sentences. |
+| `draftRoutes` | `[]` | Model routes a Draft Variant may be requested from, one `provider/model` per entry, split on the **first** slash so a namespaced model id survives — `openrouter/deepseek/deepseek-chat` is the provider `openrouter` and the model `deepseek/deepseek-chat`. This list is the whole universe: the agent may select a subset of it and nothing else. Empty disables Draft Variants and reports that instead of drafting from the session model. |
+| `draftMaxTokens` | `4000` | Upper bound on one Draft Variant, in model output tokens. `0` means the built-in bound. Every route in a round shares it so the variants stay comparable. |
+| `draftTimeoutMs` | `120000` | Deadline for one Draft Variant, in milliseconds. `0` means no deadline. A route that exceeds it produces no variant and says so; its siblings still return theirs. |
 
 > [!NOTE]
 > No setting can lower a Task's evidence floor. Withholding checks makes evidence unverifiable, which refuses
@@ -384,8 +481,17 @@ The composition entry in `cordis.yml` is the `base` layer. A value stored in the
 and takes effect on the next Source check, with no restart; if the settings service goes away, the composition entry
 becomes authoritative again.
 
-A browser card for this namespace is deferred: the client module system requires a `dsh.client` bundle in the
-loader's lazy-CJS factory format, and the preset that emits it is not published outside the Harness repository.
+A browser card for this namespace is registered under **Settings › Plugins** by Raven's browser half, so the fields
+above are editable without hand-writing `settings.yaml`. The card renders every field, marks which keys the user
+layer actually overrides, and refuses a Save while any staged edit is unparseable rather than writing the valid half
+of a form.
+
+Two honest requirements. The card only appears in a deployment that composes
+`@deepseek-ai/dsh-client-ui-settings-plugins` — the Harness web app bundle does. And the keyed
+`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.0-rc.8`; the published copy of
+that package still declares the older list-shaped slot, so Raven vendors the newer shape and `scripts/verify-dsh.ts`
+asserts it against the Harness checkout under test, which turns any drift into a failed release gate instead of a
+card that silently never renders.
 
 ## Compatibility
 
@@ -435,6 +541,9 @@ pnpm check:release
 
 - batches complementary discovery queries, folds one URL into one Lead, and survives a failing query;
 - refuses to present Leads as evidence, and reports withheld or absent discovery instead of an empty search;
+- lays every stored Artifact out one sentence per line, idempotently, without reflowing Markdown structure;
+- returns Draft Variants as candidates only, and reports an unconfigured or unknown route instead of substituting one;
+- inserts exactly one host-plane row from the bundle patch, and registers the settings card under its namespace key;
 - shares one Task across an Agent Team and refuses a teammate's competing Task;
 - keeps a Code Mode Task step durable without writing any plugin-owned session event type;
 - exposes a useful intermediate research Artifact before final verification;
@@ -450,7 +559,7 @@ pnpm check:release
 </details>
 
 `pnpm test:pack` creates an isolated staging project with no `lib/`, links only the pinned development toolchain,
-exercises the real `prepack` lifecycle without mutating the repository build, checks the exact six-file allowlist,
+exercises the real `prepack` lifecycle without mutating the repository build, checks the exact nine-file allowlist,
 and installs the tarball with an isolated pnpm home/store in a second external consumer before import, apply, and
 model-tool execution.
 
@@ -512,7 +621,10 @@ behind.
 - State is durable within the owning Harness session, including multiple stopped or completed Task identities and
   later resume of an older Task. Cross-session projects, reusable corpora, and spaced-repetition storage are out of
   scope; `export` is the supported way to keep work.
-- Raven renders progress through ordinary tool results and chat; v1 has no custom browser UI.
+- Raven renders Task progress through ordinary tool results and chat; its only browser surface is the settings card,
+  and v1 has no custom UI for the Task itself.
+- Draft Variants are off until a deployment configures `draftRoutes`, and a variant is never evidence: it cannot be
+  cited and never counts toward the evidence floor.
 
 ## Contributing
 

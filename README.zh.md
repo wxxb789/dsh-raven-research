@@ -33,12 +33,12 @@
   Task 抽象。
 - **解决什么：** 早期就能拿到可用的 Checkpoint，中途纠偏而不是推倒重来，并且每条引用都对照真实抓取到的字节校验 ——
   而不是对照模型的记忆。
-- **怎么实现：** 一个 host-only 的 [Cordis](https://github.com/cordiverse/cordis) 插件、一个面向模型的 `raven_task`
-  工具、一段紧凑的 prompt。不引入第二个 agent runtime，不自带模型、向量库或数据库；研究与写作仍由现有 Harness agent
-  用自己的工具完成。
-- **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再往用户自有的 agent preset 里加一行。
-  见[安装](#安装)。
-- **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语，也没有独立 UI。见[使用](#使用)。
+- **怎么实现：** 一个挂在 host plane 的 [Cordis](https://github.com/cordiverse/cordis) 插件、一个面向模型的
+  `raven_task` 工具、一段紧凑的 prompt，以及 Web GUI 里的一张 settings 卡片。不引入第二个 agent runtime，
+  不自带模型、向量库或数据库；研究与写作仍由现有 Harness agent 用自己的工具完成。
+- **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再执行
+  `dsh plugin --profile <name> add dsh-raven-research`。见[安装](#安装)。
+- **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语，也没有独立的 Task UI。见[使用](#使用)。
 ## 为什么需要 Raven
 
 一个有分量的研究或写作请求，通常会掉进一条很长的批处理管线：你等很久，拿到一大块文字，而引用只是模型"记得"的字符串。
@@ -75,8 +75,16 @@ Raven 改变的是这项工作的形态。
   无法验证的证据会拒绝发布，而不是悄悄降级成"未检查"。
 - **会话内持久的 Task book。** 直接工具调用与 Code Mode `run_code` 内的调用都有效，并且能扛过 stop / resume ——
   见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
+- **一句一行。** 每一份存下来的 Artifact 都会被规整成"每个句子独占一行"，让**行**成为最小编辑单元：一次修订
+  diff 出来的是真正改动的那些句子，而不是整段重写。该变换是 Markdown 结构感知且幂等的 —— fenced code、表格、
+  标题、分隔线、链接定义、数学块、YAML frontmatter、硬换行，以及列表项与引用块的续行前缀都原样保留。
+- **Draft Variants。** `draft` 用同一条有界指令向每个已配置的 `provider/model` route 各要一份草稿并返回候选，
+  每份都按一句一行排布，因此可以逐行对比。Draft Variant 与 Lead 一样只是**候选**：不携带证据、永远不可被引用，
+  也不计入证据底线。部署未配置 route 前该功能关闭。
 - **一等公民的 settings namespace。** 注册插件即暴露 `raven-research` 命名空间到 Harness 组合出的每一个配置界面，
   Harness 端无需改动。
+- **Web GUI 里的 settings 卡片。** Raven 附带一个浏览器半边，为自己的命名空间在 Settings › Plugins 下注册一张
+  卡片 —— 前置条件见[配置](#配置)。
 - **可持久化导出。** `export` 产出一个合法的 [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) 仓库 —— artifact 页、
   每个 Source 一张带验证回执的不可变 `raw/` 页、以及可追加的 `log.md` —— 由 agent 用普通文件工具写入，
   Raven 自身从不碰文件系统。
@@ -93,7 +101,7 @@ Raven **尚未发布到 npm**，请从仓库源码安装。下面所有操作都
 | DeepSeek Harness | `0.1.0-rc.8`（checkout `141eb6fef83422698aef7a981029e843e8161534`） |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
-| Peer dependencies | `@deepseek-ai/dsh-settings`、`@deepseek-ai/schemastery` —— 由 Harness 部署提供 |
+| Peer dependencies | 九个 `@deepseek-ai/*` 包 —— cordis 框架、schema 库，以及七个 Harness Service Definition（`cordis`、`dsh-agent`、`dsh-llm`、`dsh-session`、`dsh-settings`、`dsh-system-prompt`、`dsh-tools`、`dsh-web`、`schemastery`）—— 由 Harness 部署提供，绝不打包进产物 |
 
 ### 1. 构建并打包
 
@@ -113,12 +121,38 @@ pnpm pack        # -> dsh-raven-research-0.1.0.tgz
 pnpm add /path/to/dsh-raven-research-0.1.0.tgz
 ```
 
-tarball 自身没有任何运行时依赖，两个 peer 由部署提供。发布之后，等价依赖是 `dsh-raven-research@0.1.0`。
+tarball 自身没有任何运行时依赖，peer 由部署提供。声明为 peer 而非 dependency 是刻意的：profile 以 `autoInstallPeers: false` 安装插件，peer 因此穿透到运行中的 installation，所有插件共享同一个 cordis 实例。发布之后，等价依赖是 `dsh-raven-research@0.1.0`。
 
-### 3. 在用户自有的 agent preset 中启用
+### 3. 启用
 
-新建或复制一份**用户自有**的 agent preset，把
-[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) 中的这一行追加到它的 `cordis.yml`：
+Raven 声明了 Profile Bundle（`package.json` 里的 `dsh.bundle.patch`），因此可以由 Harness CLI 直接挂载：
+
+```bash
+dsh plugin --profile <name> add dsh-raven-research
+```
+
+该命令把这个包追加进 profile 的 `dsh.profile.bundles`，随包分发的
+[`cordis.patch.yml`](./cordis.patch.yml) 则在 **host plane** 插入一行：
+
+```yaml
+- insert:
+    - id: raven-research
+      name: dsh-raven-research
+```
+
+选择 host plane 是有意的。Raven 不发布 Service，所以通常那条 host-plane 判据并不适用；真正适用的是它注册的东西里
+有两样是进程级的。其一是 settings namespace —— 只有当有东西在提供它时配置界面才能呈现它；若只挂在某个 preset 内，
+`raven-research` 就只在恰好有会话使用该 preset 时出现在 settings UI 里，会话之间则消失。其二是
+`tools/code-dispatch-log` waterfall，它承载着在 `run_code` 内部推进 Task step 的持久记录，同理也是进程级的。
+又因为 `tools` 与 `system-prompt` 是分层注册表，host 行会落在全局层，每个 agent 无需选择加入即可看到 `raven_task`。
+
+<details>
+<summary><b>备选：把 Raven 限定在单个 agent preset</b></summary>
+
+<br>
+
+若只想给某一个 preset 使用，则跳过 bundle，把
+[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) 中的这一行追加到该 preset 的 `cordis.yml`：
 
 ```yaml
 - id: raven-research
@@ -132,6 +166,11 @@ tarball 自身没有任何运行时依赖，两个 peer 由部署提供。发布
 > [!WARNING]
 > **不要改 Harness 自带的 preset** —— 先复制一份。Raven 不发布进程服务，因此这一行不需要 isolate realm；它消费
 > preset 作用域内的 `tools` 与 `systemPrompt` 注册表，并在可以重开 source 时动态获取 `web`。
+
+</details>
+
+> [!WARNING]
+> **两种方式不要同时使用。** 同一个包同时挂在 host plane 和 preset 内，会把 `raven_task` 注册两次、落进两个不同的层。
 
 ### 4. 验证
 
@@ -168,7 +207,14 @@ pnpm 以完整性哈希标识本地 tarball，因此即便版本号没变也会�
 
 ## 卸载
 
-1. 从 agent preset 的 `cordis.yml` 中删掉 `- id: raven-research` 这一行。
+1. 从 profile bundle 中移除 Raven：
+
+   ```bash
+   dsh plugin --profile <name> remove dsh-raven-research
+   ```
+
+   如果你当初用的是 preset 行，则从该 preset 的 `cordis.yml` 中删掉 `- id: raven-research` 这一行。
+
 2. 从部署中移除依赖：
 
    ```bash
@@ -177,9 +223,10 @@ pnpm 以完整性哈希标识本地 tarball，因此即便版本号没变也会�
 
 3. 可选：删掉用户 `settings.yaml` 中的 `raven-research` 段。
 
-Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pre-step` 监听器、settings section —— 都由 Cordis
-fiber 持有 disposer，卸载会把它们一并撤销，不会留下孤儿工具或残留 prompt 文本（`pnpm test:dsh` 正是针对真实 Harness
-Loader 验证这条释放路径）。如果你的部署不会在 preset 变更时重载，请重启 Harness。
+Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pre-step` 监听器、`tools/code-dispatch-log`
+监听器、settings section 以及浏览器卡片 —— 都由 Cordis fiber 持有 disposer，卸载会把它们一并撤销，不会留下孤儿工具
+或残留 prompt 文本（`pnpm test:dsh` 正是针对真实 Harness Loader 验证这条释放路径）。如果你的部署不会在 composition
+变更时重载，请重启 Harness。
 
 除此之外没有任何残留：Raven 没有数据库、没有缓存、不写文件。Task 状态存在 Harness session log 中，导出的内容则是
 一个本来就属于你的普通 llm-wiki 仓库。
@@ -216,6 +263,7 @@ Loader 验证这条释放路径）。如果你的部署不会在 preset 变更�
 | --- | --- |
 | `start` | 开启一个 Task，指定 Outcome（`research`、`general-writing`、`academic-writing`、`learning`）与 grounding 级别（`required`、`optional`、`none`）。 |
 | `discover` | 通过 Harness `web` 搜索接缝跑一批互补 query，返回 **Lead** —— 尚未查看的候选，绝不是 Source。失败的 query 会变成一条 Limitation，而不是让整批丢失。 |
+| `draft` | 用同一条有界指令向每个已配置的 `provider/model` route 各要一份草稿并返回候选以供比较。**Draft Variant** 不携带证据，永远不可被引用。 |
 | `checkpoint` | 发布一版用户可见的 Artifact，附带新的 Source、Claim 与失败记录，并校验有据可依的证据。 |
 | `steer` | 把用户纠偏应用到同一个 Task，保留既有证据与 Checkpoint。 |
 | `complete` | 校验引用身份、关键 Claim 链接、摘录匹配、Source 可达性，以及与最新一次 steer 之后 Checkpoint 完全一致的 Artifact 指纹。 |
@@ -223,6 +271,29 @@ Loader 验证这条释放路径）。如果你的部署不会在 preset 变更�
 | `stop` | 以记录在案的原因结束 Task；明确不等于 Completion。 |
 | `resume` | 重新打开已停止的 Task（包括较早的那个），不丢失证据与 Artifact。 |
 | `export` | 返回 llm-wiki 页面字节，由 agent 用普通文件工具写盘。 |
+
+### 一句一行
+
+Raven 不会按模型提交时的行形态存 Artifact，而是按 Task 的 Prose Layout 存。默认的 `sentence-per-line` 让每个句子
+独占一行，于是**行**成为最小编辑单元，一次修订 diff 出来的就是真正改动的那些句子。Markdown 结构从不被重排：
+fenced code、表格、标题、分隔线、链接定义、数学块、YAML frontmatter、硬换行，以及列表项与引用块的续行前缀都按原样
+保留。
+
+该变换是幂等的，而且 Completion 比对的正是存下来的字节 —— 因此模型下一步要编辑的是返回的 Artifact，而不是它提交的
+那份。若要原样保存 agent 写的内容，设 `proseLayout: as-written`；若 Artifact 本就不是 Markdown，设
+`proseFormat: plain`。
+
+### 比较措辞：Draft Variants
+
+`action=draft` 把一条有界指令 —— 某一节、某一段、一份摘要 —— 发给每个已配置的 `provider/model` route，并把结果一起
+返回，每份都按一句一行排布，因此可以逐行对比。某个 route 失败或超时只损失它自己那一份，不会拖垮整轮。
+
+Draft Variant 与 Lead 一样是**候选**。它不携带证据、不可被引用，也不计入证据底线；即使每一份变体都写了同一句话，
+在有 Source 摘录支撑之前它依然是无据的。可以采纳措辞，绝不采纳事实。
+
+route 清单归部署所有：agent 只能从 `draftRoutes` 里选子集，不能选别的 —— 因为点名一个模型就是点名一笔开销和一条
+数据通路。未配置的 route 会被拒绝并列出已配置的集合，而不是被悄悄替换成默认值。在部署设置 `draftRoutes` 之前，
+Draft Variants 处于**关闭**状态，调用会如实报告这一点，而不是转而用会话模型起草。
 
 ### 让成果活过本次会话：llm-wiki 导出
 
@@ -250,13 +321,19 @@ flowchart LR
 ### 插件注册了什么
 
 Raven 导出的是普通的 Cordis 插件元数据（`name`、`inject = ['tools', 'systemPrompt']`、Schemastery `Config` 与
-`apply`），并让 `apply` 保持很薄。它注册：
+`apply`），并让 `apply` 保持很薄。在 host plane 上它注册：
 
 - 通过 `ctx.tools` 注册的一个 `raven_task` 模型工具；
 - 通过 `ctx.systemPrompt` 注册的一段紧凑静态 section；
 - 一个 `agent/pre-step` 监听器，在每一步之前把当前 Task book 放到模型面前；
 - 一个 `tools/code-dispatch-log` 监听器，让 Code Mode 中的 Task step 保持持久（见下文）；以及
 - `raven-research` settings section，它挂在 `ctx.inject` 之后，所以没有 settings 服务的部署根本不会执行这段接线。
+
+这个包还附带一个浏览器半边（`dsh.client`，通过 `./client` 导出），它唯一的贡献是在带 key 的
+`settings.plugin.item` slot 中注册一张卡片，key 为 `raven-research` —— 与 host 半边注册的 settings namespace 是同
+一个字符串。正是这种按 key 配对，才让一个在 Harness 仓库之外分发的插件有可能贡献卡片：该 tab 无需知道这个
+namespace 意味着什么，就能把两个半边配到一起。浏览器半边不镜像任何 Task 状态；工具、证据校验、模型调用与持久记录
+全部是 host 侧的事。
 
 `web` 刻意不走 inject：需要重开 Source 或跑一批发现时才从 context 动态获取，因此缺少该能力的部署照样能加载、
 照样能写作。实验性的 `agentTeams` 能力以同样的方式读取，并且从不作为依赖：它在上游是私有且未发布的，因此 Raven
@@ -312,11 +389,12 @@ Completion 会再次核对引用身份、关键 Claim 链接、Source 可达性�
 ### 包的边界与非目标
 
 Raven 是一个依赖极少的 ESM 包：一个 Cordis 插件、一个模型工具、一段 prompt section、一个纯 TypeScript Task engine、
-基于官方 `tool/result.meta` 与 `tool/code-dispatch` 的同会话紧凑重放，以及架在官方 `ctx.web` 能力之上的两个接缝 ——
-产出 Lead 的 `SourceSearcher` 与校验证据的 `SourceVerifier`。
+一个只贡献单张 settings 卡片的浏览器半边、基于官方 `tool/result.meta` 与 `tool/code-dispatch` 的同会话紧凑重放，
+以及架在官方 Harness 能力之上的三个接缝 —— 基于 `ctx.web` 产出 Lead 的 `SourceSearcher` 与校验证据的
+`SourceVerifier`，以及产出 Draft Variant 的 drafter。
 
-它刻意不做 GUI、模型宿主、向量库、自定义调度器、通用 agent 框架和 Raven 自有数据库。长期目标、subagent、workflow、
-文件与持久化仍归 Harness 负责。
+它刻意不做 Task GUI、模型宿主、向量库、自定义调度器、通用 agent 框架和 Raven 自有数据库。长期目标、subagent、
+workflow、文件与持久化仍归 Harness 负责。
 
 <details>
 <summary><b>设计依据与决策记录</b></summary>
@@ -326,8 +404,14 @@ Raven 是一个依赖极少的 ESM 包：一个 Cordis 插件、一个模型工�
 - [`docs/design/architecture.md`](./docs/design/architecture.md)
 - [`docs/adr/0001-one-task-one-tool.md`](./docs/adr/0001-one-task-one-tool.md)
 - [`docs/adr/0002-llm-wiki-repo-format.md`](./docs/adr/0002-llm-wiki-repo-format.md)
+- [`docs/adr/0003-prose-layout.md`](./docs/adr/0003-prose-layout.md)
+- [`docs/adr/0004-draft-variants.md`](./docs/adr/0004-draft-variants.md)
+- [`docs/adr/0005-bundle-and-settings-card.md`](./docs/adr/0005-bundle-and-settings-card.md)
 - [`docs/acceptance.md`](./docs/acceptance.md)
 - [`docs/reverse-engineering/assessment.md`](./docs/reverse-engineering/assessment.md)
+- [`docs/reverse-engineering/hermes-research-skills.md`](./docs/reverse-engineering/hermes-research-skills.md)
+- [`docs/reverse-engineering/hermes-r-round-references.md`](./docs/reverse-engineering/hermes-r-round-references.md)
+- [`docs/reverse-engineering/hermes-nana-wiki.md`](./docs/reverse-engineering/hermes-nana-wiki.md)
 - [`CONTEXT.md`](./CONTEXT.md)
 
 </details>
@@ -345,6 +429,11 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 | `searchMaxQueries` | `4` | 单批 `discover` 中 query 数量的上限，与 Harness `web_search` 的批量上限一致。该上限在**去重之前**生效，因此重复的 query 会占掉自己的名额。 |
 | `searchMaxResults` | `8` | 每个 query 请求候选数的上限，与 Harness `web_search` 的 source 上限一致。合并后的 Lead 列表另有单独的上限。 |
 | `searchTimeoutMs` | `30000` | 单个发现 query 的期限（毫秒）。`0` 表示不设期限。超时的 query 会被记录为失败 query 与一条 Limitation；其兄弟 query 照常返回各自的 Lead。 |
+| `proseLayout` | `sentence-per-line` | 每一份存下来的 Artifact 如何排布。默认让每个句子独占一行，使行成为最小编辑单元。`as-written` 则原样保存 agent 提交的内容。 |
+| `proseFormat` | `markdown` | Raven 假定的 Artifact 格式。`markdown` 是文档约定的默认最终输出格式，也是排布得以结构感知的前提。`plain` 把每一行都当作散文，因此 Artifact 本就不是 Markdown 的部署不会被重排标题与代码。 |
+| `draftRoutes` | `[]` | 允许请求 Draft Variant 的模型 route，每项一个 `provider/model`，按**第一个**斜杠切分，因此带命名空间的 model id 得以保留 —— `openrouter/deepseek/deepseek-chat` 的 provider 是 `openrouter`，model 是 `deepseek/deepseek-chat`。该清单即全集：agent 只能从中选子集，不能选别的。留空即关闭 Draft Variants，并如实报告，而不是转而用会话模型起草。 |
+| `draftMaxTokens` | `4000` | 单份 Draft Variant 的长度上限（模型输出 token）。`0` 表示使用内置上限。同一轮中所有 route 共享该上限，以保证变体之间可比。 |
+| `draftTimeoutMs` | `120000` | 单份 Draft Variant 的期限（毫秒）。`0` 表示不设期限。超时的 route 不产出变体并会说明；其兄弟 route 照常返回各自的结果。 |
 
 > [!NOTE]
 > 任何配置都不能降低 Task 的证据底线。屏蔽检查只会让证据变成"不可验证"从而拒绝发布，绝不会把未检查的 Source
@@ -353,8 +442,17 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 `cordis.yml` 中的组合条目是 `base` 层。用户 `settings.yaml` 中的值会覆盖它，并在下一次 Source 检查时生效、无需重启；
 若 settings 服务消失，组合条目重新成为权威。
 
-该命名空间的浏览器配置卡片暂缓：client module 系统要求 loader 的 lazy-CJS factory 格式的 `dsh.client` bundle，
-而生成它的 preset 并未在 Harness 仓库之外发布。
+### settings 卡片
+
+Raven 的浏览器半边会在 **Settings › Plugins** 下为该命名空间注册一张卡片，因此上面这些字段无需手写
+`settings.yaml` 即可编辑。卡片会渲染全部字段、标出用户层真正覆盖了哪些 key，并在任何一处暂存编辑无法解析时拒绝
+保存 —— 而不是只写入表单中正确的那一半。
+
+两个需要如实说明的前置条件。其一，只有组合了 `@deepseek-ai/dsh-client-ui-settings-plugins` 的部署才会出现这张
+卡片 —— Harness web app bundle 属于此类。其二，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness
+`0.1.0-rc.8` 声明的那一版；该包已发布的副本仍声明较旧的 list 形态，因此 Raven 内联了较新的形态，并由
+`scripts/verify-dsh.ts` 对被测 Harness checkout 断言这一形态 —— 于是契约漂移会导致 release gate 失败，而不是让卡片
+在浏览器里悄无声息地不渲染。
 
 ## 兼容性
 
@@ -401,6 +499,9 @@ pnpm check:release
 
 - 批量发出互补的发现 query，把同一 URL 合并为一条 Lead，并能扛住某个 query 失败；
 - 拒绝把 Lead 当作证据呈现，并在发现能力被屏蔽或缺失时如实报告，而不是给出一次空搜索；
+- 把每一份存下来的 Artifact 幂等地排布为一句一行，且不重排 Markdown 结构；
+- 只把 Draft Variant 作为候选返回，并在 route 未配置或未知时如实报告，而不是替换成别的 route；
+- 从 bundle patch 恰好插入一行 host-plane 行，并按命名空间 key 注册 settings 卡片；
 - 在一个 Agent Team 内共享同一个 Task，并拒绝队友另起一个竞争的 Task；
 - 在不写任何插件自有 session event type 的前提下，让 Code Mode 中的 Task step 保持持久；
 - 在最终校验前就暴露可用的中间研究 Artifact；
@@ -416,7 +517,7 @@ pnpm check:release
 </details>
 
 `pnpm test:pack` 会创建一个不含 `lib/` 的隔离 staging 工程，只链接锚定的开发工具链，跑真实的 `prepack` 生命周期
-而不污染仓库构建，校验恰好六个文件的白名单，并在第二个外部消费者中用隔离的 pnpm home/store 安装 tarball，然后执行
+而不污染仓库构建，校验恰好九个文件的白名单，并在第二个外部消费者中用隔离的 pnpm home/store 安装 tarball，然后执行
 import、apply 与模型工具调用。
 
 ## FAQ
@@ -470,7 +571,9 @@ Claim 的判断仍由 agent 负责。
 - 未组合 Harness `web` 能力时，外部 Claim 保持 deferred。
 - 状态在所属 Harness 会话内持久，包括多个已停止或已完成的 Task 身份以及稍后 resume 旧 Task。跨会话项目、可复用语料库
   和间隔重复存储不在范围内；要留存成果请用 `export`。
-- Raven 通过普通的工具结果与聊天呈现进度；v1 没有自定义浏览器 UI。
+- Raven 通过普通的工具结果与聊天呈现 Task 进度；它在浏览器里唯一的界面是 settings 卡片，v1 没有针对 Task 本身的
+  自定义 UI。
+- 在部署配置 `draftRoutes` 之前 Draft Variants 处于关闭状态；变体本身永远不是证据：不可被引用，也不计入证据底线。
 
 ## 贡献
 
