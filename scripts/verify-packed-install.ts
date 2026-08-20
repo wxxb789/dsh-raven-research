@@ -14,6 +14,7 @@ const isolatedStore = join(temporary, 'pnpm-store')
 const isolatedHome = join(temporary, 'home')
 const userConfig = join(isolatedHome, '.npmrc')
 const expectedFiles = [
+  'cordis.patch.yml',
   'examples/agent-row.cordis.yml',
   'lib/index.d.ts',
   'lib/index.js',
@@ -76,6 +77,7 @@ try {
   for (const file of [
     '.npmignore',
     '.npmrc',
+    'cordis.patch.yml',
     'LICENSE',
     'README.md',
     'package.json',
@@ -171,9 +173,22 @@ try {
 
   await writeFile(join(consumer, 'verify.mjs'), `
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import * as Raven from 'dsh-raven-research'
 assert.equal('default' in Raven, false)
 assert.equal(Raven.name, 'raven-research')
+
+// The Profile Bundle survives packing: the manifest field the composer reads,
+// and the file it points at, both arrive in an installed consumer.
+const require_ = createRequire(import.meta.url)
+const installed = require_.resolve('dsh-raven-research/package.json')
+const manifest = JSON.parse(readFileSync(installed, 'utf8'))
+assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml')
+const patch = readFileSync(new URL('./cordis.patch.yml', new URL('file://' + installed.replaceAll('\\\\', '/'))), 'utf8')
+assert.match(patch, /- insert:/)
+assert.match(patch, /name: dsh-raven-research/)
+
 const tools = []
 const sections = []
 const injected = []
@@ -196,9 +211,19 @@ assert.deepEqual(Raven.Config({}), {
   searchMaxQueries: 4,
   searchMaxResults: 8,
   searchTimeoutMs: 30000,
+  proseLayout: 'sentence-per-line',
+  proseFormat: 'markdown',
+  draftRoutes: [],
+  draftMaxTokens: 4000,
+  draftTimeoutMs: 120000,
 })
 assert.deepEqual(Raven.SOURCE_DISCOVERY_MODES, ['seam', 'disabled'])
 assert.equal(typeof Raven.renderLeads, 'function')
+assert.equal(typeof Raven.renderVariants, 'function')
+assert.equal(
+  Raven.layoutProse('One holds. Another does not.', { layout: 'sentence-per-line', format: 'markdown' }),
+  'One holds.\\nAnother does not.',
+)
 const agent = { id: 'packed-session', session: { events: [] } }
 const signal = new AbortController().signal
 const value = await tools[0].execute(
@@ -214,7 +239,26 @@ const found = await tools[0].execute(
 )
 assert.match(found.leads.unavailable, /web search capability is not composed/)
 assert.equal(found.state.limitations.length, 1)
-console.log('packed install: isolated staged prepack, exact files, isolated install, import, apply, settings defaults, discovery degradation, and tool execution passed')
+// Likewise for drafting: no configured route must say so, never quietly draft.
+const drafted = await tools[0].execute(
+  { action: 'draft', taskId: value.state.taskId, instruction: 'Draft the opening.' },
+  { agent, signal },
+)
+assert.match(drafted.variants.unavailable, /no Draft Variant route is configured/)
+// The stored Artifact carries the Prose Layout the deployment configured.
+const checkpoint = await tools[0].execute(
+  {
+    action: 'checkpoint',
+    taskId: value.state.taskId,
+    stage: 'draft',
+    summary: 'A first useful explanation.',
+    artifact: 'A concept holds. A second sentence explains it.',
+  },
+  { agent, signal },
+)
+assert.equal(checkpoint.state.latestArtifact, 'A concept holds.\\nA second sentence explains it.')
+assert.equal(checkpoint.state.checkpoints[0].proseLayout, 'sentence-per-line')
+console.log('packed install: isolated staged prepack, exact files, bundle manifest and patch, isolated install, import, apply, settings defaults, discovery and drafting degradation, prose layout, and tool execution passed')
 `)
   await runProcess(process.execPath, ['verify.mjs'], {
     cwd: consumer,

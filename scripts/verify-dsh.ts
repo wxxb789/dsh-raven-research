@@ -335,7 +335,29 @@ try {
   assert.equal(ctx.get('systemPrompt'), undefined, 'removing the composition must dispose Raven prompt contributions')
   assert.equal(ctx.get('web'), undefined, 'removing the composition must dispose the web verification seam')
   assert.equal(ctx.get('settings'), undefined, 'removing the composition must dispose the settings provider and Raven registration')
-  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, and disposal passed`)
+
+  // The Profile Bundle, through the Harness's own composer rather than a text
+  // assertion: `dsh plugin add` appends this package to a profile's bundle list
+  // and `loadProfile` feeds exactly this file to `loadOverlayPatches`, so a patch
+  // that parses here is a patch the deployment will accept.
+  const { composeEntries, loadOverlayPatches } = await import(source('packages/boot/app-boot/src/index.ts')) as {
+    composeEntries(layers: readonly unknown[][]): Array<{ id?: string; name?: string }>
+    loadOverlayPatches(binName: string, file: string): unknown[]
+  }
+  const ravenManifest = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { name: string; dsh?: { bundle?: { patch?: string } } }
+  const declared = ravenManifest.dsh?.bundle?.patch
+  assert.equal(declared, './cordis.patch.yml', 'the bundle manifest field the profile composer reads')
+  const patchPath = new URL(`../${declared.replace('./', '')}`, import.meta.url)
+  const entries = composeEntries([loadOverlayPatches('dsh', patchPath.pathname.replace(/^\/([A-Za-z]:)/, '$1')) as unknown[]])
+  assert.deepEqual(
+    entries.map(entry => ({ id: entry.id, name: entry.name })),
+    [{ id: Raven.name, name: ravenManifest.name }],
+    'the bundle patch must compose to exactly one row naming this package',
+  )
+
+  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, Profile Bundle composition, and disposal passed`)
 } finally {
   await ctx.fiber.dispose()
   await rm(compositionRoot, { recursive: true, force: true })

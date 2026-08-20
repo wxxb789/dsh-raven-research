@@ -1,0 +1,28 @@
+# Profile Bundle: mount Raven on the Host plane.
+#
+# `dsh plugin add dsh-raven-research` appends this package to the profile's
+# `dsh.profile.bundles` list because the manifest declares `dsh.bundle.patch`,
+# and this file is the whole of what that adds to the composition.
+#
+# Host plane rather than an Agent Preset, deliberately. Raven publishes no
+# Service, so the usual host-plane criterion does not apply; what does apply is
+# that two of the things it registers are process-wide:
+#
+#   - its settings namespace, which a configuration surface can only offer while
+#     something is serving it. Mounted only inside a preset, `raven-research`
+#     would appear in the settings UI exactly while a session using that preset
+#     happened to be alive, and vanish between sessions.
+#   - the `tools/code-dispatch-log` waterfall, which carries the durable record
+#     of a Task step taken from inside `run_code`.
+#
+# `tools` and `system-prompt` are layered registries, so a host row lands in the
+# global layer and every agent sees `raven_task` without opting in. That is the
+# intended meaning of installing Raven: one row, available everywhere.
+#
+# A deployment that wants Raven for ONE preset instead should skip this bundle
+# and add the row from `examples/agent-row.cordis.yml` to that preset's
+# `agent.cordis.yml`. Do not do both: the same package mounted in both planes
+# registers `raven_task` twice, into two different layers.
+- insert:
+    - id: raven-research
+      name: dsh-raven-research

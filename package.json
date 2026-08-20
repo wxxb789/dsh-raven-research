@@ -42,10 +42,17 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
   "files": [
     "lib",
+    "cordis.patch.yml",
     "examples/*.yml",
     "README.md",
     "LICENSE"
@@ -96,7 +103,7 @@
   "dshRaven": {
     "harnessVersion": "0.1.0-rc.8",
     "harnessCommit": "141eb6fef83422698aef7a981029e843e8161534",
-    "plane": "agent",
+    "plane": "host",
     "publishesService": false
   }
 }
