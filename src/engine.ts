@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
+import { layoutProse, proseLayoutReport, type ProseLayoutOptions, type ProseLayoutReport } from './prose.js'
 import { renderWikiPages } from './wiki.js'
 
 import {
@@ -16,10 +17,13 @@ import {
   type ClaimDisposition,
   type ClaimImportance,
   type ClaimKind,
+  type DraftGenerator,
+  type DraftResult,
   type GroundingPolicy,
   type LeadSearchResult,
   type RavenClaimRecord,
   type RavenDispatchResult,
+  type RavenDraftRoute,
   type RavenExecution,
   type RavenLimitation,
   type RavenLimitationKind,
@@ -41,12 +45,31 @@ export interface RavenSearchLimits {
   readonly maxResults: number
 }
 
+/** Deployment-owned drafting bounds, read per call for the same reason. */
+export interface RavenDraftLimits {
+  readonly maxTokens: number
+  /**
+   * Every route a Draft Variant may be requested from. The deployment owns this
+   * list, not the agent: naming a model is naming money and a data path, so the
+   * agent may only select a subset of what a deployment already allowed.
+   */
+  readonly routes: readonly RavenDraftRoute[]
+}
+
 interface RavenEngineOptions {
   readonly now: () => string
   readonly sourceVerifier: SourceVerifier
   /** Omitted where the embedder composes no discovery: `discover` then reports the absence instead of failing. */
   readonly sourceSearcher?: SourceSearcher
   readonly searchLimits?: () => RavenSearchLimits
+  /** Omitted where the embedder composes no model access: `draft` reports the absence. */
+  readonly draftGenerator?: DraftGenerator
+  readonly draftLimits?: () => RavenDraftLimits
+  /**
+   * The Prose Layout every stored Artifact is normalized into. Read per call so
+   * a settings change takes effect on the next Checkpoint with nothing to migrate.
+   */
+  readonly proseLayout?: () => ProseLayoutOptions
 }
 
 const NO_SEARCHER: SourceSearcher = {
@@ -59,10 +82,21 @@ const NO_SEARCHER: SourceSearcher = {
   }),
 }
 
+const NO_DRAFTER: DraftGenerator = {
+  generate: () => Promise.resolve({
+    variants: [],
+    unavailable: 'this Raven deployment composed no model access for Draft Variants',
+  }),
+}
+
 const DEFAULT_SEARCH_LIMITS: RavenSearchLimits = {
   maxQueries: RAVEN_LIMITS.searchQueries,
   maxResults: RAVEN_LIMITS.searchResults,
 }
+
+const DEFAULT_DRAFT_LIMITS: RavenDraftLimits = { maxTokens: 4_000, routes: [] }
+
+const DEFAULT_PROSE_LAYOUT: ProseLayoutOptions = { layout: 'sentence-per-line', format: 'markdown' }
 
 interface RavenEngine {
   dispatch(
@@ -82,6 +116,7 @@ interface RavenEngine {
 export const ACTION_FIELDS: Record<string, readonly string[]> = {
   start: ['action', 'outcome', 'request', 'grounding'],
   discover: ['action', 'taskId', 'queries'],
+  draft: ['action', 'taskId', 'instruction', 'routes'],
   checkpoint: ['action', 'taskId', 'stage', 'summary', 'artifact', 'sources', 'claims', 'failures'],
   steer: ['action', 'taskId', 'correction'],
   complete: ['action', 'taskId', 'artifact'],
@@ -602,6 +637,57 @@ function leadLabel(lead: { readonly url: string; readonly title?: string }): str
 }
 
 /**
+ * Split a configured `provider/model` route on its FIRST separator: a provider
+ * route never contains one, while a model id routinely does
+ * (`deepseek/deepseek-chat`), so splitting on the last would silently reroute
+ * every namespaced model to the wrong provider.
+ */
+export function parseDraftRoute(spec: string): RavenDraftRoute | undefined {
+  const trimmed = spec.trim()
+  const separator = trimmed.indexOf('/')
+  if (separator <= 0 || separator >= trimmed.length - 1) return undefined
+  return { provider: trimmed.slice(0, separator), model: trimmed.slice(separator + 1) }
+}
+
+export function formatDraftRoute(route: RavenDraftRoute): string {
+  return `${route.provider}/${route.model}`
+}
+
+/**
+ * Render one comparison round. Every variant is labelled a candidate on every
+ * path, for the same reason a Lead is: this render is the only place the agent
+ * reads them, and prose that looks authoritative invites adopting its facts
+ * along with its wording.
+ */
+export function renderVariants(result: DraftResult): string {
+  const lines: string[] = []
+  if (result.unavailable !== undefined) {
+    lines.push(`Draft Variants did not run: ${result.unavailable}`)
+  }
+  const drafted = result.variants.filter(variant => variant.status === 'drafted')
+  if (drafted.length > 0) {
+    lines.push('## Draft Variants (candidate wording, not evidence)')
+    lines.push(
+      'Each variant is one model\'s rendering of the same instruction. Adopt phrasing, never facts:'
+      + ' a sentence every variant agrees on is still unsupported until a Source excerpt supports it.'
+      + ' Lines are aligned one sentence per line so variants diff line by line.',
+    )
+    for (const variant of drafted) {
+      lines.push(`### ${markdownText(formatDraftRoute(variant.route))}`)
+      lines.push(variant.text ?? '')
+    }
+  }
+  const failed = result.variants.filter(variant => variant.status === 'failed')
+  if (failed.length > 0) {
+    lines.push('## Routes that produced no variant')
+    for (const variant of failed) {
+      lines.push(`- ${markdownText(formatDraftRoute(variant.route))}: ${markdownText(variant.detail ?? 'no detail')}`)
+    }
+  }
+  return lines.join('\n\n')
+}
+
+/**
  * Render one discovery batch. Leads are labelled as uninspected on every path so
  * the batch can never read as an evidence set: the render is the only place the
  * agent sees them, and a list that looks like Sources invites citing them.
@@ -716,6 +802,63 @@ export function renderArtifact(
     sections.push(`## Claim trace\n${lines.join('\n')}`)
   }
   return sections.join('\n\n')
+}
+
+/**
+ * The exact bytes a Task stores for one submitted Artifact.
+ *
+ * Raven owns the canonical layout because Completion compares byte hashes: if
+ * each executor laid out its own text, one model's line-wrapping habits would
+ * decide whether the final Artifact matches its Checkpoint. Normalizing here
+ * means the render shows the stored bytes, the agent edits those exact bytes on
+ * the next round, and one sentence per line makes a line the smallest edit unit.
+ */
+function storedArtifact(value: unknown, layout: ProseLayoutOptions): {
+  readonly text: string
+  readonly report: ProseLayoutReport
+} {
+  const submitted = boundedText(value, 'artifact', RAVEN_LIMITS.artifactChars)
+  const text = layoutProse(submitted, layout)
+  if (text.length > RAVEN_LIMITS.artifactChars) {
+    throw new TypeError(
+      `artifact must be at most ${RAVEN_LIMITS.artifactChars} characters after the Prose Layout`
+      + ' puts one sentence on each line; shorten it rather than packing sentences together',
+    )
+  }
+  return { text, report: proseLayoutReport(submitted, layout) }
+}
+
+/**
+ * The Task material a drafter may see. Steering is included because a variant
+ * that ignores the user's latest correction is worse than no variant, and the
+ * current Artifact because most rounds revise rather than start over.
+ */
+function draftContext(state: RavenTaskState): string {
+  const parts = [
+    `Outcome: ${state.outcome}`,
+    `Task request:\n${state.request}`,
+  ]
+  const steering = state.steering.slice(-4)
+  if (steering.length > 0) {
+    parts.push(`User corrections, most recent last:\n${steering.map(item => `- ${item.correction}`).join('\n')}`)
+  }
+  if (state.latestArtifact !== null) {
+    parts.push(`Current Artifact:\n${state.latestArtifact}`)
+  }
+  return parts.join('\n\n')
+}
+
+function draftSystemPrompt(layout: ProseLayoutOptions): string {
+  return [
+    'You are drafting candidate prose for one section of a larger work.',
+    'Return ONLY the prose. No preamble, no explanation of your choices, no meta-commentary.',
+    `The output format is ${layout.format === 'markdown' ? 'Markdown' : 'plain text'}.`,
+    ...(layout.layout === 'sentence-per-line'
+      ? ['Put exactly one sentence on each line so the reader can compare candidates line by line.']
+      : []),
+    'Never invent a citation, a statistic, a quotation, or a source. Where the material you were given'
+    + ' does not support a statement, write the statement without a citation, or leave the gap visible.',
+  ].join('\n')
 }
 
 export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
@@ -859,6 +1002,90 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         }
       }
 
+      if (action === 'draft') {
+        const state = requireActiveTask(previous, args.taskId)
+        const layout = options.proseLayout?.() ?? DEFAULT_PROSE_LAYOUT
+        const limits = options.draftLimits?.() ?? DEFAULT_DRAFT_LIMITS
+        const instruction = boundedText(args.instruction, 'instruction', RAVEN_LIMITS.draftInstructionChars)
+        const allowed = new Map(limits.routes.map(route => [formatDraftRoute(route), route]))
+        const requested = optionalArray(args.routes, 'routes').map((raw, index) => {
+          const spec = requiredText(raw, `routes[${index}]`)
+          const route = allowed.get(spec)
+          // Naming a model is naming spend and a data path, so the deployment's
+          // list is the whole universe: an unknown route is refused with the
+          // configured set named, never quietly substituted with a default.
+          if (route === undefined) {
+            throw new TypeError(
+              `routes[${index}] "${spec}" is not configured for this deployment.`
+              + ` Configured route(s): ${allowed.size === 0 ? 'none' : [...allowed.keys()].join(', ')}`,
+            )
+          }
+          return route
+        })
+        const routes = requested.length > 0 ? [...new Set(requested)] : limits.routes
+        if (routes.length > RAVEN_LIMITS.draftRoutes) {
+          throw new TypeError(`routes must name at most ${RAVEN_LIMITS.draftRoutes} configured route(s)`)
+        }
+        const outcome: DraftResult = routes.length === 0
+          ? {
+              variants: [],
+              unavailable: 'no Draft Variant route is configured for this deployment'
+                + ' (set raven-research.draftRoutes to one or more provider/model routes)',
+            }
+          : await (options.draftGenerator ?? NO_DRAFTER).generate(
+              {
+                instruction,
+                routes,
+                system: draftSystemPrompt(layout),
+                context: draftContext(state),
+                maxTokens: limits.maxTokens > 0 ? limits.maxTokens : DEFAULT_DRAFT_LIMITS.maxTokens,
+              },
+              execution.signal,
+            )
+        execution.signal.throwIfAborted()
+        const at = options.now()
+        const laid: DraftResult = {
+          ...outcome,
+          variants: outcome.variants.map(variant => variant.text === undefined
+            ? variant
+            : { ...variant, text: layoutProse(variant.text.slice(0, RAVEN_LIMITS.draftVariantChars), layout) }),
+        }
+        const rounds = [...(state.drafts ?? [])]
+        if (rounds.length >= RAVEN_LIMITS.draftRounds) rounds.shift()
+        rounds.push({
+          ordinal: rounds.length === 0 ? 1 : (rounds.at(-1)?.ordinal ?? 0) + 1,
+          instruction,
+          requestedAt: at,
+          routes: laid.variants.map(variant => ({
+            provider: variant.route.provider,
+            model: variant.route.model,
+            status: variant.status,
+            chars: variant.text?.length ?? 0,
+          })),
+        })
+        // A comparison round changes the Task's provenance but publishes nothing;
+        // the Artifact, the evidence, and the Checkpoint list are all untouched.
+        const next: RavenTaskState = laid.variants.length === 0
+          ? state
+          : { ...state, drafts: rounds, revision: state.revision + 1, updatedAt: at }
+        const drafted = laid.variants.filter(variant => variant.status === 'drafted').length
+        return {
+          status: 'active',
+          state: next,
+          message: laid.unavailable === undefined
+            ? `Raven Task ${state.taskId}: ${drafted} Draft Variant(s) from ${laid.variants.length} route(s).`
+            : `Draft Variants did not run for Raven Task ${state.taskId}.`,
+          issues: [
+            'Draft Variants are candidates, not Checkpoints: adopt wording into a Checkpoint,'
+            + ' and support every factual sentence with a recorded Source excerpt before publishing it.',
+            ...(laid.variants.some(variant => variant.status === 'failed')
+              ? ['one or more routes produced no variant; compare the ones that did rather than waiting for a full set']
+              : []),
+          ],
+          variants: laid,
+        }
+      }
+
       if (action === 'stop') {
         const state = requireTask(previous, args.taskId)
         if (state.phase === 'stopped') {
@@ -988,7 +1215,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const at = options.now()
         const stage = member<RavenStage>(args.stage, RAVEN_STAGES, 'stage')
         const summary = boundedText(args.summary, 'summary', RAVEN_LIMITS.summaryChars)
-        const artifact = boundedText(args.artifact, 'artifact', RAVEN_LIMITS.artifactChars)
+        const layout = options.proseLayout?.() ?? DEFAULT_PROSE_LAYOUT
+        const stored = storedArtifact(args.artifact, layout)
+        const artifact = stored.text
         const artifactSha256 = sha256(artifact)
         const parsedSources = parseSources(args.sources, state.sources, at)
         const knownSourceIds = new Set(parsedSources.map(source => source.sourceId))
@@ -1050,6 +1279,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             artifactChars: artifact.length,
             steeringRevision: state.steeringRevision,
             createdAt: at,
+            proseLayout: layout.layout,
           }],
           sources,
           claims,
@@ -1065,12 +1295,22 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           message: `Published Raven Checkpoint ${ordinal} for ${state.taskId}; the Task remains active.`,
           issues: [],
           renderedArtifact: renderArtifact(artifact, sources, claims),
+          ...(stored.report.changed
+            ? {
+                relaidArtifact: {
+                  sourceLines: stored.report.sourceLines,
+                  laidOutLines: stored.report.laidOutLines,
+                },
+              }
+            : {}),
         }
       }
 
       if (action === 'complete') {
         const state = requireActiveTask(previous, args.taskId)
-        const artifact = boundedText(args.artifact, 'artifact', RAVEN_LIMITS.artifactChars)
+        const layout = options.proseLayout?.() ?? DEFAULT_PROSE_LAYOUT
+        const stored = storedArtifact(args.artifact, layout)
+        const artifact = stored.text
         const artifactSha256 = sha256(artifact)
         const issues: string[] = []
         if (state.checkpoints.length === 0) issues.push('publish at least one useful Checkpoint before Completion')
@@ -1082,7 +1322,14 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           issues.push('publish a Checkpoint that applies the latest Steering Revision before Completion')
         }
         if (latestCheckpoint !== undefined && latestCheckpoint.artifactSha256 !== artifactSha256) {
-          issues.push('the exact latest Checkpoint Artifact must be completed; publish substantive final edits as a new Checkpoint first')
+          const stored = latestCheckpoint.proseLayout ?? 'as-written'
+          // A layout change rewrites the bytes without anyone editing the text.
+          // Reported as its own cause so it does not read as an unauthorized
+          // final edit, which is what the generic message would accuse.
+          issues.push(stored === layout.layout
+            ? 'the exact latest Checkpoint Artifact must be completed; publish substantive final edits as a new Checkpoint first'
+            : `the Prose Layout changed from ${stored} to ${layout.layout} after Checkpoint ${latestCheckpoint.ordinal},`
+              + ' so the stored bytes no longer match; publish one Checkpoint under the current layout and complete those bytes')
         }
         try {
           validateArtifactCitations(artifact, state.sources, state.claims)
@@ -1161,6 +1408,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             artifactChars: artifact.length,
             steeringRevision: state.steeringRevision,
             createdAt: at,
+            proseLayout: layout.layout,
           }],
           sources: verified.sources,
           latestArtifact: artifact,

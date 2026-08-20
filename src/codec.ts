@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto'
 
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
+import { PROSE_LAYOUTS } from './prose.js'
 
 import {
   CLAIM_DISPOSITIONS,
   CLAIM_IMPORTANCE,
   CLAIM_KINDS,
+  DRAFT_STATUSES,
   GROUNDING_POLICIES,
   LIMITATION_KINDS,
   OUTCOMES,
@@ -96,7 +98,8 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     || !exactKeys(state, [
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
       'revision', 'steeringRevision', 'steering', 'checkpoints', 'sources', 'claims',
-      'limitations', 'latestArtifact', 'verification', 'finalArtifactSha256', 'startedAt', 'updatedAt',
+      'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
+      'startedAt', 'updatedAt',
     ])
     || state.schemaVersion !== 1
     || !string(state.taskId)
@@ -141,7 +144,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     if (item === undefined
       || !exactKeys(item, [
         'checkpointId', 'ordinal', 'stage', 'summary', 'artifactSha256', 'artifactChars',
-        'steeringRevision', 'createdAt',
+        'steeringRevision', 'createdAt', 'proseLayout',
       ])
       || item.checkpointId !== `${state.taskId}-cp-${ordinal}`
       || item.ordinal !== ordinal
@@ -153,7 +156,38 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || !integer(item.artifactChars)
       || !integer(item.steeringRevision)
       || item.steeringRevision > state.steeringRevision
+      // Absent means the record predates Prose Layouts, which is `as-written`.
+      || (item.proseLayout !== undefined && !member(item.proseLayout, PROSE_LAYOUTS))
       || !timestamp(item.createdAt)) return undefined
+  }
+
+  if (state.drafts !== undefined) {
+    if (!Array.isArray(state.drafts) || state.drafts.length > RAVEN_LIMITS.draftRounds) return undefined
+    let previousOrdinal = 0
+    for (const raw of state.drafts) {
+      const item = record(raw)
+      if (item === undefined
+        || !exactKeys(item, ['ordinal', 'instruction', 'requestedAt', 'routes'])
+        // Rounds are trimmed from the front at the bound, so ordinals stay strictly
+        // increasing without restarting at one.
+        || !integer(item.ordinal, previousOrdinal + 1)
+        || !string(item.instruction)
+        || item.instruction.length > RAVEN_LIMITS.draftInstructionChars
+        || !timestamp(item.requestedAt)
+        || !Array.isArray(item.routes)
+        || item.routes.length > RAVEN_LIMITS.draftRoutes) return undefined
+      previousOrdinal = item.ordinal
+      for (const rawRoute of item.routes) {
+        const route = record(rawRoute)
+        if (route === undefined
+          || !exactKeys(route, ['provider', 'model', 'status', 'chars'])
+          || !string(route.provider)
+          || !string(route.model)
+          || !member(route.status, DRAFT_STATUSES)
+          || !integer(route.chars)
+          || route.chars > RAVEN_LIMITS.draftVariantChars) return undefined
+      }
+    }
   }
 
   const sourceIds = new Set<string>()

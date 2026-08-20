@@ -3,22 +3,37 @@ import { Buffer } from 'node:buffer'
 import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createUserMessage, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { WebFetchResult, WebRuntime, WebSearchResult } from '@deepseek-ai/dsh-web'
 
 import { decodeRavenTaskState } from './codec.js'
 import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig } from './config.js'
-import { ACTION_FIELDS, createRavenEngine, renderArtifact, renderLeads, type RavenSearchLimits } from './engine.js'
+import {
+  ACTION_FIELDS,
+  createRavenEngine,
+  parseDraftRoute,
+  renderArtifact,
+  renderLeads,
+  renderVariants,
+  type RavenDraftLimits,
+  type RavenSearchLimits,
+} from './engine.js'
 import { RAVEN_PROMPT } from './prompt.js'
+import type { ProseLayoutOptions } from './prose.js'
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { RAVEN_LIMITS } from './domain.js'
 import type {
+  DraftGenerator,
+  DraftRequest,
+  DraftResult,
   LeadSearchFailure,
   LeadSearchRequest,
   LeadSearchResult,
   RavenDispatchResult,
+  RavenDraftRoute,
+  RavenDraftVariant,
   RavenLead,
   RavenTaskState,
   SourceCheckRequest,
@@ -398,6 +413,87 @@ function sourceSearcher(ctx: Context, settings: () => RavenConfig): SourceSearch
   }
 }
 
+/**
+ * Draft Variants over the Harness `ctx.llm` seam.
+ *
+ * Every route runs concurrently under its own deadline, and a route that fails
+ * becomes one labelled variant rather than a rejection: the point of a
+ * comparison round is the comparison, and losing three good candidates because a
+ * fourth provider was down would discard work the Task already paid for. Caller
+ * cancellation stays a real cancellation on every path.
+ *
+ * The seam does NOT throw on an adapter, dispatch, or iteration failure — it
+ * ends the stream with a terminal `finish` chunk carrying the failure. A drafter
+ * that only wrapped the loop in try/catch would silently accept an empty or
+ * truncated draft as a real one, so the finish reason is inspected explicitly.
+ */
+function draftGenerator(ctx: Context, settings: () => RavenConfig): DraftGenerator {
+  return {
+    async generate(request: DraftRequest, signal: AbortSignal): Promise<DraftResult> {
+      const service: unknown = ctx.get('llm')
+      const candidate = asRecord(service)
+      if (typeof candidate?.stream !== 'function') {
+        return { variants: [], unavailable: 'DeepSeek Harness model capability is not composed' }
+      }
+      const llm = service as LlmRuntime
+      const timeoutMs = settings().draftTimeoutMs ?? 0
+      signal.throwIfAborted()
+      const variants = await Promise.all(request.routes.map(async (route): Promise<RavenDraftVariant> => {
+        const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+        const attempt = deadline === undefined ? signal : AbortSignal.any([signal, deadline])
+        const failure = (detail: string): RavenDraftVariant => ({
+          route,
+          status: 'failed',
+          detail: deadline?.aborted === true
+            ? `the route exceeded the configured ${timeoutMs}ms deadline`
+            : detail,
+        })
+        try {
+          const assembler = new BlockAssembler()
+          for await (const chunk of llm.stream({
+            provider: route.provider,
+            model: route.model,
+            system: request.system,
+            maxTokens: request.maxTokens,
+            signal: attempt,
+            messages: [createUserMessage({
+              content: [{ type: 'text', text: `${request.context}\n\nWrite this now:\n${request.instruction}` }],
+              source: { kind: 'plugin', plugin: name },
+            })],
+          })) {
+            attempt.throwIfAborted()
+            assembler.push(chunk)
+          }
+          const finish = assembler.finish
+          if (finish.kind === 'error' || finish.kind === 'aborted') {
+            signal.throwIfAborted()
+            return failure(compactError(finish.failure.message))
+          }
+          const text = assembler.blocks()
+            .filter(block => block.type === 'text')
+            .map(block => (block as { readonly text: string }).text)
+            .join('')
+            .trim()
+          if (text.length === 0) return failure('the route returned no prose')
+          return {
+            route,
+            status: 'drafted',
+            text,
+            // A cut-off draft is still a usable candidate, but the agent must not
+            // read its ending as the author's ending.
+            ...(finish.kind === 'max-tokens' ? { detail: 'truncated at the configured token bound' } : {}),
+          }
+        } catch (error) {
+          signal.throwIfAborted()
+          return failure(compactError(error))
+        }
+      }))
+      signal.throwIfAborted()
+      return { variants }
+    },
+  }
+}
+
 function decodeHtmlEntities(value: string): string {
   const named: Record<string, string> = {
     amp: '&',
@@ -631,6 +727,14 @@ function renderToolValue(value: RavenToolValue): string {
     return lines.join('\n\n')
   }
   if (value.leads !== undefined) lines.push(renderLeads(value.leads))
+  if (value.variants !== undefined) lines.push(renderVariants(value.variants))
+  if (value.relaidArtifact !== undefined) {
+    lines.push(
+      'The stored Artifact was re-laid to one sentence per line: '
+      + `${value.relaidArtifact.sourceLines} line(s) in, ${value.relaidArtifact.laidOutLines} out. `
+      + 'Edit the bytes below rather than what you submitted: Completion compares these exact bytes.',
+    )
+  }
   if (value.renderedArtifact !== undefined) lines.push(value.renderedArtifact)
   else if (value.state.latestArtifact !== null && value.status === 'stopped') {
     lines.push(renderArtifact(value.state.latestArtifact, value.state.sources, value.state.claims))
@@ -704,7 +808,7 @@ function toolDefinition(
       properties: {
         action: {
           type: 'string',
-          enum: ['start', 'discover', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'],
+          enum: ['start', 'discover', 'draft', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'],
           description: `Requested Task action. Each action accepts only its own fields — ${ACTION_FIELD_SUMMARY} — and any other field fails the call.`,
         },
         taskId: { type: 'string', description: 'Existing Raven Task ID. Required by every action except start.' },
@@ -725,6 +829,15 @@ function toolDefinition(
           type: 'array',
           items: { type: 'string' },
           description: `Complementary search queries for one discovery batch, at most ${RAVEN_LIMITS.searchQueries} by default and ${RAVEN_LIMITS.searchQueryChars} characters each. Only with action=discover. Send several angles in ONE call — they share a deadline, are deduplicated against each other, and a failing query never cancels the rest. Results are Leads, never Sources: open a Lead and record a verbatim excerpt before it can support a Claim.`,
+        },
+        instruction: {
+          type: 'string',
+          description: `What each model should write, at most ${RAVEN_LIMITS.draftInstructionChars} characters. Only with action=draft. Name one bounded piece — a section, a paragraph, an abstract — because variants are for comparing wording, not for outsourcing the whole Artifact.`,
+        },
+        routes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: `Which configured "provider/model" routes to draft from, at most ${RAVEN_LIMITS.draftRoutes}. Only with action=draft; omit to use every route the deployment configured. A route the deployment did not configure is refused, and the configured set is named in the refusal.`,
         },
         grounding: {
           type: 'string',
@@ -889,14 +1002,15 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
   // never runs any of it.
   let settings: () => RavenConfig = () => config
   installSettingsSection(
-    ctx as unknown as Parameters<typeof installSettingsSection>[0],
+    ctx,
     RAVEN_SETTINGS_NAMESPACE,
     Config,
     config,
     {
       setSource: (current) => { settings = current },
-      // Nothing is derived from the section: every Source check reads the thunk, so a
-      // committed change takes effect on the next check with nothing to re-judge.
+      // Nothing is derived from the section: every Source check, discovery batch,
+      // draft round, and Artifact layout reads the thunk, so a committed change
+      // takes effect on the next call with nothing to re-judge.
       onChange: () => undefined,
     },
   )
@@ -907,11 +1021,35 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
       maxResults: config.searchMaxResults ?? RAVEN_LIMITS.searchResults,
     }
   }
+  const draftLimits = (): RavenDraftLimits => {
+    const config = settings()
+    const routes: RavenDraftRoute[] = []
+    const seen = new Set<string>()
+    for (const spec of config.draftRoutes ?? []) {
+      const route = parseDraftRoute(spec)
+      // A malformed entry is skipped rather than thrown: settings are edited by
+      // hand, and one typo must not take every other configured route down with it.
+      if (route === undefined || seen.has(`${route.provider}/${route.model}`)) continue
+      seen.add(`${route.provider}/${route.model}`)
+      if (routes.length < RAVEN_LIMITS.draftRoutes) routes.push(route)
+    }
+    return { maxTokens: config.draftMaxTokens ?? 0, routes }
+  }
+  const proseLayout = (): ProseLayoutOptions => {
+    const config = settings()
+    return {
+      layout: config.proseLayout ?? 'sentence-per-line',
+      format: config.proseFormat ?? 'markdown',
+    }
+  }
   const engine = createRavenEngine({
     now,
     sourceVerifier: sourceVerifier(ctx, now, () => settings()),
     sourceSearcher: sourceSearcher(ctx, () => settings()),
     searchLimits,
+    draftGenerator: draftGenerator(ctx, () => settings()),
+    draftLimits,
+    proseLayout,
   })
   const pendingLogState = new Map<string, RavenTaskMeta>()
 

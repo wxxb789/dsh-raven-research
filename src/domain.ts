@@ -1,3 +1,5 @@
+import type { ProseLayout } from './prose.js'
+
 export const RAVEN_LIMITS = {
   requestChars: 20_000,
   artifactChars: 100_000,
@@ -22,6 +24,10 @@ export const RAVEN_LIMITS = {
   leadTitleChars: 512,
   leadSnippetChars: 512,
   leadNoteChars: 2_000,
+  draftRoutes: 4,
+  draftInstructionChars: 8_000,
+  draftRounds: 32,
+  draftVariantChars: 40_000,
 } as const
 
 export const OUTCOMES = [
@@ -118,6 +124,83 @@ export interface RavenCheckpointRecord {
   readonly artifactChars: number
   readonly steeringRevision: number
   readonly createdAt: string
+  /**
+   * The Prose Layout the stored bytes are in. Absent on a record written before
+   * layouts existed, which is exactly `as-written`. Recorded because Completion
+   * compares byte hashes: without it, a deployment that changes the layout
+   * setting mid-Task produces a hash mismatch that reads as an unauthorized
+   * final edit rather than as the reformat it is.
+   */
+  readonly proseLayout?: ProseLayout
+}
+
+export const DRAFT_STATUSES = ['drafted', 'failed'] as const
+
+export type RavenDraftStatus = typeof DRAFT_STATUSES[number]
+
+/** One model route asked for a Draft Variant. Identity is the pair, never the model alone. */
+export interface RavenDraftRoute {
+  readonly provider: string
+  readonly model: string
+}
+
+/**
+ * One candidate rendering of the same writing task, produced by one route.
+ *
+ * A Draft Variant is a candidate, exactly as a Lead is a candidate: it carries
+ * no evidence of its own, can never be cited, and joins the Task only when the
+ * agent adopts its wording into a Checkpoint that Raven verifies against real
+ * Sources. Comparing variants chooses phrasing; it never establishes a fact, and
+ * a sentence that appears in every variant is still unsupported until a Source
+ * excerpt supports it.
+ */
+export interface RavenDraftVariant {
+  readonly route: RavenDraftRoute
+  readonly status: RavenDraftStatus
+  /** Present only for a drafted variant, already laid out under the Task's Prose Layout. */
+  readonly text?: string
+  /** Present only for a failed route; a dead model costs its own variant, never the round. */
+  readonly detail?: string
+}
+
+export interface DraftRequest {
+  readonly instruction: string
+  readonly routes: readonly RavenDraftRoute[]
+  readonly system: string
+  /** Task material the drafter may use: the request, the steering, and the current Artifact. */
+  readonly context: string
+  readonly maxTokens: number
+}
+
+export interface DraftResult {
+  readonly variants: readonly RavenDraftVariant[]
+  /** Set when no route could run at all, so one reason replaces N identical failures. */
+  readonly unavailable?: string
+}
+
+/** Retrieval seam for Draft Variants, kept separate from evidence seams on purpose. */
+export interface DraftGenerator {
+  generate(request: DraftRequest, signal: AbortSignal): Promise<DraftResult>
+}
+
+/**
+ * Bounded provenance of one comparison round: which routes were consulted and
+ * how each fared. The variant text is deliberately NOT retained — it is not
+ * evidence, it is large, and keeping it would let unadopted wording ride the
+ * Task's durable record as if it had been chosen.
+ */
+export interface RavenDraftRound {
+  readonly ordinal: number
+  readonly instruction: string
+  readonly requestedAt: string
+  readonly routes: readonly RavenDraftRouteOutcome[]
+}
+
+export interface RavenDraftRouteOutcome {
+  readonly provider: string
+  readonly model: string
+  readonly status: RavenDraftStatus
+  readonly chars: number
 }
 
 export interface RavenVerificationReceipt {
@@ -148,6 +231,8 @@ export interface RavenTaskState {
   readonly claims: readonly RavenClaimRecord[]
   readonly limitations: readonly RavenLimitation[]
   readonly latestArtifact: string | null
+  /** Draft comparison rounds, oldest first. Absent on a record written before Draft Variants existed. */
+  readonly drafts?: readonly RavenDraftRound[]
   readonly verification: RavenVerificationReceipt | null
   readonly finalArtifactSha256: string | null
   readonly startedAt: string
@@ -245,5 +330,8 @@ export interface RavenDispatchResult {
   readonly renderedArtifact?: string
   readonly wiki?: RavenWikiEmission
   readonly leads?: LeadSearchResult
+  readonly variants?: DraftResult
+  /** Set when the Prose Layout rewrote the submitted Artifact bytes before storing them. */
+  readonly relaidArtifact?: { readonly sourceLines: number; readonly laidOutLines: number }
 }
 
