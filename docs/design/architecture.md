@@ -457,10 +457,12 @@ src/
   plugin.ts       # direct Harness registrations and the web, model, and settings Adapters
   index.ts        # named Cordis exports
   client/         # browser half: one Settings > Plugins card
-    card-state.ts # pure form model: validity, override detection, save planning
+    card-state.ts # pure form model over the Host's own schema: fields, drafts, save planning
     controller.ts # staged edits and writes over the settings scope
     Card.tsx      # presentation only
-    slot-contract.ts # the targeted slot augmentation, restated (see below)
+    locales.ts    # card copy, English and Simplified Chinese
+    styles.ts     # the card's own stylesheet, injected at module scope; owns containment
+    slot-contract.ts # the slot, locale, schema-service, and Context augmentations, restated (see below)
     index.ts      # named browser Cordis exports
 
 tests/
@@ -503,7 +505,25 @@ test, so the drift breaks the release gate rather than the browser.
 The Harness card chrome and staged-form model are likewise off limits as values, so
 the card reimplements them. All of that logic lives in `card-state.ts` and is pure — a
 reimplementation is exactly the thing that drifts, and purity is what makes every rule
-in it testable in Node without a browser.
+in it testable in Node without a browser. What is deliberately NOT reimplemented is the
+answer to "is this draft acceptable": fields, control kinds, accepted values, and
+bounds are read off the schema the Host registered and judged by the Harness's own
+`settingsSchema` service, so a refused draft reports the schema's own words instead of
+a bound this package would have to keep in step with `config.ts`.
+
+Hand-drawing the chrome carries one obligation the imported chrome would have carried
+for free. The card renders into a list inside a scrolling pane inside a dialog that
+clips with `overflow: hidden`, and it can see none of those: they are host elements
+with hashed class names. An absolutely positioned descendant resolves against the
+nearest POSITIONED ancestor, and neither the list nor the pane is positioned — so such
+a descendant escapes the pane's clip, lands in the dialog's own box, and inflates a
+scroll extent that has no scrollbar to undo it. That is not cosmetic: focusing the
+escaped element makes the browser scroll the dialog's header and navigation
+permanently out of view, which reads as the whole settings page breaking on a click.
+`styles.ts` therefore makes the card root a containing block and keeps its one
+visually hidden control in flow at zero size, and `tests/unit/styles.test.ts` holds
+both rules plus the scoping rule that no selector in the sheet may match outside the
+card.
 
 ### Composition surfaces
 

@@ -445,14 +445,36 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 ### settings 卡片
 
 Raven 的浏览器半边会在 **Settings › Plugins** 下为该命名空间注册一张卡片，因此上面这些字段无需手写
-`settings.yaml` 即可编辑。卡片会渲染全部字段、标出用户层真正覆盖了哪些 key，并在任何一处暂存编辑无法解析时拒绝
-保存 —— 而不是只写入表单中正确的那一半。
+`settings.yaml` 即可编辑。它是一张可折叠卡片，按证据核验、线索发现、Artifact 排版、Draft Variant 分组，几何尺寸与
+设计 token 都与 Harness 为自家插件提供的卡片一致 —— 它们共处同一个列表，一张自行其是的卡片会被读成另一类对象。
+所有编辑（包括「重置」）都只在保存时写入：settings 写入是一次带 revision 栅栏的持久文档变更，而不是控件一落定就该
+提交的东西。卡片依据 key 在用户层的**存在性**（而非值比较）标出哪些字段被覆盖，任何一处暂存编辑无法解析时拒绝整次
+保存 —— 而不是只写入表单中正确的那一半 —— 并在写入后回读该 section，而不是把「没有抛异常」当成「已生效」。文案提供
+英文与简体中文两份。
 
-两个需要如实说明的前置条件。其一，只有组合了 `@deepseek-ai/dsh-client-ui-settings-plugins` 的部署才会出现这张
-卡片 —— Harness web app bundle 属于此类。其二，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness
-`0.1.0-rc.8` 声明的那一版；该包已发布的副本仍声明较旧的 list 形态，因此 Raven 内联了较新的形态，并由
-`scripts/verify-dsh.ts` 对被测 Harness checkout 断言这一形态 —— 于是契约漂移会导致 release gate 失败，而不是让卡片
-在浏览器里悄无声息地不渲染。
+卡片不自带任何校验规则。它的字段、控件类型、可选值与取值范围，全部来自 Host 半边注册的那份 schema —— 通过
+`settingsScope.describe()` 拿到每个 namespace 的序列化 schema，再交给 Harness 自己的 `settingsSchema` 服务
+rehydrate；该服务的类注释写的正是这个用途：*"Dynamic client plugins receive this Cordis entity instead of importing
+executable helpers from one another."* 因此被拒绝的输入会直接显示 schema 自己的措辞（`expected number >= 0 but got
+-5`），而那条下界只存在于 `config.ts`。往 `Config` 里加一个字段，卡片里就会出现，无需改动浏览器半边；只有标签、提示
+与分组是本地的 —— schema 不携带 title/order/group 元数据，Harness 自家的卡片出于同样原因也是从 locale key 取这三样。
+
+有一条规则刻意归卡片而非 schema 所有：`draftRoutes` 是 `array(string)`，Host 接受任意字符串，引擎随后会把不是
+`provider/model` 的条目直接跳过。拦下这次保存，是卡片拒绝提供一个「效果等于什么都没发生」的操作，因此它以卡片自己的
+名义报出。
+
+三个需要如实说明的前置条件。其一，只有组合了 `@deepseek-ai/dsh-client-ui-settings-plugins` 的部署才会出现这张
+卡片 —— Harness web app bundle 属于此类。其二，它注入浏览器端 `locale` 与 `settingsSchema` 服务，缺其一则这部分接线
+根本不会运行。其三，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness `0.1.0-rc.8` 声明的那一版；而
+`0.1.0-rc.6` 至今仍是 npm 上最新的已发布版本，声明的仍是较旧的 list 形态，因此 Raven 内联了较新的形态 —— 连同 locale
+注册签名、schema 服务、describe face 与它所镜像的卡片外观 —— 并由 `scripts/verify-dsh.ts` 对被测 Harness checkout
+逐一断言 —— 于是契约漂移会导致 release gate 失败，而不是让卡片在浏览器里悄无声息地不渲染、把自己的字典 key 直接显示
+给读者、或按 Host 已经不再认可的规则去判定取值。
+
+由于编译 `.module.css` 的客户端 bundle preset 尚未发布，卡片以文本形式携带自己的样式表，并在模块作用域注入一个
+`<style data-plugin="dsh-raven-research">` 标签 —— 与该 preset 的最终产物完全一致。丢掉这次注入不会让构建失败，
+只会在一列有样式的卡片中渲染出一坨没有样式的内容，因此 `tests/integration/client-bundle.test.ts` 会断言 CSS 确实
+存在于产物中。
 
 ## 兼容性
 

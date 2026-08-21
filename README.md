@@ -482,16 +482,42 @@ and takes effect on the next Source check, with no restart; if the settings serv
 becomes authoritative again.
 
 A browser card for this namespace is registered under **Settings › Plugins** by Raven's browser half, so the fields
-above are editable without hand-writing `settings.yaml`. The card renders every field, marks which keys the user
-layer actually overrides, and refuses a Save while any staged edit is unparseable rather than writing the valid half
-of a form.
+above are editable without hand-writing `settings.yaml`. It is a disclosure card grouped into evidence, discovery,
+prose, and drafting, drawn to the same geometry and design tokens as the cards the Harness ships for its own
+plugins — they share one list, and a card that measured itself differently would read as a different kind of object.
+Every edit is staged and written only on Save, including a Reset, because a settings write is a durable
+revision-fenced document mutation rather than something a control should commit as it settles; the card marks which
+keys the user layer actually overrides from key PRESENCE rather than value comparison, refuses a Save while any
+staged edit is unacceptable rather than writing the valid half of a form, and reads the section back afterwards
+rather than treating "no exception" as "landed". Copy ships in English and Simplified Chinese.
 
-Two honest requirements. The card only appears in a deployment that composes
-`@deepseek-ai/dsh-client-ui-settings-plugins` — the Harness web app bundle does. And the keyed
-`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.0-rc.8`; the published copy of
-that package still declares the older list-shaped slot, so Raven vendors the newer shape and `scripts/verify-dsh.ts`
-asserts it against the Harness checkout under test, which turns any drift into a failed release gate instead of a
-card that silently never renders.
+The card states no validation rules of its own. Its fields, their control kinds, their accepted values, and their
+bounds are read from the schema the Host half registered — reached through `settingsScope.describe()`, which carries
+each namespace's serialized schema, and rehydrated through the Harness's own `settingsSchema` service, whose class
+doc names this exact use: *"Dynamic client plugins receive this Cordis entity instead of importing executable
+helpers from one another."* A refused draft therefore reports the schema's own words (`expected number >= 0 but got
+-5`), a bound that lives only in `config.ts`. Adding a field to `Config` makes it appear in the card without
+touching the browser half; only its label, hint, and group are local, because the schema carries no title, order, or
+group metadata and the Harness's own cards take all three from locale keys for the same reason.
+
+One rule is deliberately this card's rather than the schema's: `draftRoutes` is `array(string)`, so the Host accepts
+any strings at all and the engine then skips every entry that is not `provider/model`. Refusing that Save is the
+card declining to offer an action whose effect would be silence, and it is reported as the card's own rule.
+
+Three honest requirements. The card only appears in a deployment that composes
+`@deepseek-ai/dsh-client-ui-settings-plugins` — the Harness web app bundle does. It injects the browser `locale` and
+`settingsSchema` services, so a client shell without them runs none of this wiring. And the keyed
+`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.0-rc.8`; `0.1.0-rc.6` is still
+the newest version published to npm and declares the older list-shaped slot, so Raven vendors the newer shape —
+together with the locale registration signature, the schema service, the describe face, and the card chrome it
+mirrors — and `scripts/verify-dsh.ts` asserts all of them against the Harness checkout under test, which turns any
+drift into a failed release gate instead of a card that silently never renders, renders its own dictionary keys, or
+judges values by a contract the Host no longer honours.
+
+Because the client bundle preset that compiles `.module.css` is unpublished, the card carries its stylesheet as text
+and injects one `<style data-plugin="dsh-raven-research">` tag at module scope, which is the same end state that
+preset produces. Losing that injection does not fail a build — it renders an unstyled blob inside a list of styled
+cards — so `tests/integration/client-bundle.test.ts` asserts the CSS is in the artifact.
 
 ## Compatibility
 
