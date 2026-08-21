@@ -2,165 +2,277 @@
  * Raven's card on the Settings › Plugins page.
  *
  * The chrome is hand-drawn because the client bundle-purity rule forbids
- * importing the shipped card chrome as values. It stays deliberately plain: the
- * card renders what the Host serves and writes what the user chooses, and every
- * decision about which value is valid, which is overridden, and whether a Save
- * may proceed was already made in `card-state.ts`.
+ * importing the shipped card chrome as values. It is not, for that reason,
+ * allowed to look hand-drawn: the tab renders every card into one `<ul>`, so a
+ * card that drew itself as an always-open `<section>` would read as a different
+ * kind of object than its neighbours. The geometry, the disclosure header, and
+ * the row layout therefore mirror the cards the Harness ships, and the
+ * stylesheet in `styles.ts` carries the same design tokens.
+ *
+ * Every decision about which value is valid, which is overridden, and whether a
+ * Save may proceed was already made in `card-state.ts`. Nothing here judges.
  * @module
  */
 
-import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
-import type { RavenFieldState } from './card-state.js'
+import { RAVEN_GROUPS, type RavenFieldGroup, type RavenFieldState } from './card-state.js'
 import type { RavenCardFace } from './controller.js'
+import type { RavenCardKey } from './locales.js'
 import type {} from './slot-contract.js'
 
-export type RavenCardProps = PropsRuntime<'settings.plugin.item'> & InjectFace<RavenCardFace>
+export type RavenCardProps =
+  PropsRuntime<'settings.plugin.item'>
+  & InjectFace<RavenCardFace>
+  & PropsLocale<'settings.raven-research'>
+
+/** Copy lookup bound to this card's dictionary namespace. */
+type Copy = RavenCardProps['t']
 
 /**
- * Copy for every field, spelled here rather than pulled from the Host schema
- * descriptions: the Host descriptor carries no title, order, or group, and the
- * schema description is written for an operator reading YAML, not for a form row.
+ * The dictionary key carrying one field's hint. A suffix rule rather than a
+ * table, because a table would be a second list to keep in step with
+ * `RAVEN_FIELDS`; `tests/unit/card-state.test.ts` asserts that every field the
+ * card renders has a label, a hint, and an option label in the dictionary, so a
+ * field added without copy fails the suite instead of rendering its own key at
+ * a reader.
  */
-const LABELS: Record<string, { readonly label: string; readonly hint: string }> = {
-  sourceVerification: {
-    label: 'Source verification',
-    hint: 'Whether recorded Sources are re-fetched to confirm their excerpts. "structural-only" makes every Source unverifiable, so a Checkpoint carrying Sources is refused rather than published unchecked.',
-  },
-  sourceCheckTimeoutMs: {
-    label: 'Source check deadline (ms)',
-    hint: '0 means no deadline. An exceeded deadline reports that one Source as unverifiable instead of holding the Checkpoint open.',
-  },
-  sourceDiscovery: {
-    label: 'Lead discovery',
-    hint: 'Whether raven_task action=discover may run queries through the Harness web search seam. "disabled" reports discovery as unavailable and records a Limitation; it never makes the agent believe it searched.',
-  },
-  searchMaxQueries: { label: 'Queries per discovery batch', hint: '0 means the built-in bound.' },
-  searchMaxResults: { label: 'Candidates per query', hint: '0 means the built-in bound.' },
-  searchTimeoutMs: {
-    label: 'Discovery query deadline (ms)',
-    hint: '0 means no deadline. A query that exceeds it is recorded as a failed query; its siblings still return their Leads.',
-  },
-  proseLayout: {
-    label: 'Prose layout',
-    hint: 'How every stored Artifact is laid out. "sentence-per-line" makes a LINE the smallest edit unit, so a revision diffs as the sentences that changed. Markdown structure is never reflowed.',
-  },
-  proseFormat: {
-    label: 'Artifact format',
-    hint: 'Markdown is the default final output format and is what makes the layout structure-aware. "plain" treats every line as prose.',
-  },
-  draftRoutes: {
-    label: 'Draft Variant routes',
-    hint: 'One "provider/model" per line. This list is the whole universe: the agent may select a subset and nothing else. Empty disables Draft Variants and says so.',
-  },
-  draftMaxTokens: { label: 'Draft length bound (tokens)', hint: '0 means the built-in bound.' },
-  draftTimeoutMs: {
-    label: 'Draft deadline (ms)',
-    hint: '0 means no deadline. A route that exceeds it produces no variant; its siblings still return theirs.',
-  },
+function hintKey(name: string): RavenCardKey {
+  return `${name}Hint` as RavenCardKey
 }
 
-function Field(props: {
+/** The message a row shows in place of its hint while its draft is unacceptable. */
+function failureText(field: RavenFieldState, t: Copy): string | undefined {
+  if (field.failure === undefined) return undefined
+  // The schema's own words name the actual bound it refused, which no local
+  // string could restate without drifting from `config.ts`. The route rule is
+  // this card's own, so it gets this card's copy.
+  return field.failure.kind === 'schema' ? field.failure.message : t('invalidRoutes')
+}
+
+function Choices(props: {
+  readonly id: string
   readonly field: RavenFieldState
   readonly disabled: boolean
+  readonly t: Copy
+  readonly onEdit: (text: string) => void
+}) {
+  // A radio group rather than a <select>: both policies are then visible at
+  // once, and the exclusivity, arrow-key traversal, and Space activation come
+  // from the native control instead of being re-implemented.
+  return (
+    <div
+      id={props.id}
+      className="dsh-raven-card__choices"
+      role="radiogroup"
+      aria-labelledby={`${props.id}-label`}
+    >
+      {props.field.choices.map(choice => (
+        <label
+          key={choice}
+          className="dsh-raven-card__option"
+          data-active={props.field.text === choice ? 'true' : undefined}
+        >
+          <input
+            type="radio"
+            className="dsh-raven-card__radio"
+            name={props.id}
+            value={choice}
+            checked={props.field.text === choice}
+            disabled={props.disabled}
+            onChange={() => { props.onEdit(choice) }}
+          />
+          <span>{props.t(`choice.${choice}` as RavenCardKey)}</span>
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function Row(props: {
+  readonly field: RavenFieldState
+  readonly disabled: boolean
+  readonly t: Copy
   readonly onEdit: (text: string) => void
   readonly onReset: () => void
 }) {
-  const { field } = props
-  const copy = LABELS[field.name] ?? { label: field.name, hint: '' }
-  const id = `raven-research-${field.name}`
+  const { field, t } = props
+  const id = `dsh-raven-${field.name}`
+  const choice = field.kind === 'choice'
+  const failure = failureText(field, t)
+  const invalid = failure !== undefined
+  // A choice row's label names a radiogroup, which `for` cannot point at.
+  const label = choice
+    ? <span className="dsh-raven-card__label" id={`${id}-label`}>{t(field.name as RavenCardKey)}</span>
+    : <label className="dsh-raven-card__label" htmlFor={id}>{t(field.name as RavenCardKey)}</label>
   return (
-    <div className="raven-field" data-invalid={field.invalid ? 'true' : undefined}>
-      <label htmlFor={id}>
-        {copy.label}
-        {field.overridden ? <span className="raven-field-badge">overridden</span> : null}
-      </label>
-      {field.kind === 'choice'
+    <div className="dsh-raven-card__row">
+      <div className="dsh-raven-card__head">
+        {label}
+        {field.overridden
+          ? (
+              <span className="dsh-raven-card__badges">
+                <span className="dsh-raven-card__badge">{t('overridden')}</span>
+                <button
+                  type="button"
+                  className="dsh-raven-card__reset"
+                  disabled={props.disabled}
+                  onClick={props.onReset}
+                >
+                  {t('reset')}
+                </button>
+              </span>
+            )
+          : null}
+      </div>
+      {choice
         ? (
-            <select
+            <Choices
               id={id}
-              value={field.text}
+              field={field}
               disabled={props.disabled}
-              onChange={(event) => { props.onEdit(event.target.value) }}
-            >
-              {field.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}
-            </select>
+              t={t}
+              onEdit={props.onEdit}
+            />
           )
         : field.kind === 'routes'
           ? (
               <textarea
                 id={id}
+                className={invalid ? 'dsh-raven-card__area--invalid' : 'dsh-raven-card__area'}
                 rows={3}
+                spellCheck={false}
+                {...invalid ? { 'aria-invalid': true } : {}}
                 value={field.text}
                 disabled={props.disabled}
-                spellCheck={false}
                 onChange={(event) => { props.onEdit(event.target.value) }}
               />
             )
           : (
               <input
                 id={id}
+                className={invalid ? 'dsh-raven-card__input--invalid' : 'dsh-raven-card__input'}
                 type="text"
-                inputMode="numeric"
+                // `inputMode` only hints the keypad. Whether a draft is accepted
+                // is decided by the Host's own schema, so the control never
+                // silently rewrites what was typed.
+                {...field.kind === 'number' ? { inputMode: 'numeric' as const } : {}}
+                {...invalid ? { 'aria-invalid': true } : {}}
                 value={field.text}
                 disabled={props.disabled}
                 onChange={(event) => { props.onEdit(event.target.value) }}
               />
             )}
-      <p className="raven-field-hint">{copy.hint}</p>
-      {field.invalid ? <p className="raven-field-error">This value is not accepted; the setting is not saved.</p> : null}
-      {field.overridden
-        ? (
-            <button type="button" disabled={props.disabled} onClick={props.onReset}>
-              Reset to default
-            </button>
-          )
-        : null}
+      {/* The invalid line replaces the hint rather than stacking under it: a row
+          that reports both says two things about one control. */}
+      <p className={invalid ? 'dsh-raven-card__invalid' : 'dsh-raven-card__hint'}>
+        {failure ?? t(hintKey(field.name))}
+      </p>
     </div>
   )
 }
 
 export function RavenSettingsCard(props: RavenCardProps) {
+  const { t } = props
   const state = props.useRavenCard(snapshot => snapshot)
-  const disabled = !state.writable
+  const title = t('title')
+  // The label replaces the header's own contents for assistive technology, so
+  // the unsaved marker has to be restated here or collapsing the card would
+  // hide the fact that it holds edits.
+  const name = state.dirty ? `${title} (${t('unsaved')})` : title
+  const header = (
+    <button
+      type="button"
+      className="dsh-raven-card__header"
+      aria-expanded={state.open}
+      aria-label={`${t(state.open ? 'collapse' : 'expand')}: ${name}`}
+      onClick={props.toggle}
+    >
+      <span className="dsh-raven-card__headtext">
+        <span className="dsh-raven-card__name">{title}</span>
+        <span className="dsh-raven-card__description">{t('description')}</span>
+      </span>
+      {state.dirty ? <span className="dsh-raven-card__pending">{t('unsaved')}</span> : null}
+      <IconChevronDownOutline14
+        className={state.open ? 'dsh-raven-card__chevron--open' : 'dsh-raven-card__chevron'}
+      />
+    </button>
+  )
+  if (!state.open) return <li className="dsh-raven-card">{header}</li>
+  const disabled = !state.writable || state.saving
   return (
-    <section className="raven-settings-card">
-      <header>
-        <h3>Raven research</h3>
-        <p>
-          Progressive, source-grounded research, writing, and learning. Every field here is a decision
-          about the environment a Raven Task runs in, never about one Task. The evidence floor belongs
-          to the Outcome and no setting can lower it.
-        </p>
-      </header>
-      {state.status === 'unavailable'
-        ? <p>These settings are not exposed to this client.</p>
-        : state.status === 'loading'
-          ? <p>Loading…</p>
-          : (
-              <>
-                {state.memory
-                  ? <p>This connection keeps preferences process-local, so changes cannot be saved.</p>
-                  : null}
-                {state.fields.map(field => (
-                  <Field
-                    key={field.name}
-                    field={field}
-                    disabled={disabled}
-                    onEdit={(text) => { props.edit(field.name, text) }}
-                    onReset={() => { props.resetField(field.name) }}
-                  />
-                ))}
-                <footer>
-                  <button type="button" disabled={disabled || !state.dirty || state.invalid} onClick={props.save}>
-                    Save
-                  </button>
-                  <button type="button" disabled={!state.dirty} onClick={props.discard}>
-                    Discard
-                  </button>
-                </footer>
-              </>
-            )}
-    </section>
+    <li className="dsh-raven-card dsh-raven-card--open">
+      {header}
+      <div className="dsh-raven-card__body">
+        {state.status === 'unavailable'
+          ? <p className="dsh-raven-card__notice" role="status">{t('unavailable')}</p>
+          : state.status === 'loading'
+            ? <p className="dsh-raven-card__notice" role="status">{t('loading')}</p>
+            : (
+                <>
+                  {state.writable
+                    ? null
+                    : (
+                        <p className="dsh-raven-card__notice" role="status">
+                          {t(state.memory ? 'memory' : 'readOnly')}
+                        </p>
+                      )}
+                  {/* Only the groups the registered schema actually populated:
+                      a heading over nothing would claim a setting that is not
+                      served, and `other` exists precisely so a field this card
+                      has no group for still renders. */}
+                  {RAVEN_GROUPS
+                    .map((group: RavenFieldGroup) => ({
+                      group,
+                      rows: state.fields.filter(field => field.group === group),
+                    }))
+                    .filter(entry => entry.rows.length > 0)
+                    .map((entry, index) => (
+                      <div key={entry.group}>
+                        <p
+                          className={index === 0
+                            ? 'dsh-raven-card__group dsh-raven-card__group--first'
+                            : 'dsh-raven-card__group'}
+                        >
+                          {t(`group.${entry.group}` as RavenCardKey)}
+                        </p>
+                        {entry.rows.map(field => (
+                          <Row
+                            key={field.name}
+                            field={field}
+                            disabled={disabled}
+                            t={t}
+                            onEdit={(text) => { props.edit(field.name, text) }}
+                            onReset={() => { props.resetField(field.name) }}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  <div className="dsh-raven-card__footer">
+                    {state.failed
+                      ? <p className="dsh-raven-card__error" role="status">{t('saveFailed')}</p>
+                      : null}
+                    <button
+                      type="button"
+                      className="dsh-raven-card__discard"
+                      disabled={state.saving || !state.dirty}
+                      onClick={props.discard}
+                    >
+                      {t('discard')}
+                    </button>
+                    <button
+                      type="button"
+                      className="dsh-raven-card__save"
+                      disabled={disabled || !state.dirty || state.invalid}
+                      onClick={props.save}
+                    >
+                      {t(state.saving ? 'saving' : 'save')}
+                    </button>
+                  </div>
+                </>
+              )}
+      </div>
+    </li>
   )
 }

@@ -380,7 +380,90 @@ try {
     'the settings.plugin.item key is no longer the settings namespace; the card would register under a key the tab never dispatches',
   )
 
-  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot contract, and disposal passed`)
+  // The card chrome the Harness renders for its own plugins, checked for the two
+  // properties Raven's hand-drawn copy has to share with it. The tab renders
+  // every card into one `<ul>`, so a root element that is not an `<li>` reads as
+  // a different kind of object in that list, and neither the browser nor a test
+  // would ever say so.
+  const harnessCard = await readFile(
+    join(root, 'packages/client/ui-settings-plugins/src/client/PluginCard.tsx'),
+    'utf8',
+  )
+  assert.match(
+    harnessCard,
+    /<li className=\{clsx\(css\.card/,
+    'the Harness plugin card is no longer rooted on an <li>; src/client/Card.tsx must be restated',
+  )
+
+  // The browser locale contract, likewise restated in `src/client/slot-contract.ts`.
+  // Registration takes every shipped locale in ONE call, so a dictionary set that
+  // is missing one is refused outright rather than falling back — and the card
+  // would then render its own dictionary keys at a reader.
+  const localeSettings = await readFile(join(root, 'packages/client/locale/src/locale-settings.ts'), 'utf8')
+  assert.match(
+    localeSettings,
+    /export const LOCALE_IDS = \['zh', 'en'\] as const/,
+    'the shipped locale set changed; RavenLocaleId in src/client/slot-contract.ts must be restated',
+  )
+  const localeRuntime = await readFile(join(root, 'packages/client/locale/src/client/index.ts'), 'utf8')
+  assert.match(
+    localeRuntime,
+    /register<N extends keyof LocaleNamespaceMap & string>\(ns: N, dicts: Record<LocaleId, LocaleDictOf<N>>\)/,
+    'the typed locale registration signature changed; RavenLocaleRuntime in src/client/slot-contract.ts must be restated',
+  )
+
+  // The settings schema service, likewise restated. This is the one that decides
+  // whether a draft is acceptable, so a drift here would not break the card —
+  // it would make it judge values by a contract the Host no longer honours.
+  const schemaService = await readFile(join(root, 'packages/client/ui-settings/src/client/schema.ts'), 'utf8')
+  for (const [member, signature] of [
+    ['rehydrate', /rehydrate\(serialized: unknown\): SchemaNode/],
+    ['validate', /validate\(schema: SchemaNode, draft: unknown\): string \| undefined/],
+    ['nodeAtPath', /nodeAtPath\(root: SchemaNode, path: readonly string\[\]\): SchemaNode \| undefined/],
+    ['hasPath', /hasPath\(value: unknown, path: readonly string\[\]\): boolean/],
+  ] as const) {
+    assert.match(
+      schemaService,
+      signature,
+      `settingsSchema.${member} changed; RavenSettingsSchemaService in src/client/slot-contract.ts must be restated`,
+    )
+  }
+  assert.match(
+    schemaService,
+    /super\(ctx, 'settingsSchema'\)/,
+    'the settings schema service is no longer published as `settingsSchema`; the card injects that name',
+  )
+
+  // The card reads its own registered schema off the shared describe mirror,
+  // because the per-namespace scope snapshot does not carry one.
+  const scopeBinder = await readFile(join(root, 'packages/client/ui-settings/src/client/settings-scope.ts'), 'utf8')
+  assert.match(
+    scopeBinder,
+    /describe\(\): SettingsDescribeFace/,
+    'settingsScope.describe() is gone; the card has no other route to its namespace schema',
+  )
+  const namespaceWire = await readFile(join(root, 'packages/host/apiproxy/src/api/settings.schema.ts'), 'utf8')
+  assert.match(
+    namespaceWire,
+    /settingsNamespaceViewSchema = z\.object\(\{[\s\S]*?\bschema: z\.unknown\(\)/,
+    'settings.describe no longer carries a per-namespace schema envelope; the card could not derive its fields',
+  )
+
+  // What the envelope must still contain for the card to derive controls from
+  // it: an object root whose properties carry union members as `const` nodes.
+  // Asserted against the REAL Config, through the real serialize/rehydrate pair.
+  const { default: Schemastery } = await import(source('vendor/schemastery/src/index.ts')) as {
+    default: new (value: unknown) => { type: string; dict?: Record<string, { type: string; list?: { value?: unknown }[] }> }
+  }
+  const rehydrated = new Schemastery(JSON.parse(JSON.stringify(Raven.Config.toJSON())))
+  assert.equal(rehydrated.type, 'object', 'the Raven Config no longer serializes as an object schema')
+  assert.deepEqual(
+    (rehydrated.dict?.proseLayout?.list ?? []).map(member => member.value),
+    ['sentence-per-line', 'as-written'],
+    'a union field no longer round-trips its const members; the card derives its choices from them',
+  )
+
+  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot, chrome, and locale contracts, and disposal passed`)
 } finally {
   await ctx.fiber.dispose()
   await rm(compositionRoot, { recursive: true, force: true })

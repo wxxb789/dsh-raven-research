@@ -133,11 +133,16 @@ describe('browser half artifact', () => {
     }
     const module = loadArtifact().factory(stub)
     expect(module.name).toBe('raven-research/client')
-    expect(module.inject).toEqual(['slots', 'settingsScope'])
+    // `settingsSchema` is a hard requirement: it is what lets the card judge a
+    // draft by the schema the Host registered instead of by rules restated in
+    // the browser half.
+    expect(module.inject).toEqual(['slots', 'settingsScope', 'settingsSchema', 'locale'])
     expect(module.RAVEN_NAMESPACE).toBe('raven-research')
 
     const registered: Array<Record<string, unknown>> = []
     const bound: Array<Record<string, unknown>> = []
+    const dictionaries: Array<[string, unknown]> = []
+    let described = 0
     const scope = {
       getSnapshot: () => ({ status: 'loading', value: undefined, user: {}, writable: false, mode: 'host' }),
       subscribe: () => () => undefined,
@@ -145,8 +150,31 @@ describe('browser half artifact', () => {
       unset: async () => undefined,
     }
     const ctx = {
-      effect: () => undefined,
-      settingsScope: { bind: (spec: Record<string, unknown>) => { bound.push(spec); return scope } },
+      effect: (body: () => unknown) => { body() },
+      settingsScope: {
+        bind: (spec: Record<string, unknown>) => { bound.push(spec); return scope },
+        // The shared describe mirror is where a namespace's serialized schema
+        // lives; the scope snapshot does not carry it.
+        describe: () => {
+          described++
+          return {
+            getSnapshot: () => ({ status: 'idle', view: undefined }),
+            subscribe: () => () => undefined,
+          }
+        },
+      },
+      settingsSchema: {
+        rehydrate: (serialized: unknown) => serialized,
+        validate: () => undefined,
+        nodeAtPath: () => undefined,
+        hasPath: () => false,
+      },
+      locale: {
+        register: (namespace: string, dicts: unknown) => {
+          dictionaries.push([namespace, dicts])
+          return () => undefined
+        },
+      },
       slots: {
         inject: (_name: string, body: () => Iterator<unknown>) => {
           const iterator = body()
@@ -161,11 +189,33 @@ describe('browser half artifact', () => {
     ;(module.apply as (ctx: unknown) => void)(ctx)
 
     expect(bound).toEqual([{ namespace: 'raven-research' }])
+    expect(described).toBe(1)
+    // Both shipped locales in one call: the registry requires every one of them,
+    // and a card registered against an unregistered namespace renders its own
+    // dictionary keys at a reader.
+    expect(dictionaries).toHaveLength(1)
+    expect(dictionaries[0]?.[0]).toBe('settings.raven-research')
+    expect(Object.keys(dictionaries[0]?.[1] as object).sort()).toEqual(['en', 'zh'])
     expect(registered).toHaveLength(1)
     // The tab pairs a served namespace with a card registered under the same
     // key. A mismatch drops the card silently.
     expect(registered[0]?.name).toBe('settings.plugin.item')
     expect(registered[0]?.key).toBe('raven-research')
+    // The declared namespace is what puts the `t` seat on the card's props;
+    // without it every label renders as its own dictionary key.
+    expect(registered[0]?.locale).toBe('settings.raven-research')
     expect(typeof registered[0]?.inject).toBe('function')
+  })
+
+  it('carries its own stylesheet, which is the whole of the card chrome', () => {
+    // The bundle preset that compiles `.module.css` is unpublished, so the card
+    // ships its CSS as text. Losing it does not fail the build — it renders an
+    // unstyled blob inside a list of styled cards.
+    expect(artifact).toContain('.dsh-raven-card')
+    expect(artifact).toContain('var(--dsw-alias-border-l2)')
+    // The Harness card CSS reaches for a token the theme does not define; this
+    // card must not copy that. Asserted on the CSS usage form rather than on the
+    // token name, which this repository's own prose also mentions.
+    expect(artifact).not.toContain('var(--dsw-alias-label-error)')
   })
 })

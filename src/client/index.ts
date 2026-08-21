@@ -20,7 +20,15 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 
 import { RavenSettingsCard } from './Card.js'
 import { RavenCardController } from './controller.js'
-import type {} from './slot-contract.js'
+import { en, RAVEN_LOCALE_NS, zh } from './locales.js'
+import type { RavenSettingsScopeBinderLike } from './slot-contract.js'
+import { injectCardStyles } from './styles.js'
+
+// Module scope, and a call rather than a bare import: the loader claims plugin
+// styles as soon as this factory returns, so the tag must exist by then, and
+// this package declares `sideEffects: false`, under which a bundler may drop an
+// import whose bindings nothing reads.
+injectCardStyles()
 
 /**
  * The namespace the Host half registers. Spelled here rather than imported from
@@ -29,18 +37,39 @@ import type {} from './slot-contract.js'
  */
 export const RAVEN_NAMESPACE = 'raven-research'
 
+export { RAVEN_LOCALE_NS, en, zh } from './locales.js'
+export type { RavenCardKey } from './locales.js'
+
 export const name = 'raven-research/client'
-export const inject = ['slots', 'settingsScope']
+
+/**
+ * `settingsSchema` is what lets this card judge a draft by the schema the Host
+ * actually registered instead of by rules restated here, so it is a
+ * requirement rather than an enhancement: without it the card would have to
+ * invent its own answer to "is this acceptable", which is the drift the
+ * dependency exists to remove.
+ */
+export const inject = ['slots', 'settingsScope', 'settingsSchema', 'locale']
 
 export function apply(ctx: ClientContext): void {
-  const controller = new RavenCardController(
-    ctx.settingsScope.bind({ namespace: RAVEN_NAMESPACE }) as SettingsScope<Record<string, unknown>>,
-  )
+  const controller = new RavenCardController({
+    scope: ctx.settingsScope.bind({ namespace: RAVEN_NAMESPACE }) as SettingsScope<Record<string, unknown>>,
+    // `describe()` exists on the running Harness but not in the published
+    // typings this package compiles against, so the binder is narrowed to the
+    // one method rather than read through its declared type.
+    describe: (ctx.settingsScope as unknown as RavenSettingsScopeBinderLike).describe(),
+    schema: ctx.settingsSchema,
+    namespace: RAVEN_NAMESPACE,
+  })
   ctx.effect(() => () => { controller.dispose() }, 'raven-research: settings card scope')
+  ctx.effect(() => ctx.locale.register(RAVEN_LOCALE_NS, { en, zh }), 'raven-research: card dictionaries')
+  // inject() defers registration until the tab declares the slot, so this half
+  // does not need the tab to exist yet — or ever.
   ctx.slots.inject('settings.plugin.item', function* () {
     yield ctx.slots.register({
       name: 'settings.plugin.item',
       key: RAVEN_NAMESPACE,
+      locale: RAVEN_LOCALE_NS,
       inject: () => controller.inject(),
     }, RavenSettingsCard)
   })
