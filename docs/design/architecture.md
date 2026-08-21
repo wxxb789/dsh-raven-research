@@ -394,6 +394,21 @@ Base64 keeps a Task Artifact that happens to contain `-->` from closing the comm
 The path degrades safely rather than exactly: a spill policy that replaces an oversized
 log copy loses that one step, and the next direct call republishes the complete record.
 
+That contract is INHERITED, not restated. Code Mode is the feature whose preset alias in
+the UI is "PTC mode", and every name on this path comes from `@deepseek-ai/dsh-tools`,
+which Raven already depends on: `CodeDispatchEventData` types the settled payload the
+dispatch reader parses, `CodeDispatchLog` types the waterfall listener parameter, and the
+event key is pinned with `satisfies keyof SessionEventMap` against the augmented map the
+same package declares into `@deepseek-ai/dsh-session/types`. An upstream rename or reshape
+is therefore a compile error rather than a silently lost step. The typing changes nothing
+at runtime: these values arrive off a durable log that may be truncated, spilled, or
+written by an older build, so every runtime check stays, and a bad copy still loses one
+step rather than the session. The release gate closes the half a type cannot see — it
+composes the official `run_code` tool over an in-process code runtime and drives the REAL
+bridge (real waterfall, real appended event), then asserts the upstream declarations in
+the checkout under test so a reshape that a stale published copy would still accept is
+named at the gate instead of discovered in a resumed session.
+
 Agent Teams is consumed the same way `web` is — dynamically, never injected — but with
 one additional constraint: the Harness Team packages are `private: true`, excluded from
 the release payload, and carry no stability promise, so Raven may not import their
@@ -496,7 +511,7 @@ ever learning what the namespace means.
 
 The declaring package's own augmentation cannot be imported across the client
 bundle-purity boundary, and its published copy lags the running Harness — at
-`0.1.0-rc.6` the slot is `kind: 'list'`, at `0.1.0-rc.8` it is `kind: 'keyed'`. A card
+`0.1.0-rc.6` the slot is `kind: 'list'`, at `0.1.1-rc.1` it is `kind: 'keyed'`. A card
 registered under the older shape compiles and then never renders, with nothing logged
 anywhere. `src/client/slot-contract.ts` therefore restates the targeted augmentation,
 and `scripts/verify-dsh.ts` asserts that shape against the Harness checkout under
@@ -565,8 +580,8 @@ a specific agent graph.
 
 ## Compatibility target
 
-Raven v1 targets DeepSeek Harness `0.1.0-rc.8` at commit
-`141eb6fef83422698aef7a981029e843e8161534`, Node `^22.19.0 || >=24`, and pnpm
+Raven v1 targets DeepSeek Harness `0.1.1-rc.1` at commit
+`528c682e061696f5a160f363f236ecbf53cbd006`, Node `^22.19.0 || >=24`, and pnpm
 `11.21.0`. Release checks use built ESM and declarations, a real Loader-path smoke
 test against that checkout, and a packed clean-consumer install. The version is an
 RC, so the package claims only the exact tested compatibility family.

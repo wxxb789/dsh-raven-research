@@ -5,7 +5,16 @@ import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { BlockAssembler, createUserMessage, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type {
+  CodeDispatchEventData,
+  CodeDispatchLog,
+  ToolDefinition,
+  ToolRunContext,
+} from '@deepseek-ai/dsh-tools'
+// The augmented session-event map itself, so the event key below is the OFFICIAL
+// one rather than a literal restated here. `@deepseek-ai/dsh-tools` declares
+// `'tool/code-dispatch'` INTO this map, and both are published export subpaths.
+import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { WebFetchResult, WebRuntime, WebSearchResult } from '@deepseek-ai/dsh-web'
 
 import { decodeRavenTaskState } from './codec.js'
@@ -66,6 +75,13 @@ const ACTION_FIELD_SUMMARY = Object.entries(ACTION_FIELDS)
  * would make the whole session unloadable. A known event type keeps the session
  * loadable by construction; if a deployment's spill policy replaces the logged copy,
  * the step simply is not restored, which is the honest degradation.
+ *
+ * Every name on that path is INHERITED from the official Code Mode contract
+ * (the Harness feature whose UI alias is "PTC mode") rather than restated here:
+ * the event key is pinned to `SessionEventMap` (see {@link CODE_DISPATCH_EVENT}),
+ * the settled payload to `CodeDispatchEventData`, and the waterfall payload to
+ * `CodeDispatchLog`. An official rename or reshape is therefore a compile error
+ * in this file instead of a Task step that silently stops being restored.
  */
 const STATE_LOG_PREFIX = `<!-- ${META_KIND} `
 const STATE_LOG_SUFFIX = ' -->'
@@ -74,6 +90,12 @@ const STATE_LOG_SUFFIX = ' -->'
  * session that predates this build keeps its Code Mode steps; never written again.
  */
 const LEGACY_STATE_EVENT = META_KIND
+/**
+ * The official settle-event key of the Code Mode bridge, pinned to the augmented
+ * `SessionEventMap` key set. `satisfies` keeps the value a literal type (so the
+ * comparison below still narrows) while making an official rename fail this build.
+ */
+const CODE_DISPATCH_EVENT = 'tool/code-dispatch' satisfies keyof SessionEventMap
 /** Handoff slots kept while sub-dispatches settle; bounded so a lost waterfall cannot leak. */
 const PENDING_LOG_STATE_LIMIT = 64
 
@@ -121,9 +143,18 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-/** The Task record embedded in one logged Code Mode sub-dispatch, when it survived. */
+/**
+ * The Task record embedded in one logged Code Mode sub-dispatch, when it survived.
+ *
+ * The fields read are named through the official `CodeDispatchEventData`, so a
+ * reshape of the settle payload breaks this build. The RUNTIME checks below stay
+ * exactly as strict: this value comes off a durable session log that may be
+ * truncated, spilled, or written by an older build, so the typing is a
+ * compile-time contract and not a licence to trust the bytes. A reshaped or
+ * truncated log still loses ONE step, never the session.
+ */
 function readDispatchTaskState(event: Record<string, unknown>): Record<string, unknown> | undefined {
-  const data = asRecord(event.data)
+  const data = asRecord(event.data) as Partial<CodeDispatchEventData> | undefined
   if (data?.name !== TOOL_NAME || !Array.isArray(data.content)) return undefined
   for (const raw of data.content) {
     const block = asRecord(raw)
@@ -146,7 +177,7 @@ function readDispatchTaskState(event: Record<string, unknown>): Record<string, u
 /** The durable Task record an event carries, from any publication path. */
 function readTaskStateMeta(event: Record<string, unknown>): Record<string, unknown> | undefined {
   if (event.type === 'tool/result') return asRecord(asRecord(event.data)?.meta)
-  if (event.type === 'tool/code-dispatch') return readDispatchTaskState(event)
+  if (event.type === CODE_DISPATCH_EVENT) return readDispatchTaskState(event)
   if (event.type === LEGACY_STATE_EVENT) return asRecord(event.data)
   return undefined
 }
@@ -1059,7 +1090,9 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
   // copy of Raven's own sub-dispatch. Total by contract — the bridge contains a
   // throwing listener by logging the original content, but a Task step must not
   // depend on that, so nothing here can fail.
-  ctx.on('tools/code-dispatch-log', async (dispatch, next) => {
+  // `dispatch` is typed as the official `CodeDispatchLog` explicitly rather than by
+  // inference, so a rename of the fields read below fails the build here.
+  ctx.on('tools/code-dispatch-log', async (dispatch: CodeDispatchLog, next) => {
     const content = await next()
     if (dispatch.name !== TOOL_NAME) return content
     const record = pendingLogState.get(dispatch.subCallId)

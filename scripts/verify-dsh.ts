@@ -6,8 +6,8 @@ import { pathToFileURL } from 'node:url'
 
 import { runProcess } from './process.js'
 
-const EXPECTED_VERSION = '0.1.0-rc.8'
-const EXPECTED_COMMIT = '141eb6fef83422698aef7a981029e843e8161534'
+const EXPECTED_VERSION = '0.1.1-rc.1'
+const EXPECTED_COMMIT = '528c682e061696f5a160f363f236ecbf53cbd006'
 const checkout = process.env.DSH_CHECKOUT
 if (checkout === undefined || checkout.trim().length === 0) {
   throw new Error('Set DSH_CHECKOUT to the DeepSeek Harness checkout under test.')
@@ -241,36 +241,10 @@ try {
   assert.equal(appended.length, 0, 'Raven must not append a plugin-owned session event type')
 
   // The record rides the `tools/code-dispatch-log` waterfall instead, on the known
-  // `tool/code-dispatch` event the Code Mode bridge appends.
-  const settledContent = [{ type: 'text' as const, text: 'rendered sub-call content' }]
-  const loggedContent = await ctx.waterfall(
-    'tools/code-dispatch-log',
-    { exec: { agent }, agent, subCallId: nestedCallId, name: 'raven_task', isError: false, content: settledContent },
-    () => Promise.resolve(settledContent),
-  ) as Array<{ type: string; text?: string }>
-  assert.equal(loggedContent.length, 2, 'the durable log copy must carry the Task record next to the rendered content')
-  assert.ok(String(loggedContent[1]?.text).startsWith('<!-- dsh-raven-research/task-state '))
-
-  // A resumed session rebuilds that step from the known event alone.
-  const resumed = await ctx.tools.execute({
-    callId: 'raven-dsh-smoke-resume-' + String(++call),
-    name: 'raven_task',
-    arguments: { action: 'status' },
-    agent: {
-      id: 'raven-dsh-smoke-resumed',
-      session: {
-        events: [{
-          type: 'tool/code-dispatch',
-          seq: 0,
-          time: 0,
-          data: { name: 'raven_task', content: loggedContent },
-        }],
-      },
-    },
-    signal,
-  })
-  assert.equal(resumed.isError, false, 'a Code Mode Task step must survive a session reload')
-  assert.ok(textOf(resumed).includes(taskId), 'the restored Task must be the one the program worked on')
+  // `tool/code-dispatch` event the Code Mode bridge appends. Both halves are driven
+  // by the REAL bridge below rather than fabricated here: a gate that hand-builds
+  // the waterfall payload AND the settle event restates the same literals the
+  // plugin does, so an official rename would pass it.
 
   // An unknown action is rejected by argument validation, before `execute` and
   // outside `tools/post-execute`. The tool-owned content finalizer still runs, so
@@ -329,6 +303,139 @@ try {
     }],
   })
   assert.match(offlineCheckpoint, /structural-only/)
+
+  // ---------------------------------------------------------------------------
+  // Code Mode durability, driven through the REAL bridge.
+  //
+  // The Harness feature whose UI alias is "PTC mode" is what puts Raven inside a
+  // `run_code` program, and it is the one path where a Task step has no result
+  // card to ride. Rather than fabricating both sides, this composes the official
+  // `run_code` tool (tools `mode: 'code'`) over an in-process `CodeRuntime` fake —
+  // the same role the Harness's own `code-mode.spec.ts` uses — and lets the REAL
+  // bridge run the REAL `tools/code-dispatch-log` waterfall and append the REAL
+  // `tool/code-dispatch` event. The fake stands in only for the sandboxed
+  // execution backend (the published worker runtime needs a built `worker.cjs`
+  // this source-loaded composition has no cheap way to produce); every line of
+  // Code Mode logic Raven depends on is the Harness's own.
+  const { CodeRuntime } = await import(source('packages/code-runtime/code-runtime/src/index.ts')) as {
+    CodeRuntime: new (ctx: unknown) => { run(request: unknown): Promise<unknown> }
+  }
+  const ToolsModuleNs = ToolsModule as { default: unknown; RUN_CODE_NAME: string }
+  class BridgeRuntime extends CodeRuntime {
+    readonly language = 'typescript'
+    readonly isolation = 'gate'
+    behavior: (request: { bindings: Array<{ functions: Record<string, (a: unknown) => Promise<unknown>> }> }) => Promise<unknown>
+      = () => Promise.resolve({ logs: [] })
+    override run(request: unknown): Promise<unknown> {
+      return this.behavior(request as { bindings: Array<{ functions: Record<string, (a: unknown) => Promise<unknown>> }> })
+    }
+  }
+  const codeCtx = new Context()
+  try {
+    await codeCtx.plugin(SystemPromptModule.default)
+    await codeCtx.plugin(ToolsModuleNs.default, { mode: 'code' })
+    await codeCtx.plugin(BridgeRuntime)
+    await codeCtx.plugin(Raven)
+    const bridgeEvents: Array<{ type: string; seq: number; time: number; data: unknown }> = []
+    const bridgeAgent = {
+      id: 'raven-dsh-code-mode',
+      session: {
+        header: { cwd: compositionRoot },
+        events: [] as unknown[],
+        append(type: string, data: unknown) {
+          bridgeEvents.push({ type, seq: bridgeEvents.length, time: 0, data })
+        },
+      },
+    }
+    const runtime = codeCtx.codeRuntime as BridgeRuntime
+    // The program a model would write: one `raven_task` call from inside `run_code`.
+    runtime.behavior = async request => ({
+      logs: [],
+      value: await request.bindings[0]!.functions.raven_task!({
+        action: 'start',
+        outcome: 'research',
+        request: 'Verify Code Mode durability through the real bridge.',
+      }),
+    })
+    const ran = await codeCtx.tools.execute({
+      callId: 'raven-dsh-code-mode-1',
+      name: ToolsModuleNs.RUN_CODE_NAME,
+      arguments: { code: '// driven by the gate runtime', description: 'Start a Raven Task from a program' },
+      agent: bridgeAgent,
+      signal,
+    })
+    assert.equal(ran.isError, false, 'the official run_code bridge must dispatch raven_task from inside a program')
+    const settle = bridgeEvents.find(event => event.type === 'tool/code-dispatch')
+    assert.ok(settle, 'the Code Mode bridge no longer appends tool/code-dispatch; Raven restores no Code Mode step from a reloaded session')
+    const settleData = settle.data as { name?: string; subCallId?: string; content?: Array<{ type: string; text?: string }> }
+    assert.equal(settleData.name, 'raven_task', 'the settle event no longer carries the dispatched tool name; readDispatchTaskState() keys on it')
+    const logged = settleData.content ?? []
+    assert.equal(logged.length, 2, 'the real tools/code-dispatch-log waterfall did not attach the Task record next to the rendered content')
+    assert.ok(
+      String(logged[1]?.text).startsWith('<!-- dsh-raven-research/task-state '),
+      'the durable log copy no longer carries the Raven Task record',
+    )
+    const codeTaskId = /(rvn-[a-f0-9]{12}-\d+)/.exec(JSON.stringify(logged))?.[1]
+    assert.ok(codeTaskId, 'the logged record must name the Task the program started')
+    // A resumed session rebuilds that step from the REAL appended event alone.
+    // The call carries a `parent` token because this composition is `mode: 'code'`:
+    // there, only a transport sub-dispatch may execute a native tool name, and a
+    // model-direct call is denied as UNKNOWN_TOOL before any policy runs — which is
+    // exactly the shape a resumed Code Mode session replays anyway.
+    const resumed = await codeCtx.tools.execute({
+      callId: 'raven-dsh-code-mode-2',
+      name: 'raven_task',
+      arguments: { action: 'status' },
+      agent: { id: 'raven-dsh-code-mode-resumed', session: { events: [settle] } },
+      signal,
+      parent: Symbol('raven-dsh-code-mode-resume'),
+    })
+    assert.equal(resumed.isError, false, 'a Code Mode Task step must survive a session reload')
+    assert.ok(
+      textOf(resumed as { content: Array<{ type: string; text?: string }> }).includes(codeTaskId),
+      'the restored Task must be the one the program worked on',
+    )
+  } finally {
+    await codeCtx.fiber.dispose()
+  }
+
+  // The official Code Mode contract Raven now INHERITS by type, asserted against
+  // the checkout under test. `src/plugin.ts` imports `CodeDispatchEventData`,
+  // `CodeDispatchLog`, and the augmented `SessionEventMap` key set, so a rename
+  // already breaks the build — these keep the DECLARATIONS those imports resolve
+  // to from being reshaped underneath a published copy that still typechecks.
+  const dispatchTypes = await readFile(join(root, 'packages/core/tools/src/types.ts'), 'utf8')
+  assert.match(
+    dispatchTypes,
+    /declare module '@deepseek-ai\/dsh-session\/types' \{[\s\S]*?interface SessionEventMap \{[\s\S]*?'tool\/code-dispatch': CodeDispatchEventData/,
+    "'tool/code-dispatch' is no longer declared into SessionEventMap as CodeDispatchEventData; CODE_DISPATCH_EVENT in src/plugin.ts must be restated against the new key",
+  )
+  assert.match(
+    dispatchTypes,
+    /export interface CodeDispatchStartEventData \{[\s\S]*?\bsubCallId: CallId[\s\S]*?\bname: string/,
+    'CodeDispatchStartEventData no longer carries subCallId and name; the Raven dispatch reader and log listener key on both',
+  )
+  assert.match(
+    dispatchTypes,
+    /export interface CodeDispatchEventData extends CodeDispatchStartEventData \{[\s\S]*?\bisError: boolean[\s\S]*?\bcontent: ContentBlock\[\]/,
+    'CodeDispatchEventData no longer carries isError and content; readDispatchTaskState() in src/plugin.ts reads content off it',
+  )
+  const toolsIndex = await readFile(join(root, 'packages/core/tools/src/index.ts'), 'utf8')
+  assert.match(
+    toolsIndex,
+    /'tools\/code-dispatch-log'\(this: Scoped<ToolRuntime>, dispatch: CodeDispatchLog, next: \(\) => Promise<ContentBlock\[\]>\): Promise<ContentBlock\[\]>/,
+    'the tools/code-dispatch-log waterfall signature changed; the Raven listener in src/plugin.ts must be restated against the new payload',
+  )
+  assert.match(
+    toolsIndex,
+    /export interface CodeDispatchLog \{[\s\S]*?\bsubCallId: CallId[\s\S]*?\bname: string[\s\S]*?\bisError: boolean[\s\S]*?\bcontent: ContentBlock\[\]/,
+    'CodeDispatchLog no longer carries subCallId, name, isError, and content; the Raven listener pairs its pending record by subCallId and appends to content',
+  )
+  assert.match(
+    toolsIndex,
+    /export \{ CodeRunFailedError, RUN_CODE_NAME \} from '\.\/code-mode\.ts'/,
+    'RUN_CODE_NAME is no longer re-exported from @deepseek-ai/dsh-tools; this gate drives the official run_code tool by that name',
+  )
 
   await ctx.loader.remove(includeId)
   assert.equal(ctx.get('tools'), undefined, 'removing the composition must dispose its tool registry and Raven registration')
@@ -463,7 +570,7 @@ try {
     'a union field no longer round-trips its const members; the card derives its choices from them',
   )
 
-  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot, chrome, and locale contracts, and disposal passed`)
+  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability through the real run_code bridge, official Code Mode contract inheritance, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot, chrome, and locale contracts, and disposal passed`)
 } finally {
   await ctx.fiber.dispose()
   await rm(compositionRoot, { recursive: true, force: true })

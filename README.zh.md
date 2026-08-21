@@ -11,7 +11,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.0-rc.8](https://img.shields.io/badge/harness-0.1.0--rc.8-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Harness 0.1.1-rc.1](https://img.shields.io/badge/harness-0.1.1--rc.1-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -24,7 +24,7 @@
 </div>
 
 > [!IMPORTANT]
-> **v1 developer preview。** 锚定并针对 DeepSeek Harness `0.1.0-rc.8` 测试，而 Harness 本身仍是 RC、会有破坏性变更。
+> **v1 developer preview。** 锚定并针对 DeepSeek Harness `0.1.1-rc.1` 测试，而 Harness 本身仍是 RC、会有破坏性变更。
 > 尚未发布到 npm —— 请[从源码安装](#安装)。
 
 ## TL;DR
@@ -98,7 +98,7 @@ Raven **尚未发布到 npm**，请从仓库源码安装。下面所有操作都
 
 | 要求 | 版本 |
 | --- | --- |
-| DeepSeek Harness | `0.1.0-rc.8`（checkout `141eb6fef83422698aef7a981029e843e8161534`） |
+| DeepSeek Harness | `0.1.1-rc.1`（checkout `528c682e061696f5a160f363f236ecbf53cbd006`） |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
 | Peer dependencies | 九个 `@deepseek-ai/*` 包 —— cordis 框架、schema 库，以及七个 Harness Service Definition（`cordis`、`dsh-agent`、`dsh-llm`、`dsh-session`、`dsh-settings`、`dsh-system-prompt`、`dsh-tools`、`dsh-web`、`schemastery`）—— 由 Harness 部署提供，绝不打包进产物 |
@@ -359,6 +359,13 @@ Raven 每个会话 —— 或者每个 Agent Team —— 维护一份 Task book�
 
 两条路径都能在会话 resume 时恢复这本 book，所以在程序内推进的 Task 不会悄无声息地丢失。
 
+Code Mode 就是 Harness 中在 UI 里以 **PTC mode** 为 preset 别名的那项能力，因此跑该 preset 的部署正是这条路径服务的
+对象。Raven 不在本地重述这份契约：`src/plugin.ts` 从 `@deepseek-ai/dsh-tools` 导入 `CodeDispatchEventData` 与
+`CodeDispatchLog`，并把事件 key 钉到官方增强后的 `SessionEventMap` 上，于是上游的重命名或改形在这里是**编译错误**，
+而不是某个 Task step 悄悄不再被恢复。`pnpm test:dsh` 补上另一半：它在进程内的 code runtime 之上组合出官方的
+`run_code` 工具，并真的跑一段调用 `raven_task` 的程序，让真实的 bridge 跑真实的 waterfall、追加真实的
+`tool/code-dispatch` 事件；同时它还直接断言上游的那些声明，一旦它们移动就指名该重述什么。
+
 ### 每个 Agent Team 一个 Task
 
 部署组合了 Harness Agent Teams 能力时，Raven 以 Team id 而不是 Agent id 作为 Task book 的键，因此 Lead 与每个队友
@@ -465,7 +472,7 @@ executable helpers from one another."* 因此被拒绝的输入会直接显示 s
 
 三个需要如实说明的前置条件。其一，只有组合了 `@deepseek-ai/dsh-client-ui-settings-plugins` 的部署才会出现这张
 卡片 —— Harness web app bundle 属于此类。其二，它注入浏览器端 `locale` 与 `settingsSchema` 服务，缺其一则这部分接线
-根本不会运行。其三，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness `0.1.0-rc.8` 声明的那一版；而
+根本不会运行。其三，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness `0.1.1-rc.1` 声明的那一版；而
 `0.1.0-rc.6` 至今仍是 npm 上最新的已发布版本，声明的仍是较旧的 list 形态，因此 Raven 内联了较新的形态 —— 连同 locale
 注册签名、schema 服务、describe face 与它所镜像的卡片外观 —— 并由 `scripts/verify-dsh.ts` 对被测 Harness checkout
 逐一断言 —— 于是契约漂移会导致 release gate 失败，而不是让卡片在浏览器里悄无声息地不渲染、把自己的字典 key 直接显示
@@ -480,8 +487,8 @@ executable helpers from one another."* 因此被拒绝的输入会直接显示 s
 
 Raven v1 锚定并测试于：
 
-- DeepSeek Harness `0.1.0-rc.8`；
-- Harness checkout commit `141eb6fef83422698aef7a981029e843e8161534`；
+- DeepSeek Harness `0.1.1-rc.1`；
+- Harness checkout commit `528c682e061696f5a160f363f236ecbf53cbd006`；
 - Node.js `^22.19.0 || >=24.0.0`；以及
 - pnpm `11.21.0`。
 

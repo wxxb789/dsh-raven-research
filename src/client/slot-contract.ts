@@ -4,7 +4,7 @@
  * None of these can be imported. The package declaring `settings.plugin.item`
  * is not on the browser module table, and its published copy lags the running
  * Harness: at `0.1.0-rc.6` — still the newest version published — the slot is
- * declared `kind: 'list'`, while the Harness this plugin targets (`0.1.0-rc.8`)
+ * declared `kind: 'list'`, while the Harness this plugin targets (`0.1.1-rc.1`)
  * declares `kind: 'keyed'` with the settings namespace as the key. Registering
  * under the older shape would compile and then never render. The locale runtime
  * and the settings schema service are platform entities the shell answers at

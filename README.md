@@ -11,7 +11,7 @@ Early checkpoints you can steer mid-run · citations verified against the bytes 
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.0-rc.8](https://img.shields.io/badge/harness-0.1.0--rc.8-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Harness 0.1.1-rc.1](https://img.shields.io/badge/harness-0.1.1--rc.1-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -24,7 +24,7 @@ English · [中文](README.zh.md)
 </div>
 
 > [!IMPORTANT]
-> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.0-rc.8`, which is itself an RC and ships
+> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.1-rc.1`, which is itself an RC and ships
 > breaking changes. Not published to npm yet — [install from a checkout](#install).
 
 ## TL;DR
@@ -108,7 +108,7 @@ you never edit a Harness checkout or a shipped preset.
 
 | Requirement | Version |
 | --- | --- |
-| DeepSeek Harness | `0.1.0-rc.8` (checkout `141eb6fef83422698aef7a981029e843e8161534`) |
+| DeepSeek Harness | `0.1.1-rc.1` (checkout `528c682e061696f5a160f363f236ecbf53cbd006`) |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
 | Peer dependencies | Nine `@deepseek-ai/*` packages — the cordis framework, the schema library, and seven Harness Service Definitions (`cordis`, `dsh-agent`, `dsh-llm`, `dsh-session`, `dsh-settings`, `dsh-system-prompt`, `dsh-tools`, `dsh-web`, `schemastery`) — supplied by the Harness deployment, never bundled |
@@ -391,6 +391,15 @@ storage of its own:
 
 Either path restores the book when a session resumes, so a Task advanced from inside a program is not silently lost.
 
+Code Mode is the Harness feature whose preset alias in the UI is **PTC mode**, so a deployment running that preset is
+exactly the one this path serves. Raven does not restate that contract locally: `src/plugin.ts` imports
+`CodeDispatchEventData` and `CodeDispatchLog` from `@deepseek-ai/dsh-tools` and pins the event key to the official
+augmented `SessionEventMap`, so an upstream rename or reshape is a **compile error** here rather than a Task step that
+quietly stops being restored. `pnpm test:dsh` closes the other half: it composes the official `run_code` tool over an
+in-process code runtime and runs a real program that calls `raven_task`, so the real bridge runs the real waterfall
+and appends the real `tool/code-dispatch` event — and it asserts the upstream declarations themselves, naming what to
+restate if they ever move.
+
 ### One Task per Agent Team
 
 Where the deployment composes the Harness Agent Teams capability, Raven keys the Task book by the Team id rather
@@ -507,7 +516,7 @@ card declining to offer an action whose effect would be silence, and it is repor
 Three honest requirements. The card only appears in a deployment that composes
 `@deepseek-ai/dsh-client-ui-settings-plugins` — the Harness web app bundle does. It injects the browser `locale` and
 `settingsSchema` services, so a client shell without them runs none of this wiring. And the keyed
-`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.0-rc.8`; `0.1.0-rc.6` is still
+`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.1-rc.1`; `0.1.0-rc.6` is still
 the newest version published to npm and declares the older list-shaped slot, so Raven vendors the newer shape —
 together with the locale registration signature, the schema service, the describe face, and the card chrome it
 mirrors — and `scripts/verify-dsh.ts` asserts all of them against the Harness checkout under test, which turns any
@@ -523,8 +532,8 @@ cards — so `tests/integration/client-bundle.test.ts` asserts the CSS is in the
 
 Raven v1 is pinned and tested against:
 
-- DeepSeek Harness `0.1.0-rc.8`;
-- Harness checkout commit `141eb6fef83422698aef7a981029e843e8161534`;
+- DeepSeek Harness `0.1.1-rc.1`;
+- Harness checkout commit `528c682e061696f5a160f363f236ecbf53cbd006`;
 - Node.js `^22.19.0 || >=24.0.0`; and
 - pnpm `11.21.0`.
 
