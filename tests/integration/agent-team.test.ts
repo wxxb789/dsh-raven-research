@@ -60,9 +60,15 @@ describe('Raven inside an Agent Team', () => {
     const lead = { id: 'lead-session', session: { events: [] as unknown[] } }
     const teammate = { id: 'mate-session', session: { events: [] as unknown[] } }
 
+    // grounding=optional deliberately: this deployment composes no web capability,
+    // and a grounding-REQUIRED Task is now refused at start rather than after the
+    // research is paid for. The Team-sharing contract under test is orthogonal to
+    // the evidence floor, so the floor is narrowed explicitly instead of leaving the
+    // test dependent on a start-time precondition it does not mean to exercise.
     const started = await tool.execute({
       action: 'start',
       outcome: 'research',
+      grounding: 'optional',
       request: 'One question the whole Team works on.',
     }, { agent: lead, signal })
 
@@ -73,6 +79,7 @@ describe('Raven inside an Agent Team', () => {
     await expect(tool.execute({
       action: 'start',
       outcome: 'research',
+      grounding: 'optional',
       request: 'A competing Task the Team never asked for.',
     }, { agent: teammate, signal })).rejects.toThrow(`Raven Task ${started.state.taskId} is already active`)
 

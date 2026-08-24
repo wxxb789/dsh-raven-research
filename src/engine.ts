@@ -22,7 +22,10 @@ import {
   type DraftResult,
   type GroundingPolicy,
   type LeadSearchResult,
+  type RavenCheckpointRecord,
   type RavenClaimRecord,
+  RavenError,
+  RavenTypeError,
   type RavenDispatchResult,
   type RavenDraftRoute,
   type RavenExecution,
@@ -129,7 +132,7 @@ export const ACTION_FIELDS: Record<string, readonly string[]> = {
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError(`${label} must be an object`)
+    throw new RavenTypeError('invalid-value', `${label} must be an object`)
   }
   return value as Record<string, unknown>
 }
@@ -140,7 +143,8 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string
   // has to guess the right one, and the fields it guesses are usually another
   // action's fields.
   if (unknown.length > 0) {
-    throw new TypeError(
+    throw new RavenTypeError(
+      'unknown-field',
       `${label} contains unknown field(s): ${unknown.join(', ')}. `
       + `Accepted field(s): ${allowed.join(', ')}`,
     )
@@ -149,14 +153,14 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string
 
 function requiredText(value: unknown, label: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new TypeError(`${label} must be a non-empty string`)
+    throw new RavenTypeError('invalid-value', `${label} must be a non-empty string`)
   }
   return value.trim()
 }
 
 function boundedText(value: unknown, label: string, maximum: number): string {
   const text = requiredText(value, label)
-  if (text.length > maximum) throw new TypeError(`${label} must be at most ${maximum} characters`)
+  if (text.length > maximum) throw new RavenTypeError('limit-exceeded', `${label} must be at most ${maximum} characters`)
   return text
 }
 
@@ -167,14 +171,21 @@ function optionalBoundedText(value: unknown, label: string, maximum: number): st
 
 function member<T extends string>(value: unknown, values: readonly T[], label: string): T {
   if (typeof value !== 'string' || !values.includes(value as T)) {
-    throw new TypeError(`${label} is invalid`)
+    // Name the accepted set, exactly as assertOnlyKeys does. "stage is invalid"
+    // was the one error in this codebase a caller could not act on: it named
+    // neither what it received nor what it would have taken, so the only repair
+    // was to guess an enum member.
+    throw new RavenTypeError(
+      'invalid-enum',
+      `${label} must be one of: ${values.join(', ')}. Received: ${typeof value === 'string' ? JSON.stringify(value) : typeof value}`,
+    )
   }
   return value as T
 }
 
 function optionalArray(value: unknown, label: string): unknown[] {
   if (value === undefined) return []
-  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`)
+  if (!Array.isArray(value)) throw new RavenTypeError('invalid-value', `${label} must be an array`)
   return value
 }
 
@@ -190,31 +201,91 @@ function taskId(sessionId: string, ordinal: number): string {
   return `rvn-${sha256(sessionId).slice(7, 19)}-${ordinal}`
 }
 
+/**
+ * Checkpoint identity, derived from the state revision rather than the ordinal.
+ *
+ * A per-Task-ordinal id (`${taskId}-cp-${n}`) was not unique across concurrent
+ * writers: two Agent Team members checkpointing the same Task from the same
+ * loaded state both minted `-cp-4`, so one Checkpoint's identity silently
+ * described the other's bytes. The revision is monotonic per accepted write and
+ * a compare-and-set on the book write is what makes only one of the two land, so
+ * the surviving Checkpoint has an id no other writer can have produced. (That
+ * compare-and-set is plugin.ts's half and is NOT implemented here.)
+ */
+function checkpointId(task: string, revision: number): string {
+  return `${task}-cp-r${revision}`
+}
+
+function nextCheckpointOrdinal(checkpoints: readonly RavenCheckpointRecord[]): number {
+  return (checkpoints.at(-1)?.ordinal ?? 0) + 1
+}
+
+/**
+ * Append one Checkpoint, trimming to stay inside the cap.
+ *
+ * The cap used to be a terminal deadlock: `checkpoint` threw at 128 and
+ * `complete` refused for want of a slot, so a Task that reached the cap could
+ * never finish and every remaining byte of work was unreachable. Old Checkpoints
+ * are descriptors, not content — the Artifacts they describe already live in
+ * prior durable tool results — so dropping the oldest one costs a pointer, while
+ * refusing costs the Task.
+ *
+ * The FIRST Checkpoint is preserved: it is the Task's earliest independently
+ * useful result and the only record of where the work started, and it is the one
+ * descriptor a reader reaches for when auditing how an Artifact evolved. The
+ * oldest trimmable Checkpoint is therefore the second one. `reserve` lets
+ * Completion demand its own slot in advance so it is never the call that is
+ * refused. Ordinals stay strictly increasing across a trim, exactly as draft
+ * rounds already do, and every trim is reported rather than silent.
+ */
+function admitCheckpoint(
+  state: RavenTaskState,
+  addition: RavenCheckpointRecord,
+  reserve: number,
+): { checkpoints: RavenCheckpointRecord[]; issues: string[] } {
+  const checkpoints = [...state.checkpoints]
+  const issues: string[] = []
+  let trimmed = 0
+  while (checkpoints.length + 1 + reserve > RAVEN_LIMITS.checkpoints && checkpoints.length > 1) {
+    checkpoints.splice(1, 1)
+    trimmed += 1
+  }
+  checkpoints.push(addition)
+  if (trimmed > 0) {
+    issues.push(
+      `${trimmed} older Checkpoint descriptor(s) were trimmed to stay inside the maximum of`
+      + ` ${RAVEN_LIMITS.checkpoints}; the first Checkpoint and every later one are retained,`
+      + ' and the trimmed Artifacts remain in their original tool results.',
+    )
+  }
+  return { checkpoints, issues }
+}
+
 function requireTask(previous: RavenTaskState | null, requestedTaskId: unknown): RavenTaskState {
-  if (previous === null) throw new Error('No Raven Task exists in this session')
+  if (previous === null) throw new RavenError('task-not-found', 'No Raven Task exists in this session')
   const requested = requiredText(requestedTaskId, 'taskId')
   if (requested !== previous.taskId) {
-    throw new Error(`Raven Task ${requested} was not found in this session`)
+    throw new RavenError('task-not-found', `Raven Task ${requested} was not found in this session`)
   }
   return previous
 }
 
 function requireActiveTask(previous: RavenTaskState | null, requestedTaskId: unknown): RavenTaskState {
   const state = requireTask(previous, requestedTaskId)
-  if (state.phase !== 'active') throw new Error(`Raven Task ${state.taskId} is ${state.phase}`)
+  if (state.phase !== 'active') throw new RavenError('task-phase', `Raven Task ${state.taskId} is ${state.phase}`)
   return state
 }
 
 function canonicalUrl(value: unknown): string {
   const input = requiredText(value, 'source.url')
-  if (input.length > 2048) throw new TypeError('source.url is too long')
+  if (input.length > 2048) throw new RavenTypeError('limit-exceeded', 'source.url is too long')
   return canonicalSourceUrl(input)
 }
 
 function stableId(value: unknown, label: string): string {
   const id = requiredText(value, label)
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) {
-    throw new TypeError(`${label} must use 1-64 letters, digits, dot, underscore, or hyphen`)
+    throw new RavenTypeError('invalid-value', `${label} must use 1-64 letters, digits, dot, underscore, or hyphen`)
   }
   return id
 }
@@ -235,11 +306,11 @@ function parseSources(
     const url = canonicalUrl(input.url)
     const otherId = idByUrl.get(url)
     if (otherId !== undefined && otherId !== sourceId) {
-      throw new Error(`source URL ${url} is already registered as ${otherId}`)
+      throw new RavenError('evidence-conflict', `source URL ${url} is already registered as ${otherId}`)
     }
     const current = byId.get(sourceId)
     if (current !== undefined && current.url !== url) {
-      throw new Error(`source ID ${sourceId} is already bound to ${current.url}`)
+      throw new RavenError('evidence-conflict', `source ID ${sourceId} is already bound to ${current.url}`)
     }
     const sourceFamily = optionalBoundedText(input.sourceFamily, 'source.sourceFamily', RAVEN_LIMITS.sourceFamilyChars)
     const asOf = optionalBoundedText(input.asOf, 'source.asOf', RAVEN_LIMITS.sourceAsOfChars)
@@ -265,17 +336,43 @@ function parseSources(
         && current.role === next.role
         && current.sourceFamily === next.sourceFamily
         && current.asOf === next.asOf
-      if (!sameEvidence) {
-        throw new Error(`source ID ${sourceId} cannot be rewritten; register changed evidence under a new Source ID`)
+      // A Source the verifier REFUSED is the one case where rewriting the record
+      // is repair rather than substitution, and the system depends on it: a check
+      // that finds the excerpt absent, or a retrieval truncated before it, tells the
+      // agent to repair the recorded excerpt from the nearest passage — and until
+      // a failed Checkpoint began retaining its Sources, that repair worked only
+      // because the refused record had been thrown away with everything else.
+      // Retaining evidence without this exemption made one mistyped excerpt
+      // permanently uncitable: the ID could not be rewritten, and the same URL
+      // could not be registered under a new ID either.
+      //
+      // This exemption and that retention are load-bearing for each other. Narrowing
+      // it back to `failed` alone would silently make the truncated-retrieval guidance
+      // unfollowable — that detail tells the agent to cite a passage INSIDE the
+      // retrieved range, which is itself a rewrite of a Source reported `unavailable`.
+      // It is exactly the kind of tightening that reads as safe cleanup.
+      //
+      // The exemption stops exactly where the danger starts. A `reachable` Source
+      // is confirmed evidence that Claims and citations already rest on, and an
+      // `unchecked` one is simply a different Source nobody has judged; neither may
+      // be swapped out behind its own ID. A repaired record returns to
+      // `unchecked`, so it is re-verified before it can support anything.
+      const refused = current.check.status === 'failed' || current.check.status === 'unavailable'
+      if (!sameEvidence && !refused) {
+        throw new RavenError(
+          'evidence-conflict',
+          `source ID ${sourceId} cannot be rewritten while its check is ${current.check.status};`
+          + ' register changed evidence under a new Source ID, or repair this one after a check refuses it',
+        )
       }
-      byId.set(sourceId, current)
+      byId.set(sourceId, sameEvidence ? current : next)
     } else {
       byId.set(sourceId, next)
     }
     idByUrl.set(url, sourceId)
   }
   if (byId.size > RAVEN_LIMITS.sources) {
-    throw new Error(`Raven Task may retain at most ${RAVEN_LIMITS.sources} Sources`)
+    throw new RavenError('limit-exceeded', `Raven Task may retain at most ${RAVEN_LIMITS.sources} Sources`)
   }
   return [...byId.values()]
 }
@@ -293,34 +390,34 @@ function parseClaims(
     const text = boundedText(input.text, 'claim.text', RAVEN_LIMITS.claimTextChars)
     const current = byId.get(claimId)
     if (current !== undefined && current.text !== text) {
-      throw new Error(`claim ID ${claimId} cannot be reused for different text`)
+      throw new RavenError('evidence-conflict', `claim ID ${claimId} cannot be reused for different text`)
     }
     const sourceIds = optionalArray(input.sourceIds, 'claim.sourceIds')
       .map(sourceId => stableId(sourceId, 'claim.sourceIds[]'))
     if (sourceIds.length > RAVEN_LIMITS.sources) {
-      throw new Error(`claim.sourceIds may contain at most ${RAVEN_LIMITS.sources} Source IDs`)
+      throw new RavenError('limit-exceeded', `claim.sourceIds may contain at most ${RAVEN_LIMITS.sources} Source IDs`)
     }
     if (new Set(sourceIds).size !== sourceIds.length) {
-      throw new Error(`claim ${claimId} contains duplicate Source IDs`)
+      throw new RavenError('evidence-conflict', `claim ${claimId} contains duplicate Source IDs`)
     }
     for (const sourceId of sourceIds) {
-      if (!knownSourceIds.has(sourceId)) throw new Error(`claim ${claimId} references unknown source ${sourceId}`)
+      if (!knownSourceIds.has(sourceId)) throw new RavenError('evidence-conflict', `claim ${claimId} references unknown source ${sourceId}`)
     }
     const kind = member<ClaimKind>(input.kind, CLAIM_KINDS, 'claim.kind')
     const importance = member<ClaimImportance>(input.importance, CLAIM_IMPORTANCE, 'claim.importance')
     const disposition = member<ClaimDisposition>(input.disposition, CLAIM_DISPOSITIONS, 'claim.disposition')
     if (kind === 'external' && (disposition === 'supported' || disposition === 'qualified') && sourceIds.length === 0) {
-      throw new Error(`external claim ${claimId} requires at least one source`)
+      throw new RavenError('evidence-conflict', `external claim ${claimId} requires at least one source`)
     }
     const contradicts = optionalArray(input.contradicts, 'claim.contradicts')
       .map(other => stableId(other, 'claim.contradicts[]'))
     if (contradicts.length > RAVEN_LIMITS.claims) {
-      throw new Error(`claim.contradicts may name at most ${RAVEN_LIMITS.claims} Claim IDs`)
+      throw new RavenError('limit-exceeded', `claim.contradicts may name at most ${RAVEN_LIMITS.claims} Claim IDs`)
     }
     if (new Set(contradicts).size !== contradicts.length) {
-      throw new Error(`claim ${claimId} contains duplicate contradiction links`)
+      throw new RavenError('evidence-conflict', `claim ${claimId} contains duplicate contradiction links`)
     }
-    if (contradicts.includes(claimId)) throw new Error(`claim ${claimId} cannot contradict itself`)
+    if (contradicts.includes(claimId)) throw new RavenError('evidence-conflict', `claim ${claimId} cannot contradict itself`)
     byId.set(claimId, {
       claimId,
       text,
@@ -334,13 +431,113 @@ function parseClaims(
   // Resolved after the batch so a mutually contradicting pair can be submitted together.
   for (const claim of byId.values()) {
     for (const other of claim.contradicts ?? []) {
-      if (!byId.has(other)) throw new Error(`claim ${claim.claimId} contradicts unknown Claim ${other}`)
+      if (!byId.has(other)) throw new RavenError('evidence-conflict', `claim ${claim.claimId} contradicts unknown Claim ${other}`)
     }
   }
   if (byId.size > RAVEN_LIMITS.claims) {
-    throw new Error(`Raven Task may retain at most ${RAVEN_LIMITS.claims} Claims`)
+    throw new RavenError('limit-exceeded', `Raven Task may retain at most ${RAVEN_LIMITS.claims} Claims`)
   }
   return [...byId.values()]
+}
+
+/**
+ * Fold-key for duplicate suppression.
+ *
+ * Exact-detail comparison never folded near-identical verifier details — the same
+ * dead host reported with a fresh timestamp, a different status code, or a
+ * different elapsed-ms figure produced N Limitations that all say one thing, and
+ * they accumulated toward the cap until a real Limitation could not be recorded.
+ * Digits, punctuation, and case are therefore normalized away and the key is
+ * bounded, so "HTTP 503 after 1200ms" and "HTTP 504 after 1900ms" fold together.
+ * The retained record keeps the FIRST detail verbatim: the fold is a dedupe, not
+ * a summarization, and the earliest observation is the one with full context.
+ *
+ * The digit pass is redundant with the character-class pass that follows it, which
+ * already drops every digit; it is kept only so the intent survives if that class
+ * is ever widened to admit digits. Removing it changes no observable behaviour.
+ */
+function limitationFoldKey(kind: RavenLimitationKind, detail: string, sourceId?: string): string {
+  const normalized = detail
+    .toLowerCase()
+    .replaceAll(/\d+/g, '#')
+    .replaceAll(/[^a-z#\u4E00-\u9FFF]+/g, ' ')
+    .trim()
+    .slice(0, 160)
+  return `${kind}\u0000${sourceId ?? ''}\u0000${normalized}`
+}
+
+/**
+ * The ONE place a Limitation is appended.
+ *
+ * Three call sites used to have three policies: `parseLimitations` threw at the
+ * cap, `propagateSourceChecks` threw at the cap mid-mutation (discarding the
+ * Claim deferrals computed in the same pass and turning an actionable "this
+ * Source is broken" result into a contextless throw), and `discover` silently
+ * dropped. Dropping is the right policy — a Limitation is a record ABOUT a
+ * failure and losing the Task over it is worse than losing the record — but it
+ * has to be visible, so the drop is reported to the caller instead of vanishing.
+ *
+ * Identity is a monotonic counter over everything the Task has ever recorded,
+ * never the array index. A positional id (`${kind}-${length + 1}`) collided
+ * across kinds and disagreed with the replay codec the moment two kinds
+ * interleaved, and the codec then rejected the whole snapshot.
+ *
+ * Scope, measured rather than assumed: now that the codec validates shape and
+ * uniqueness instead of position, the counter and a positional id only produce
+ * DIFFERENT values once the array length falls behind the highest ordinal -- which
+ * happens only after a Limitation was dropped at the cap. That is a real state
+ * this engine can reach, but it is not reachable in a unit test without first
+ * filling 256 Limitations and then folding one, so the guarantee here rests on
+ * the counter being obviously monotonic rather than on a regression test.
+ */
+interface LimitationAppend {
+  readonly limitations: RavenLimitation[]
+  readonly dropped: number
+}
+
+function nextLimitationOrdinal(existing: readonly RavenLimitation[]): number {
+  let highest = 0
+  for (const item of existing) {
+    const ordinal = Number.parseInt(item.limitationId.slice(item.limitationId.lastIndexOf('-') + 1), 10)
+    if (Number.isSafeInteger(ordinal) && ordinal > highest) highest = ordinal
+  }
+  return highest + 1
+}
+
+function appendLimitations(
+  existing: readonly RavenLimitation[],
+  additions: readonly Omit<RavenLimitation, 'limitationId' | 'createdAt'>[],
+  createdAt: string,
+): LimitationAppend {
+  const limitations = [...existing]
+  const seen = new Set(limitations.map(item => limitationFoldKey(item.kind, item.detail, item.sourceId)))
+  let ordinal = nextLimitationOrdinal(limitations)
+  let dropped = 0
+  for (const addition of additions) {
+    const key = limitationFoldKey(addition.kind, addition.detail, addition.sourceId)
+    if (seen.has(key)) continue
+    if (limitations.length >= RAVEN_LIMITS.limitations) {
+      dropped += 1
+      continue
+    }
+    seen.add(key)
+    limitations.push({
+      limitationId: `${addition.kind}-${ordinal}`,
+      kind: addition.kind,
+      detail: addition.detail,
+      ...(addition.sourceId === undefined ? {} : { sourceId: addition.sourceId }),
+      createdAt,
+    })
+    ordinal += 1
+  }
+  return { limitations, dropped }
+}
+
+function limitationCapIssue(dropped: number): string[] {
+  return dropped === 0
+    ? []
+    : [`${dropped} Limitation(s) could not be recorded: the Task already holds the maximum of`
+      + ` ${RAVEN_LIMITS.limitations}. The Task is unaffected; older Limitations still describe the same failures.`]
 }
 
 function parseLimitations(
@@ -348,8 +545,8 @@ function parseLimitations(
   existing: readonly RavenLimitation[],
   knownSourceIds: ReadonlySet<string>,
   createdAt: string,
-): RavenLimitation[] {
-  const next = [...existing]
+): LimitationAppend {
+  const additions: Omit<RavenLimitation, 'limitationId' | 'createdAt'>[] = []
   for (const raw of optionalArray(value, 'failures')) {
     const input = record(raw, 'failure')
     assertOnlyKeys(input, ['kind', 'detail', 'sourceId'], 'failure')
@@ -359,24 +556,14 @@ function parseLimitations(
       ? undefined
       : stableId(input.sourceId, 'failure.sourceId')
     if (sourceId !== undefined && !knownSourceIds.has(sourceId)) {
-      throw new Error(`failure references unknown source ${sourceId}`)
+      throw new RavenError('evidence-conflict', `failure references unknown source ${sourceId}`)
     }
-    const duplicate = next.some(item => item.kind === kind
-      && item.detail === detail
-      && item.sourceId === sourceId)
-    if (duplicate) continue
-    next.push({
-      limitationId: `${kind}-${next.length + 1}`,
-      kind,
-      detail,
-      ...(sourceId === undefined ? {} : { sourceId }),
-      createdAt,
-    })
+    additions.push({ kind, detail, ...(sourceId === undefined ? {} : { sourceId }) })
   }
-  if (next.length > RAVEN_LIMITS.limitations) {
-    throw new Error(`Raven Task may retain at most ${RAVEN_LIMITS.limitations} Limitations`)
-  }
-  return next
+  // Hitting the Limitation cap costs the Limitations that did not fit and nothing
+  // else. Throwing here used to discard the Sources, Claims, and Artifact that
+  // were submitted in the same call.
+  return appendLimitations(existing, additions, createdAt)
 }
 
 function propagateSourceChecks(
@@ -384,7 +571,7 @@ function propagateSourceChecks(
   limitations: readonly RavenLimitation[],
   sources: readonly RavenSourceRecord[],
   createdAt: string,
-): { claims: RavenClaimRecord[]; limitations: RavenLimitation[] } {
+): { claims: RavenClaimRecord[]; limitations: RavenLimitation[]; droppedLimitations: number } {
   const checkById = new Map(sources.map(source => [source.sourceId, source.check]))
   const propagatedClaims = claims.map((claim): RavenClaimRecord => {
     if (claim.kind !== 'external'
@@ -392,28 +579,118 @@ function propagateSourceChecks(
     const hasUsableSupport = claim.sourceIds.some(sourceId => checkById.get(sourceId)?.status === 'reachable')
     return hasUsableSupport ? claim : { ...claim, disposition: 'deferred' }
   })
-  const propagatedLimitations = [...limitations]
-  for (const source of sources) {
-    if (source.check.status === 'unchecked' || source.check.status === 'reachable') continue
-    if (propagatedLimitations.some(item => item.kind === 'source' && item.sourceId === source.sourceId)) continue
-    if (propagatedLimitations.length >= RAVEN_LIMITS.limitations) {
-      throw new Error(`Raven Task may retain at most ${RAVEN_LIMITS.limitations} Limitations`)
-    }
-    propagatedLimitations.push({
-      limitationId: `source-${propagatedLimitations.length + 1}`,
-      kind: 'source',
+  // Total on purpose. This runs on the `complete` failure path, where throwing at
+  // the Limitation cap converted an actionable "this Source is broken" result into
+  // a contextless throw AND lost the Claim deferrals computed in the same pass —
+  // the deferrals being the more valuable half. A cap now drops the record and
+  // says so; it never costs the propagation.
+  const alreadyRecorded = new Set(limitations
+    .filter(item => item.kind === 'source' && item.sourceId !== undefined)
+    .map(item => item.sourceId))
+  const additions = sources
+    .filter(source => source.check.status !== 'unchecked'
+      && source.check.status !== 'reachable'
+      && !alreadyRecorded.has(source.sourceId))
+    .map(source => ({
+      kind: 'source' as const,
       sourceId: source.sourceId,
-      detail: `Source ${source.sourceId} failed verification: ${source.check.detail ?? source.check.status}`,
-      createdAt,
-    })
+      detail: `Source ${source.sourceId} failed verification: ${source.check.status === 'unchecked' ? 'unchecked' : source.check.detail ?? source.check.status}`,
+    }))
+  const appended = appendLimitations(limitations, additions, createdAt)
+  return {
+    claims: propagatedClaims,
+    limitations: appended.limitations,
+    droppedLimitations: appended.dropped,
   }
-  return { claims: propagatedClaims, limitations: propagatedLimitations }
 }
 
 function citationIds(artifact: string): string[] {
   return [...artifact.matchAll(/\[@([A-Za-z0-9][A-Za-z0-9._-]{0,63})\]/g)]
     .map(match => match[1])
     .filter((id): id is string => id !== undefined)
+}
+
+/**
+ * The Artifact regions where a raw URL is content, not a citation.
+ *
+ * Scanning the WHOLE Artifact for `http(s)://` refused a research Artifact that
+ * merely QUOTED a config snippet, a curl line, or an `[ref]: https://…` link
+ * definition — none of which is the author asserting an unregistered source.
+ * The protected regions are exactly the ones the Prose Layout already refuses to
+ * reflow (prose.ts: fenced code, YAML frontmatter, link reference definitions),
+ * plus inline code spans, and the rules are restated here rather than shared
+ * because prose.ts exports no region walker yet; a shared `protectedRegions`
+ * export in prose.ts is the right long-term home for both callers.
+ */
+const FRONTMATTER_DELIMITER = /^-{3,}\s*$/
+const ARTIFACT_FENCE = /^(\s*)(`{3,}|~{3,})/
+const ARTIFACT_LINK_DEFINITION = /^\s{0,3}\[[^\]]+\]:/
+
+/** Blank out every protected region, preserving offsets so reported text still lines up. */
+function citationScannableText(artifact: string): string {
+  const lines = artifact.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n')
+  const output: string[] = []
+  let fence: string | undefined
+  let inFrontmatter = false
+  for (const [index, line] of lines.entries()) {
+    if (index === 0 && FRONTMATTER_DELIMITER.test(line)) {
+      inFrontmatter = true
+      output.push('')
+      continue
+    }
+    if (inFrontmatter) {
+      if (FRONTMATTER_DELIMITER.test(line)) inFrontmatter = false
+      output.push('')
+      continue
+    }
+    if (fence !== undefined) {
+      if (line.trimStart().startsWith(fence)) fence = undefined
+      output.push('')
+      continue
+    }
+    const fenceMatch = ARTIFACT_FENCE.exec(line)
+    if (fenceMatch !== null) {
+      fence = fenceMatch[2] ?? '```'
+      output.push('')
+      continue
+    }
+    if (ARTIFACT_LINK_DEFINITION.test(line)) {
+      output.push('')
+      continue
+    }
+    // Inline code spans: a backtick run is closed by an equal-length run.
+    output.push(line.replaceAll(/(`+)(?:(?!\1)[\s\S])*?\1/g, match => ' '.repeat(match.length)))
+  }
+  return output.join('\n')
+}
+
+/**
+ * Whether a registered Source authorizes an Artifact URL.
+ *
+ * A registered `https://x/a` did not authorize `https://x/a#section`, so citing
+ * the exact anchor the excerpt came from — the more precise, more honest form —
+ * was refused as an unregistered URL. A fragment is a client-side pointer inside
+ * the SAME retrieved document, so it is allowed. A trailing slash is allowed for
+ * the same reason in the other direction: `https://x/a` and `https://x/a/` are
+ * the one identity most authorities serve interchangeably. A different path,
+ * query, or host is still refused, because those retrieve a different document.
+ */
+function urlIsAuthorized(url: URL, knownUrls: ReadonlySet<string>): boolean {
+  const withoutFragment = new URL(url.href)
+  withoutFragment.hash = ''
+  const bases = [url.href, withoutFragment.href]
+  const candidates = new Set(bases)
+  for (const base of bases) {
+    const parsed = new URL(base)
+    parsed.pathname = parsed.pathname.endsWith('/') && parsed.pathname !== '/'
+      ? parsed.pathname.slice(0, -1)
+      : `${parsed.pathname}/`
+    candidates.add(parsed.href)
+  }
+  for (const candidate of candidates) {
+    if (knownUrls.has(candidate)) return true
+  }
+  return false
 }
 
 function validateArtifactCitations(
@@ -424,24 +701,26 @@ function validateArtifactCitations(
   const cited = new Set(citationIds(artifact))
   const known = new Set(sources.map(source => source.sourceId))
   for (const sourceId of cited) {
-    if (!known.has(sourceId)) throw new Error(`artifact cites unknown source ${sourceId}`)
+    if (!known.has(sourceId)) throw new RavenError('evidence-conflict', `artifact cites unknown source ${sourceId}`)
   }
   const knownUrls = new Set(sources.map(source => source.url))
-  for (const match of artifact.matchAll(/https?:\/\/[^\s<>\]]+/g)) {
+  for (const match of citationScannableText(artifact).matchAll(/https?:\/\/[^\s<>\]]+/g)) {
     const rawUrl = match[0].replace(/[),.;!?]+$/, '')
-    let url: string
+    let url: URL
     try {
-      url = new URL(rawUrl).href
+      url = new URL(rawUrl)
     } catch {
-      throw new Error(`artifact contains invalid external URL ${rawUrl}`)
+      throw new RavenError('evidence-conflict', `artifact contains invalid external URL ${rawUrl}`)
     }
-    if (!knownUrls.has(url)) throw new Error(`artifact contains unregistered external URL ${rawUrl}`)
+    if (!urlIsAuthorized(url, knownUrls)) {
+      throw new RavenError('evidence-conflict', `artifact contains unregistered external URL ${rawUrl}`)
+    }
   }
   for (const claim of claims) {
     if (claim.kind !== 'external' || claim.importance !== 'material') continue
     if (claim.disposition !== 'supported' && claim.disposition !== 'qualified') continue
     if (!claim.sourceIds.some(sourceId => cited.has(sourceId))) {
-      throw new Error(`material claim ${claim.claimId} has no source citation in the artifact`)
+      throw new RavenError('evidence-conflict', `material claim ${claim.claimId} has no source citation in the artifact`)
     }
   }
 }
@@ -452,8 +731,16 @@ function relevantSources(
   claims: readonly RavenClaimRecord[],
 ): RavenSourceRecord[] {
   const relevantIds = new Set(citationIds(artifact))
+  // EVERY external supported/qualified Claim, not only the material ones.
+  // Verifying material Claims alone left a context Claim's Sources at
+  // `{status:'unchecked'}`, which the replay codec rejects for the whole snapshot
+  // — so the engine emitted states that were silently dropped on session replay,
+  // taking the entire Task with them. The invariant architecture.md states carries
+  // no importance qualifier either: a supported external Claim cannot have an
+  // unknown or failed Source set. The cost is one fetch per context Claim; the
+  // alternative was losing Tasks.
   for (const claim of claims) {
-    if (claim.kind !== 'external' || claim.importance !== 'material') continue
+    if (claim.kind !== 'external') continue
     if (claim.disposition !== 'supported' && claim.disposition !== 'qualified') continue
     for (const sourceId of claim.sourceIds) relevantIds.add(sourceId)
   }
@@ -480,9 +767,23 @@ function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise
   })
 }
 
+/**
+ * One-line form of an arbitrary failure.
+ *
+ * The bound used to be a flat 300 characters, which cut the verifier's
+ * nearest-passage repair guidance mid-quotation: the whole point of that detail
+ * is that the agent can see the passage it should have quoted, and a truncated
+ * quotation is worse than none because it invites weakening a correct excerpt to
+ * fit the visible prefix. Long details therefore keep BOTH ends — the leading
+ * diagnosis and the actionable tail — with the middle elided.
+ */
+const COMPACT_ERROR_HEAD = 300
+const COMPACT_ERROR_TAIL = 700
+
 function compactError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return message.replaceAll(/\s+/g, ' ').slice(0, 300)
+  const message = (error instanceof Error ? error.message : String(error)).replaceAll(/\s+/g, ' ')
+  if (message.length <= COMPACT_ERROR_HEAD + COMPACT_ERROR_TAIL) return message
+  return `${message.slice(0, COMPACT_ERROR_HEAD)} […] ${message.slice(-COMPACT_ERROR_TAIL)}`
 }
 
 function validatedVerifierResults(
@@ -567,7 +868,7 @@ async function checkSources(
     try {
       observed = validatedVerifierResults(selected, raw)
     } catch (error) {
-      throw new Error(`source verifier protocol error: ${compactError(error)}`, { cause: error })
+      throw new RavenError('verifier-protocol', `source verifier protocol error: ${compactError(error)}`, { cause: error })
     }
   } catch (error) {
     signal.throwIfAborted()
@@ -617,17 +918,7 @@ async function checkSources(
   }
 }
 
-/**
- * Independence note for one Claim's cited Sources.
- *
- * Multiple publishers repeating one originating record remain one epistemic family,
- * so a Claim citing three reprints must not read as three independent confirmations.
- * Family is declared, never derived from host: distinct formal documents on one host
- * can be separate families, and one document mirrored across hosts is still one.
- * Independence is only meaningful per atomic proposition; that judgment stays with
- * the agent, so this annotates the rendered trace instead of blocking Completion.
- */
-/** Preserved disagreement: a contested Claim must never read as settled fact. */
+/** The human label for one Lead: its title when it has one, else its host. */
 function leadLabel(lead: { readonly url: string; readonly title?: string }): string {
   if (lead.title !== undefined && lead.title.trim().length > 0) return markdownText(lead.title)
   try {
@@ -661,7 +952,7 @@ export function renderVariants(result: DraftResult): string {
       + ' Lines are aligned one sentence per line so variants diff line by line.',
     )
     for (const variant of drafted) {
-      lines.push(`### ${markdownText(formatDraftRoute(variant.route))}`)
+      lines.push(`### ${markdownIdentifier(formatDraftRoute(variant.route))}`)
       lines.push(variant.text ?? '')
     }
   }
@@ -669,7 +960,7 @@ export function renderVariants(result: DraftResult): string {
   if (failed.length > 0) {
     lines.push('## Routes that produced no variant')
     for (const variant of failed) {
-      lines.push(`- ${markdownText(formatDraftRoute(variant.route))}: ${markdownText(variant.detail ?? 'no detail')}`)
+      lines.push(`- ${markdownIdentifier(formatDraftRoute(variant.route))}: ${markdownText(variant.detail ?? 'no detail')}`)
     }
   }
   return lines.join('\n\n')
@@ -721,12 +1012,23 @@ export function renderLeads(outcome: LeadSearchResult): string {
   return lines.join('\n')
 }
 
+/** Preserved disagreement: a contested Claim must never read as settled fact. */
 function contestedNote(claim: RavenClaimRecord): string {
   const contested = claim.contradicts ?? []
   if (contested.length === 0) return ''
   return ` — contested with ${contested.map(other => markdownText(other)).join(', ')}`
 }
 
+/**
+ * Independence note for one Claim's cited Sources.
+ *
+ * Multiple publishers repeating one originating record remain one epistemic family,
+ * so a Claim citing three reprints must not read as three independent confirmations.
+ * Family is declared, never derived from host: distinct formal documents on one host
+ * can be separate families, and one document mirrored across hosts is still one.
+ * Independence is only meaningful per atomic proposition; that judgment stays with
+ * the agent, so this annotates the rendered trace instead of blocking Completion.
+ */
 function independenceNote(
   claim: RavenClaimRecord,
   byId: Map<string, RavenSourceRecord>,
@@ -740,12 +1042,41 @@ function independenceNote(
   return ` — single Source family "${markdownText(only ?? '')}"; not independent corroboration`
 }
 
+/**
+ * Escape one untrusted string for inline Markdown.
+ *
+ * Markdown punctuation is backslashed FIRST and the HTML-significant characters
+ * are replaced LAST, so the emitted entities are never themselves rescanned.
+ *
+ * Recorded honestly: the ordering is defensive, not a bug fix. It was changed
+ * under the belief that the old order turned a title containing `&` into
+ * `&amp\;`, and that does NOT reproduce -- `;` is not in the escaped character
+ * class, so no entity a pass emits can be re-escaped by the other, and the two
+ * orders are behaviourally identical for every input tried. The order is kept
+ * this way because it stays correct if a `;` or `&` is ever added to the class,
+ * which is exactly the change that would silently start double-escaping.
+ */
+/**
+ * A machine identifier rendered for a human to match, not prose.
+ *
+ * A Draft route is a `provider/model` pair the DEPLOYMENT configured, so it is not
+ * untrusted text and it must survive rendering byte-for-byte: the agent selects
+ * routes by this exact string. Running it through markdownText escaped the hyphen
+ * in a model name (`deep-v2` became `deep\\-v2`), which silently changed the label
+ * the reader is meant to copy. Backticks make it inert without rewriting it; a
+ * backtick inside the identifier is stripped rather than escaped, since it cannot
+ * legally occur in a configured route and must never break out of the span.
+ */
+function markdownIdentifier(value: string): string {
+  return `\`${value.replaceAll('`', '')}\``
+}
+
 function markdownText(value: string): string {
   return value
+    .replace(/([\\`*_[\]{}()#+.!|-])/g, '\\$1')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
-    .replace(/([\\`*_[\]{}()#+.!|-])/g, '\\$1')
     .replaceAll(/\s+/g, ' ')
     .trim()
 }
@@ -808,7 +1139,8 @@ function storedArtifact(value: unknown, layout: ProseLayoutOptions): {
   const submitted = boundedText(value, 'artifact', RAVEN_LIMITS.artifactChars)
   const text = layoutProse(submitted, layout)
   if (text.length > RAVEN_LIMITS.artifactChars) {
-    throw new TypeError(
+    throw new RavenTypeError(
+      'limit-exceeded',
       `artifact must be at most ${RAVEN_LIMITS.artifactChars} characters after the Prose Layout`
       + ' puts one sentence on each line; shorten it rather than packing sentences together',
     )
@@ -856,12 +1188,12 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
       const args = record(input, 'Raven action')
       const action = requiredText(args.action, 'action')
       const allowedFields = ACTION_FIELDS[action]
-      if (allowedFields === undefined) throw new TypeError(`Unsupported Raven action: ${action}`)
+      if (allowedFields === undefined) throw new RavenTypeError('unsupported-action', `Unsupported Raven action: ${action}`)
       assertOnlyKeys(args, allowedFields, `Raven ${action} action`)
 
       if (action === 'start') {
         if (previous?.phase === 'active') {
-          throw new Error(`Raven Task ${previous.taskId} is already active`)
+          throw new RavenError('task-already-active', `Raven Task ${previous.taskId} is already active`)
         }
         const outcome = member<RavenOutcome>(args.outcome, OUTCOMES, 'outcome')
         const request = boundedText(args.request, 'request', RAVEN_LIMITS.requestChars)
@@ -872,7 +1204,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         // `research` and `academic-writing` are defined by external evidence, so they may
         // narrow the floor to `optional` but may never switch it off entirely.
         if (grounding === 'none' && defaultGrounding(outcome) === 'required') {
-          throw new Error(`a ${outcome} Task cannot disable its evidence floor; use grounding=optional or start a general-writing Task`)
+          throw new RavenError('invalid-value', `a ${outcome} Task cannot disable its evidence floor; use grounding=optional or start a general-writing Task`)
         }
         const ordinal = (previous?.ordinal ?? 0) + 1
         const at = options.now()
@@ -906,9 +1238,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
       }
 
       if (action === 'status') {
-        if (previous === null) throw new Error('No Raven Task exists in this session')
+        if (previous === null) throw new RavenError('task-not-found', 'No Raven Task exists in this session')
         if (args.taskId !== undefined && requiredText(args.taskId, 'taskId') !== previous.taskId) {
-          throw new Error(`Raven Task ${String(args.taskId)} was not found in this session`)
+          throw new RavenError('task-not-found', `Raven Task ${String(args.taskId)} was not found in this session`)
         }
         return {
           status: previous.phase,
@@ -924,12 +1256,13 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const maxQueries = limits.maxQueries > 0 ? limits.maxQueries : RAVEN_LIMITS.searchQueries
         const maxResults = limits.maxResults > 0 ? limits.maxResults : RAVEN_LIMITS.searchResults
         const raw = optionalArray(args.queries, 'queries')
-        if (raw.length === 0) throw new TypeError('queries must contain at least one query')
+        if (raw.length === 0) throw new RavenTypeError('invalid-value', 'queries must contain at least one query')
         // Bound the batch BEFORE deduplicating, exactly as the Harness web_search
         // tool does: repeating one query spends its slot instead of buying extra
         // breadth, so the advertised bound means the same thing on both sides.
         if (raw.length > maxQueries) {
-          throw new TypeError(
+          throw new RavenTypeError(
+            'limit-exceeded',
             `queries must contain at most ${maxQueries} ${maxQueries === 1 ? 'query' : 'queries'};`
             + ' issue complementary queries in one call rather than one query per call',
           )
@@ -939,24 +1272,26 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const outcome = await (options.sourceSearcher ?? NO_SEARCHER).search({ queries, maxResults }, execution.signal)
         execution.signal.throwIfAborted()
         const at = options.now()
-        const limitations = [...state.limitations]
-        const addLimitation = (detail: string): void => {
-          const bounded = detail.slice(0, RAVEN_LIMITS.limitationDetailChars)
-          if (limitations.some(item => item.kind === 'tool' && item.detail === bounded)) return
-          if (limitations.length >= RAVEN_LIMITS.limitations) return
-          limitations.push({
-            limitationId: `tool-${limitations.length + 1}`,
+        // One append policy for the whole engine. discover used to drop silently at
+        // the cap while parseLimitations and propagateSourceChecks threw; a Limitation
+        // is a record ABOUT a failure, so losing the Task over it is worse than losing
+        // the record -- but the drop has to be visible rather than silent.
+        const discovered: Omit<RavenLimitation, 'limitationId' | 'createdAt'>[] = []
+        if (outcome.unavailable !== undefined) {
+          discovered.push({
             kind: 'tool',
-            detail: bounded,
-            createdAt: at,
+            detail: `Lead discovery is unavailable: ${outcome.unavailable}`.slice(0, RAVEN_LIMITS.limitationDetailChars),
           })
         }
-        if (outcome.unavailable !== undefined) {
-          addLimitation(`Lead discovery is unavailable: ${outcome.unavailable}`)
-        }
         for (const failure of outcome.failures) {
-          addLimitation(`Lead discovery query "${failure.query}" failed: ${failure.detail}`)
+          discovered.push({
+            kind: 'tool',
+            detail: `Lead discovery query "${failure.query}" failed: ${failure.detail}`
+              .slice(0, RAVEN_LIMITS.limitationDetailChars),
+          })
         }
+        const appendedDiscovery = appendLimitations(state.limitations, discovered, at)
+        const limitations = appendedDiscovery.limitations
         // A failed batch is a Task fact, so it changes the Task; a clean batch
         // discovers nothing the Task owns yet and leaves the revision alone.
         const changed = limitations.length !== state.limitations.length
@@ -965,6 +1300,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           : state
         const issues: string[] = [
           'Leads are not Sources: open each Lead and record a verbatim excerpt before it can support a Claim.',
+          ...limitationCapIssue(appendedDiscovery.dropped),
         ]
         if (outcome.failures.length > 0) {
           issues.push(
@@ -1003,7 +1339,8 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           // list is the whole universe: an unknown route is refused with the
           // configured set named, never quietly substituted with a default.
           if (route === undefined) {
-            throw new TypeError(
+            throw new RavenTypeError(
+              'invalid-value',
               `routes[${index}] "${spec}" is not configured for this deployment.`
               + ` Configured route(s): ${allowed.size === 0 ? 'none' : [...allowed.keys()].join(', ')}`,
             )
@@ -1012,7 +1349,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         })
         const routes = requested.length > 0 ? [...new Set(requested)] : limits.routes
         if (routes.length > RAVEN_LIMITS.draftRoutes) {
-          throw new TypeError(`routes must name at most ${RAVEN_LIMITS.draftRoutes} configured route(s)`)
+          throw new RavenTypeError('limit-exceeded', `routes must name at most ${RAVEN_LIMITS.draftRoutes} configured route(s)`)
         }
         const outcome: DraftResult = routes.length === 0
           ? {
@@ -1057,18 +1394,29 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           ? state
           : { ...state, drafts: rounds, revision: state.revision + 1, updatedAt: at }
         const drafted = laid.variants.filter(variant => variant.status === 'drafted').length
+        // A round where EVERY route failed is a failed round, not a comparison of
+        // nothing. Reporting it as `0 Draft Variant(s) from 2 route(s)` reads as an
+        // empty success, and the partial-failure line ('compare the ones that did')
+        // points the agent at a comparison set that does not exist. Both are wrong
+        // here, so a total failure gets its own message and its own issue.
+        const allRoutesFailed = laid.variants.length > 0 && drafted === 0
         return {
           status: 'active',
           state: next,
-          message: laid.unavailable === undefined
-            ? `Raven Task ${state.taskId}: ${drafted} Draft Variant(s) from ${laid.variants.length} route(s).`
-            : `Draft Variants did not run for Raven Task ${state.taskId}.`,
+          message: laid.unavailable !== undefined
+            ? `Draft Variants did not run for Raven Task ${state.taskId}.`
+            : allRoutesFailed
+              ? `Raven Task ${state.taskId}: no route produced a Draft Variant; all ${laid.variants.length} route(s) failed.`
+              : `Raven Task ${state.taskId}: ${drafted} Draft Variant(s) from ${laid.variants.length} route(s).`,
           issues: [
             'Draft Variants are candidates, not Checkpoints: adopt wording into a Checkpoint,'
             + ' and support every factual sentence with a recorded Source excerpt before publishing it.',
-            ...(laid.variants.some(variant => variant.status === 'failed')
-              ? ['one or more routes produced no variant; compare the ones that did rather than waiting for a full set']
-              : []),
+            ...(allRoutesFailed
+              ? ['no route produced a variant, so there is nothing to compare; re-run the round or write the'
+                + ' section directly rather than treating the empty set as a result']
+              : laid.variants.some(variant => variant.status === 'failed')
+                ? ['one or more routes produced no variant; compare the ones that did rather than waiting for a full set']
+                : []),
           ],
           variants: laid,
         }
@@ -1084,7 +1432,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             issues: [],
           }
         }
-        if (state.phase !== 'active') throw new Error(`Raven Task ${state.taskId} is ${state.phase}`)
+        if (state.phase !== 'active') throw new RavenError('task-phase', `Raven Task ${state.taskId} is ${state.phase}`)
         if (args.reason !== undefined) boundedText(args.reason, 'reason', RAVEN_LIMITS.limitationDetailChars)
         const next: RavenTaskState = {
           ...state,
@@ -1119,12 +1467,12 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const tags = optionalArray(args.tags, 'tags').map((raw) => {
           const tag = requiredText(raw, 'tags[]')
           if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(tag)) {
-            throw new TypeError('tags[] must be lowercase letters, digits, or hyphens and appear in the wiki taxonomy')
+            throw new RavenTypeError('invalid-value', 'tags[] must be lowercase letters, digits, or hyphens and appear in the wiki taxonomy')
           }
           return tag
         })
         if (args.init !== undefined && typeof args.init !== 'boolean') {
-          throw new TypeError('init must be a boolean')
+          throw new RavenTypeError('invalid-value', 'init must be a boolean')
         }
         const wiki = renderWikiPages(
           state,
@@ -1155,7 +1503,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             issues: [],
           }
         }
-        if (state.phase !== 'stopped') throw new Error(`Raven Task ${state.taskId} is ${state.phase}`)
+        if (state.phase !== 'stopped') throw new RavenError('task-phase', `Raven Task ${state.taskId} is ${state.phase}`)
         const next: RavenTaskState = {
           ...state,
           phase: 'active',
@@ -1174,7 +1522,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const state = requireActiveTask(previous, args.taskId)
         const correction = boundedText(args.correction, 'correction', RAVEN_LIMITS.correctionChars)
         if (state.steering.length >= RAVEN_LIMITS.steeringRevisions) {
-          throw new Error(`Raven Task may retain at most ${RAVEN_LIMITS.steeringRevisions} Steering Revisions`)
+          throw new RavenError('limit-exceeded', `Raven Task may retain at most ${RAVEN_LIMITS.steeringRevisions} Steering Revisions`)
         }
         const at = options.now()
         const steeringRevision = state.steeringRevision + 1
@@ -1197,9 +1545,6 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
 
       if (action === 'checkpoint') {
         const state = requireActiveTask(previous, args.taskId)
-        if (state.checkpoints.length >= RAVEN_LIMITS.checkpoints) {
-          throw new Error(`Raven Task may retain at most ${RAVEN_LIMITS.checkpoints} Checkpoints`)
-        }
         const at = options.now()
         const stage = member<RavenStage>(args.stage, RAVEN_STAGES, 'stage')
         const summary = boundedText(args.summary, 'summary', RAVEN_LIMITS.summaryChars)
@@ -1210,7 +1555,8 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const parsedSources = parseSources(args.sources, state.sources, at)
         const knownSourceIds = new Set(parsedSources.map(source => source.sourceId))
         const claims = parseClaims(args.claims, state.claims, knownSourceIds)
-        const limitations = parseLimitations(args.failures, state.limitations, knownSourceIds, at)
+        const parsedLimitations = parseLimitations(args.failures, state.limitations, knownSourceIds, at)
+        const limitations = parsedLimitations.limitations
         validateArtifactCitations(artifact, parsedSources, claims)
         const relevant = relevantSources(artifact, parsedSources, claims)
         const verified = await checkSources(
@@ -1224,51 +1570,61 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const unverified = verified.sources.filter(source => relevant.some(candidate => candidate.sourceId === source.sourceId)
           && source.check.status !== 'reachable')
         if (unverified.length > 0) {
-          const verifiedById = new Map(verified.sources.map(source => [source.sourceId, source]))
-          const existingSources = state.sources.map(source => verifiedById.get(source.sourceId) ?? source)
-          const existingFailure = existingSources.some(source => source.check.status !== 'unchecked'
-            && source.check.status !== 'reachable')
-          const propagated = propagateSourceChecks(state.claims, state.limitations, existingSources, at)
-          const checkedState: RavenTaskState = existingFailure
-            ? {
-                ...state,
-                revision: state.revision + 1,
-                sources: existingSources,
-                claims: propagated.claims,
-                limitations: propagated.limitations,
-                verification: null,
-                finalArtifactSha256: null,
-                updatedAt: at,
-              }
-            : state
+          // Rejection with NO state loss, which is what architecture.md promises.
+          // This used to rebuild from the PRIOR state, so one unfetchable Source
+          // threw away every Source, Claim, Limitation and Artifact byte in the
+          // same call and the agent had to resend all of it. The parsed
+          // contribution is retained WITH its check results; only the Checkpoint
+          // is withheld, because publishing it is the thing the failure forbids.
+          // The Artifact is deliberately NOT stored as latestArtifact: the codec
+          // ties latestArtifact to the newest Checkpoint's hash, and an
+          // unpublished Artifact has no Checkpoint to be tied to.
+          const propagated = propagateSourceChecks(claims, limitations, verified.sources, at)
+          const checkedState: RavenTaskState = {
+            ...state,
+            revision: state.revision + 1,
+            sources: verified.sources,
+            claims: propagated.claims,
+            limitations: propagated.limitations,
+            verification: null,
+            finalArtifactSha256: null,
+            updatedAt: at,
+          }
           return {
             status: 'needs-revision',
             state: checkedState,
-            message: `Raven Task ${state.taskId} cannot publish an externally grounded Checkpoint yet.`,
-            issues: unverified.map((source) => {
-              const detail = source.check.status === 'unchecked'
-                ? 'source was not checked'
-                : source.check.detail ?? `source check was ${source.check.status}`
-              return `source ${source.sourceId} failed evidence verification: ${detail}`
-            }),
+            message: `Raven Task ${state.taskId} cannot publish an externally grounded Checkpoint yet;`
+              + ' the submitted Sources, Claims, and Limitations were retained, so resend only the repaired evidence and the Artifact.',
+            issues: [
+              ...unverified.map((source) => {
+                const detail = source.check.status === 'unchecked'
+                  ? 'source was not checked'
+                  : source.check.detail ?? `source check was ${source.check.status}`
+                return `source ${source.sourceId} failed evidence verification: ${detail}`
+              }),
+              ...limitationCapIssue(parsedLimitations.dropped + propagated.droppedLimitations),
+            ],
           }
         }
         const sources = verified.sources
-        const ordinal = state.checkpoints.length + 1
+        const revision = state.revision + 1
+        const admitted = admitCheckpoint(state, {
+          checkpointId: checkpointId(state.taskId, revision),
+          ordinal: nextCheckpointOrdinal(state.checkpoints),
+          stage,
+          summary,
+          artifactSha256,
+          artifactChars: artifact.length,
+          steeringRevision: state.steeringRevision,
+          createdAt: at,
+          proseLayout: layout.layout,
+          // Reserve one slot for Completion, so the Task can always finish: a
+          // checkpoint that filled the last slot is what made the cap terminal.
+        }, 1)
         const next: RavenTaskState = {
           ...state,
-          revision: state.revision + 1,
-          checkpoints: [...state.checkpoints, {
-            checkpointId: `${state.taskId}-cp-${ordinal}`,
-            ordinal,
-            stage,
-            summary,
-            artifactSha256,
-            artifactChars: artifact.length,
-            steeringRevision: state.steeringRevision,
-            createdAt: at,
-            proseLayout: layout.layout,
-          }],
+          revision,
+          checkpoints: admitted.checkpoints,
           sources,
           claims,
           limitations,
@@ -1280,8 +1636,11 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         return {
           status: 'active',
           state: next,
-          message: `Published Raven Checkpoint ${ordinal} for ${state.taskId}; the Task remains active.`,
-          issues: [],
+          message: `Published Raven Checkpoint ${admitted.checkpoints.at(-1)?.ordinal ?? 0} for ${state.taskId}; the Task remains active.`,
+          issues: [
+            ...admitted.issues,
+            ...limitationCapIssue(parsedLimitations.dropped),
+          ],
           renderedArtifact: renderArtifact(artifact, sources, claims),
           ...(stored.report.changed
             ? {
@@ -1302,9 +1661,8 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const artifactSha256 = sha256(artifact)
         const issues: string[] = []
         if (state.checkpoints.length === 0) issues.push('publish at least one useful Checkpoint before Completion')
-        if (state.checkpoints.length >= RAVEN_LIMITS.checkpoints) {
-          issues.push(`Completion needs one final Checkpoint slot; the limit is ${RAVEN_LIMITS.checkpoints}`)
-        }
+        // No slot check. Completion refusing for want of a Checkpoint slot made the
+        // cap a terminal deadlock; admitCheckpoint trims an older descriptor instead.
         const latestCheckpoint = state.checkpoints.at(-1)
         if (latestCheckpoint !== undefined && latestCheckpoint.steeringRevision !== state.steeringRevision) {
           issues.push('publish a Checkpoint that applies the latest Steering Revision before Completion')
@@ -1354,6 +1712,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const unusable = verified.sources.filter(source => relevant.some(candidate => candidate.sourceId === source.sourceId)
           && source.check.status !== 'reachable')
         if (unusable.length > 0) {
+          // The same no-state-loss rule as `checkpoint`: the verification results
+          // and the Claim deferrals computed from them are retained, so the agent
+          // repairs the named Source instead of re-establishing the Task.
           const propagated = propagateSourceChecks(state.claims, state.limitations, verified.sources, at)
           const checkedState: RavenTaskState = {
             ...state,
@@ -1369,12 +1730,15 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             status: 'needs-revision',
             state: checkedState,
             message: `Raven Task ${state.taskId} has broken or unverifiable Source references.`,
-            issues: unusable.map((source) => {
-              const detail = source.check.status === 'unchecked'
-                ? 'source was not checked'
-                : source.check.detail ?? `source check was ${source.check.status}`
-              return `source ${source.sourceId} failed remote verification: ${detail}`
-            }),
+            issues: [
+              ...unusable.map((source) => {
+                const detail = source.check.status === 'unchecked'
+                  ? 'source was not checked'
+                  : source.check.detail ?? `source check was ${source.check.status}`
+                return `source ${source.sourceId} failed remote verification: ${detail}`
+              }),
+              ...limitationCapIssue(propagated.droppedLimitations),
+            ],
           }
         }
 
@@ -1382,22 +1746,23 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const phase = verified.receipt.unavailable > 0 || state.limitations.length > 0 || hasDeferredClaims
           ? 'completed-with-limits'
           : 'completed'
-        const ordinal = state.checkpoints.length + 1
+        const revision = state.revision + 1
+        const admitted = admitCheckpoint(state, {
+          checkpointId: checkpointId(state.taskId, revision),
+          ordinal: nextCheckpointOrdinal(state.checkpoints),
+          stage: 'verify',
+          summary: phase === 'completed' ? 'Verified final Artifact.' : 'Final Artifact with verification limits.',
+          artifactSha256,
+          artifactChars: artifact.length,
+          steeringRevision: state.steeringRevision,
+          createdAt: at,
+          proseLayout: layout.layout,
+        }, 0)
         const completed: RavenTaskState = {
           ...state,
           phase,
-          revision: state.revision + 1,
-          checkpoints: [...state.checkpoints, {
-            checkpointId: `${state.taskId}-cp-${ordinal}`,
-            ordinal,
-            stage: 'verify',
-            summary: phase === 'completed' ? 'Verified final Artifact.' : 'Final Artifact with verification limits.',
-            artifactSha256,
-            artifactChars: artifact.length,
-            steeringRevision: state.steeringRevision,
-            createdAt: at,
-            proseLayout: layout.layout,
-          }],
+          revision,
+          checkpoints: admitted.checkpoints,
           sources: verified.sources,
           latestArtifact: artifact,
           verification: verified.receipt,
@@ -1411,8 +1776,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             ? `Completed Raven Task ${state.taskId} with verified Source references.`
             : `Completed Raven Task ${state.taskId} with explicit verification limits.`,
           issues: phase === 'completed'
-            ? []
+            ? admitted.issues
             : [
+                ...admitted.issues,
                 ...state.limitations.map(item => item.detail),
                 ...(verified.receipt.unavailable === 0
                   ? []
@@ -1423,7 +1789,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         }
       }
 
-      throw new TypeError(`Unsupported Raven action: ${action}`)
+      throw new RavenTypeError('unsupported-action', `Unsupported Raven action: ${action}`)
     },
   }
 }

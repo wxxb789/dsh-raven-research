@@ -95,8 +95,10 @@ async function completedResearchTask(session: string) {
   return { engine, completed }
 }
 
-function pageAt(result: RavenDispatchResult, path: string) {
-  const page = result.wiki?.pages.find(item => item.path === path)
+function pageAt(result: RavenDispatchResult, path: string | RegExp) {
+  const page = result.wiki?.pages.find(item => typeof path === 'string'
+    ? item.path === path
+    : path.test(item.path))
   if (page === undefined) {
     throw new Error(`missing ${path}; got ${(result.wiki?.pages ?? []).map(item => item.path).join(', ')}`)
   }
@@ -122,7 +124,11 @@ describe('llm-wiki emission', () => {
     expect(fields.updated).toBe('2026-08-16')
     expect(fields.tags).toBe('[research, storage]')
     // Every Source becomes a raw/ page and is listed as a source of this page.
-    expect(fields.sources).toBe('[raw/articles/a1-vendor-a-durability.md, raw/articles/b1-vendor-b-durability.md]')
+    // The trailing digest is what keeps two long, similarly-titled Sources from
+    // colliding on one truncated slug and overwriting each other.
+    expect(fields.sources).toMatch(
+      /^\[raw\/articles\/a1-vendor-a-durability-[a-f0-9]{8}\.md, raw\/articles\/b1-vendor-b-durability-[a-f0-9]{8}\.md\]$/,
+    )
     // Contradiction links registered on Claims surface as llm-wiki contested pages.
     expect(fields.contested).toBe('true')
     expect(body(page.content)).toContain('Vendor A durability')
@@ -136,7 +142,7 @@ describe('llm-wiki emission', () => {
       title: 'Durable Event Stores',
     }, { sessionId: 'wiki-raw-session', signal })
 
-    const raw = pageAt(exported, 'wiki/raw/articles/a1-vendor-a-durability.md')
+    const raw = pageAt(exported, /^wiki\/raw\/articles\/a1-vendor-a-durability-[a-f0-9]{8}\.md$/)
     const fields = frontmatter(raw.content)
     expect(fields.source_url).toBe('https://vendor-a.test/durability')
     expect(fields.ingested).toBe('2026-08-16')
@@ -219,5 +225,120 @@ describe('llm-wiki emission', () => {
       title: 'Clean Paragraph',
     }, { sessionId: 'wiki-conf-session', signal })
     expect(frontmatter(pageAt(done, 'wiki/queries/query-2026-08-16-clean-paragraph.md').content).confidence).toBe('high')
+  })
+
+  it('declares an unverified Source unverified rather than omitting the marker', async () => {
+    // A7: an unchecked Source used to emit no `verification:` field at all, so the
+    // page carried only `capture: excerpt-only` and a sha256 — which reads exactly
+    // like a verified capture, letting an unverified excerpt harden into wiki fact.
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Record an excerpt that was never reopened.',
+    }, { sessionId: 'wiki-unverified', signal })
+    const draft = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'read',
+      summary: 'An uncited Source recorded for later verification.',
+      artifact: 'A paragraph that does not cite the recorded Source yet.',
+      sources: [{
+        sourceId: 'U1',
+        url: 'https://unverified.test/page',
+        title: 'Never reopened',
+        locator: 'Section 1',
+        excerpt: 'an excerpt nobody confirmed',
+        role: 'primary',
+      }],
+    }, { sessionId: 'wiki-unverified', signal })
+    expect(draft.status).toBe('active')
+    expect(draft.state.sources[0]?.check.status).toBe('unchecked')
+
+    const exported = await engine.dispatch(draft.state, {
+      action: 'export',
+      taskId: started.state.taskId,
+      title: 'Unverified Excerpt',
+    }, { sessionId: 'wiki-unverified', signal })
+
+    const raw = pageAt(exported, /^wiki\/raw\/articles\/u1-never-reopened-[a-f0-9]{8}\.md$/)
+    const fields = frontmatter(raw.content)
+    expect(fields.verification).toBe('unverified')
+    expect(fields.verified_at).toBeUndefined()
+    expect(body(raw.content)).toContain('NOT confirmed against the retrieved body')
+    // The digest still covers exactly the body, so llm-wiki drift detection works.
+    expect(fields.sha256).toBe(createHash('sha256').update(body(raw.content)).digest('hex'))
+  })
+
+  it('gives two long similarly-titled Sources distinct raw pages', async () => {
+    // A13: slug() truncates to 80 characters, so these two used to collide on one
+    // path and the second silently overwrote the first.
+    const long = 'A Very Long Government Report On Durable Storage Acknowledgement Semantics Volume'
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Record two near-identically titled Sources.',
+    }, { sessionId: 'wiki-collision', signal })
+    const draft = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'read',
+      summary: 'Two long, near-identical titles.',
+      artifact: 'A paragraph recording two similarly titled reports.',
+      sources: [
+        {
+          sourceId: 'L1',
+          url: 'https://example.test/volume-one',
+          title: `${long} One`,
+          locator: 'Section 1',
+          excerpt: 'volume one excerpt',
+          role: 'primary',
+        },
+        {
+          sourceId: 'L2',
+          url: 'https://example.test/volume-two',
+          title: `${long} Two`,
+          locator: 'Section 1',
+          excerpt: 'volume two excerpt',
+          role: 'primary',
+        },
+      ],
+    }, { sessionId: 'wiki-collision', signal })
+
+    const exported = await engine.dispatch(draft.state, {
+      action: 'export',
+      taskId: started.state.taskId,
+      title: 'Two Volumes',
+    }, { sessionId: 'wiki-collision', signal })
+
+    const rawPaths = (exported.wiki?.pages ?? [])
+      .map(page => page.path)
+      .filter(path => path.startsWith('wiki/raw/'))
+    expect(rawPaths).toHaveLength(2)
+    expect(new Set(rawPaths).size).toBe(2)
+  })
+
+  it('exports the same Task twice as byte-identical pages and one log entry', async () => {
+    // A13: an export that is not a pure projection would ask the agent to rewrite
+    // files with different bytes and to append the same history twice.
+    const { engine, completed } = await completedResearchTask('wiki-idempotent')
+    const request = {
+      action: 'export',
+      taskId: completed.state.taskId,
+      title: 'Durable Event Stores',
+      tags: ['research', 'storage'],
+    }
+    const first = await engine.dispatch(completed.state, request, { sessionId: 'wiki-idempotent', signal })
+    const second = await engine.dispatch(first.state, request, { sessionId: 'wiki-idempotent', signal })
+
+    expect(second.wiki?.pages).toEqual(first.wiki?.pages)
+    expect(second.wiki?.logEntry).toBe(first.wiki?.logEntry)
+    // Export is read-only: it never advances the Task, so nothing accumulates.
+    expect(second.state).toBe(first.state)
+    expect(new Set((first.wiki?.pages ?? []).map(page => page.path)).size)
+      .toBe(first.wiki?.pages.length)
   })
 })

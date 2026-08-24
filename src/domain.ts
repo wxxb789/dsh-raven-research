@@ -303,6 +303,91 @@ export interface SourceVerifier {
   ): Promise<readonly SourceCheckResult[]>
 }
 
+/**
+ * Stable, machine-readable classification of an engine failure.
+ *
+ * Errors used to be prose only, so a caller could not tell "you sent a malformed
+ * action" (terminal — resending the same bytes fails again) from "the verifier
+ * could not be reached" (retryable). Both read as one sentence and both were
+ * retried, or neither was. The code/category ride ALONGSIDE the human sentence
+ * rather than replacing it: `error.message` is unchanged, so plugin.ts and any
+ * other existing consumer needs no change at all.
+ */
+export const RAVEN_ERROR_CATEGORIES = ['invalid-request', 'not-found', 'conflict', 'capacity', 'unavailable'] as const
+
+export type RavenErrorCategory = typeof RAVEN_ERROR_CATEGORIES[number]
+
+export const RAVEN_ERROR_CODES = [
+  'unsupported-action',
+  'unknown-field',
+  'invalid-value',
+  'invalid-enum',
+  'task-not-found',
+  'task-phase',
+  'task-already-active',
+  'evidence-conflict',
+  'limit-exceeded',
+  'verifier-protocol',
+] as const
+
+export type RavenErrorCode = typeof RAVEN_ERROR_CODES[number]
+
+/**
+ * Which categories a caller may usefully retry unchanged. `unavailable` is the
+ * only one: everything else is a property of the request or of the Task state,
+ * so retrying the identical call reproduces the identical failure.
+ */
+export function isRetryableRavenError(category: RavenErrorCategory): boolean {
+  return category === 'unavailable'
+}
+
+const CATEGORY_BY_CODE: Record<RavenErrorCode, RavenErrorCategory> = {
+  'unsupported-action': 'invalid-request',
+  'unknown-field': 'invalid-request',
+  'invalid-value': 'invalid-request',
+  'invalid-enum': 'invalid-request',
+  'task-not-found': 'not-found',
+  'task-phase': 'conflict',
+  'task-already-active': 'conflict',
+  'evidence-conflict': 'conflict',
+  'limit-exceeded': 'capacity',
+  'verifier-protocol': 'unavailable',
+}
+
+/** An engine failure carrying its classification. The message stays the human sentence. */
+export class RavenError extends Error {
+  override readonly name = 'RavenError'
+  readonly code: RavenErrorCode
+  readonly category: RavenErrorCategory
+  readonly retryable: boolean
+
+  constructor(code: RavenErrorCode, message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.code = code
+    this.category = CATEGORY_BY_CODE[code]
+    this.retryable = isRetryableRavenError(this.category)
+  }
+}
+
+/**
+ * A malformed-input failure. Still a `TypeError` by prototype so every existing
+ * `rejects.toThrow(TypeError)` assertion and every `instanceof TypeError` guard
+ * keeps working; the classification is additive on top.
+ */
+export class RavenTypeError extends TypeError {
+  override readonly name = 'RavenTypeError'
+  readonly code: RavenErrorCode
+  readonly category: RavenErrorCategory
+  readonly retryable: boolean
+
+  constructor(code: RavenErrorCode, message: string) {
+    super(message)
+    this.code = code
+    this.category = CATEGORY_BY_CODE[code]
+    this.retryable = isRetryableRavenError(this.category)
+  }
+}
+
 export interface RavenExecution {
   readonly sessionId: string
   readonly signal: AbortSignal

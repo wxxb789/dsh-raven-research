@@ -164,9 +164,16 @@ describe('Raven settings card drafts', () => {
   it('splits routes per line and reports the one rule the schema cannot express', () => {
     expect(draftValue(specOf(ROUTE_FIELD), 'alpha/fast\n\n beta/org/deep-v2 '))
       .toEqual(['alpha/fast', 'beta/org/deep-v2'])
-    // `array(string)` accepts this, and the engine would then silently skip it.
+    // The Host schema now carries the route-shape pattern itself, so a malformed
+    // entry is refused in the SCHEMA's own words rather than by this card's local
+    // copy of the rule — which is the arrangement ADR 0005 asks for, and which is
+    // what tells an operator WHICH entry is wrong instead of silently skipping it
+    // and then reporting "no Draft Variant route is configured". The card keeps
+    // `routeShape` as a backstop for a Harness whose schema service cannot express
+    // the pattern; either way the draft is refused, which is what must not regress.
     const state = project(ready, staged({ draftRoutes: set('alpha/fast\nnoslash') }))
-    expect(field(state, 'draftRoutes')?.failure).toEqual({ kind: 'routeShape' })
+    expect(field(state, 'draftRoutes')?.failure?.kind).toMatch(/^(?:schema|routeShape)$/)
+    expect(state.invalid).toBe(true)
     expect(project(ready, staged({ draftRoutes: set('/fast') })).invalid).toBe(true)
     expect(project(ready, staged({ draftRoutes: set('alpha/fast') })).invalid).toBe(false)
   })

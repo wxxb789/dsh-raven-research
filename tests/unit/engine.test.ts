@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { createRavenEngine, renderArtifact } from '../../src/engine.js'
-import { RAVEN_LIMITS, type SourceCheckRequest, type SourceVerifier } from '../../src/domain.js'
+import {
+  isRetryableRavenError,
+  RavenError,
+  RAVEN_LIMITS,
+  RavenTypeError,
+  type SourceCheckRequest,
+  type SourceVerifier,
+} from '../../src/domain.js'
 
 const signal = new AbortController().signal
 const now = () => '2026-08-16T16:00:00.000Z'
@@ -59,6 +66,88 @@ describe('Raven task engine', () => {
         sourceIds: ['UNKNOWN1'],
       }],
     }, { sessionId: 'session-unknown-source', signal })).rejects.toThrow('unknown field')
+  })
+
+  it('lets a refused Source be repaired under its own ID, and never a confirmed one', async () => {
+    // The verifier refuses the first excerpt and accepts the repaired one, which
+    // is the loop the mismatch guidance actually asks the agent to run.
+    const seen: string[] = []
+    const verifier: SourceVerifier = {
+      verify: async (sources: readonly SourceCheckRequest[]) => sources.map((source) => {
+        seen.push(source.excerpt)
+        return source.excerpt === 'the passage as it truly reads'
+          ? { sourceId: source.sourceId, status: 'reachable' as const, checkedAt: now(), statusCode: 200, resolvedUrl: source.url }
+          : {
+              sourceId: source.sourceId,
+              status: 'failed' as const,
+              checkedAt: now(),
+              statusCode: 200,
+              resolvedUrl: source.url,
+              detail: 'recorded excerpt diverges from the retrieved source',
+            }
+      }),
+    }
+    const engine = createRavenEngine({ now, sourceVerifier: verifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Repair a mistyped excerpt.',
+    }, { sessionId: 'session-repair', signal })
+    const source = (excerpt: string) => ({
+      sourceId: 'REPAIR1',
+      url: 'https://example.test/repair',
+      title: 'Repairable source',
+      locator: 'Section 2',
+      excerpt,
+      role: 'primary' as const,
+    })
+    const claims = [{
+      claimId: 'REPAIR-C1',
+      text: 'The passage says what the excerpt claims.',
+      kind: 'external' as const,
+      importance: 'material' as const,
+      disposition: 'supported' as const,
+      sourceIds: ['REPAIR1'],
+    }]
+    const refused = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'verify',
+      summary: 'Mistyped excerpt.',
+      artifact: 'The passage says what the excerpt claims [@REPAIR1].',
+      sources: [source('the passge as it truly reads')],
+      claims,
+    }, { sessionId: 'session-repair', signal })
+    expect(refused.status).toBe('needs-revision')
+    // A2 keeps the refused Source in state; without the repair exemption that
+    // retention is what makes the URL permanently uncitable.
+    expect(refused.state.sources.map(entry => entry.sourceId)).toStrictEqual(['REPAIR1'])
+    expect(refused.state.sources[0]?.check.status).toBe('failed')
+
+    const repaired = await engine.dispatch(refused.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'verify',
+      summary: 'Repaired excerpt.',
+      artifact: 'The passage says what the excerpt claims [@REPAIR1].',
+      sources: [source('the passage as it truly reads')],
+      claims,
+    }, { sessionId: 'session-repair', signal })
+    expect(repaired.status).toBe('active')
+    expect(repaired.state.sources[0]?.excerpt).toBe('the passage as it truly reads')
+    expect(repaired.state.sources[0]?.check.status).toBe('reachable')
+    expect(seen).toContain('the passge as it truly reads')
+
+    // The same rewrite against a CONFIRMED Source is substitution, not repair.
+    await expect(engine.dispatch(repaired.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'verify',
+      summary: 'Swap confirmed evidence.',
+      artifact: 'The passage says what the excerpt claims [@REPAIR1].',
+      sources: [source('something else entirely')],
+      claims,
+    }, { sessionId: 'session-repair', signal })).rejects.toThrow('cannot be rewritten while its check is reachable')
   })
 
   it('starts and reads one Raven Task through the task engine seam', async () => {
@@ -290,7 +379,16 @@ describe('Raven task engine', () => {
       ],
     }, { sessionId: 'session-5', signal })
     expect(failedAttempt.status).toBe('needs-revision')
-    expect(failedAttempt.state).toBe(started.state)
+    // A2: the refused Checkpoint retains the whole submitted contribution. It used
+    // to return the PRIOR state, so one unfetchable Source discarded every Source,
+    // Claim, Limitation, and Artifact byte in the call.
+    expect(failedAttempt.state).not.toBe(started.state)
+    expect(failedAttempt.state.revision).toBe(started.state.revision + 1)
+    expect(failedAttempt.state.sources.map(source => source.sourceId)).toEqual(['A1', 'B1'])
+    expect(failedAttempt.state.claims.map(claim => claim.claimId)).toEqual(['A-C1', 'B-C1'])
+    // The Artifact is withheld: an unpublished Artifact has no Checkpoint to hash against.
+    expect(failedAttempt.state.checkpoints).toHaveLength(0)
+    expect(failedAttempt.state.latestArtifact).toBeNull()
     expect(failedAttempt.issues.join(' ')).toContain('B1')
 
     const partial = await engine.dispatch(started.state, {
@@ -486,7 +584,11 @@ describe('Raven task engine', () => {
     }, { sessionId: 'session-unmatched', signal })
 
     expect(rejected.status).toBe('needs-revision')
-    expect(rejected.state).toBe(started.state)
+    // A2: independently submitted evidence survives the refusal; only the
+    // Checkpoint is withheld.
+    expect(rejected.state.sources.map(source => source.sourceId)).toEqual(['BAD1'])
+    expect(rejected.state.claims.map(claim => claim.claimId)).toEqual(['BAD-C1'])
+    expect(rejected.state.checkpoints).toHaveLength(0)
     expect(rejected.issues.join(' ')).toContain('BAD1')
     expect(rejected.issues.join(' ')).toContain('excerpt')
   })
@@ -539,7 +641,11 @@ describe('Raven task engine', () => {
     }, { sessionId: `session-protocol-${_label}`, signal })
 
     expect(rejected.status).toBe('needs-revision')
-    expect(rejected.state).toBe(started.state)
+    // The protocol violation still blocks publication, but it no longer costs the
+    // submitted evidence: the Source is retained carrying its unavailable check.
+    expect(rejected.state.checkpoints).toHaveLength(0)
+    expect(rejected.state.sources).toHaveLength(1)
+    expect(rejected.state.sources[0]?.check.status).toBe('unavailable')
     expect(rejected.issues.join(' ')).toContain('protocol')
   })
 
@@ -946,5 +1052,513 @@ describe('Raven task engine', () => {
     expect(resumed.state.taskId).toBe(started.state.taskId)
     expect(resumed.state.phase).toBe('active')
     expect(resumed.state.checkpoints).toEqual(guide.state.checkpoints)
+  })
+
+  // ---- Cap boundaries (A16) and the fixes that made them survivable ----
+
+  async function taskAtCheckpointCap(sessionId: string, count: number) {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Fill the Checkpoint list.',
+    }, { sessionId, signal })
+    let state = started.state
+    for (let index = 0; index < count; index += 1) {
+      const result = await engine.dispatch(state, {
+        action: 'checkpoint',
+        taskId: state.taskId,
+        stage: 'draft',
+        summary: `Checkpoint ${index + 1}.`,
+        artifact: `Revision number ${index + 1} of the paragraph.`,
+      }, { sessionId, signal })
+      expect(result.status).toBe('active')
+      state = result.state
+    }
+    return { engine, state }
+  }
+
+  it('mints Checkpoint ids that two concurrent writers cannot collide on', async () => {
+    const { state } = await taskAtCheckpointCap('session-cp-id', 2)
+    // A4: a per-Task-ordinal id gave two Agent Team members racing from the same
+    // loaded state the identical id. The revision is monotonic per accepted write.
+    expect(state.checkpoints.map(item => item.checkpointId))
+      .toEqual([`${state.taskId}-cp-r2`, `${state.taskId}-cp-r3`])
+    expect(new Set(state.checkpoints.map(item => item.checkpointId)).size).toBe(2)
+  })
+
+  it('stays inside the Checkpoint cap and still completes instead of deadlocking', async () => {
+    // A3: checkpoint used to throw at the cap and complete used to refuse for want
+    // of a slot, so a Task that reached 128 Checkpoints could never finish.
+    const { engine, state } = await taskAtCheckpointCap('session-cp-cap', RAVEN_LIMITS.checkpoints)
+    expect(state.checkpoints).toHaveLength(RAVEN_LIMITS.checkpoints - 1)
+
+    const overCap = await engine.dispatch(state, {
+      action: 'checkpoint',
+      taskId: state.taskId,
+      stage: 'refine',
+      summary: 'One Checkpoint past the cap.',
+      artifact: 'The paragraph past the cap.',
+    }, { sessionId: 'session-cp-cap', signal })
+
+    expect(overCap.status).toBe('active')
+    expect(overCap.state.checkpoints.length).toBeLessThanOrEqual(RAVEN_LIMITS.checkpoints)
+    // The trim is visible, never silent.
+    expect(overCap.issues.join(' ')).toContain('trimmed')
+    // The first Checkpoint is preserved; the oldest trimmable one is the second.
+    expect(overCap.state.checkpoints[0]?.summary).toBe('Checkpoint 1.')
+    // Ordinals stay strictly increasing across the trim, as draft rounds already do.
+    const ordinals = overCap.state.checkpoints.map(item => item.ordinal)
+    expect(ordinals).toEqual([...ordinals].sort((left, right) => left - right))
+    expect(new Set(ordinals).size).toBe(ordinals.length)
+
+    const completed = await engine.dispatch(overCap.state, {
+      action: 'complete',
+      taskId: state.taskId,
+      artifact: overCap.state.latestArtifact,
+    }, { sessionId: 'session-cp-cap', signal })
+    expect(completed.status).toMatch(/^completed/)
+    expect(completed.state.checkpoints.length).toBeLessThanOrEqual(RAVEN_LIMITS.checkpoints)
+  })
+
+  it('accepts Sources and Claims at their caps and refuses only the excess', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Fill the Source and Claim lists.',
+    }, { sessionId: 'session-caps', signal })
+
+    const sources = Array.from({ length: RAVEN_LIMITS.sources }, (_value, index) => ({
+      sourceId: `S${index}`,
+      url: `https://example.test/source-${index}`,
+      title: `Source ${index}`,
+      locator: 'Section 1',
+      excerpt: `excerpt ${index}`,
+      role: 'primary',
+    }))
+    const claims = Array.from({ length: RAVEN_LIMITS.claims }, (_value, index) => ({
+      claimId: `C${index}`,
+      text: `Claim ${index}.`,
+      kind: 'analysis',
+      importance: 'context',
+      disposition: 'supported',
+      sourceIds: [],
+    }))
+
+    const atCap = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'analyze',
+      summary: 'Exactly at both caps.',
+      artifact: 'A paragraph carrying evidence at both caps.',
+      sources,
+      claims,
+    }, { sessionId: 'session-caps', signal })
+    expect(atCap.status).toBe('active')
+    expect(atCap.state.sources).toHaveLength(RAVEN_LIMITS.sources)
+    expect(atCap.state.claims).toHaveLength(RAVEN_LIMITS.claims)
+
+    await expect(engine.dispatch(atCap.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'analyze',
+      summary: 'One Source past the cap.',
+      artifact: 'A paragraph one Source past the cap.',
+      sources: [{
+        sourceId: 'OVER',
+        url: 'https://example.test/over',
+        title: 'One too many',
+        locator: 'Section 1',
+        excerpt: 'over the cap',
+        role: 'primary',
+      }],
+    }, { sessionId: 'session-caps', signal })).rejects.toThrow('at most 256 Sources')
+
+    await expect(engine.dispatch(atCap.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'analyze',
+      summary: 'One Claim past the cap.',
+      artifact: 'A paragraph one Claim past the cap.',
+      claims: [{
+        claimId: 'OVER',
+        text: 'One Claim too many.',
+        kind: 'analysis',
+        importance: 'context',
+        disposition: 'supported',
+        sourceIds: [],
+      }],
+    }, { sessionId: 'session-caps', signal })).rejects.toThrow('at most 512 Claims')
+
+    // The refused calls cost the caller nothing: the accepted state is untouched.
+    expect(atCap.state.sources).toHaveLength(RAVEN_LIMITS.sources)
+    expect(atCap.state.checkpoints).toHaveLength(1)
+  })
+
+  it('drops only the Limitations that do not fit and says so', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Fill the Limitation list.',
+    }, { sessionId: 'session-limit-cap', signal })
+
+    // Genuinely distinct subjects, not the same sentence with a changing number:
+    // the A11 fold deliberately collapses details that differ only in digits.
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz'
+    const word = (index: number) => `${alphabet[index % 26] ?? 'a'}${alphabet[Math.floor(index / 26) % 26] ?? 'a'}`
+      .repeat(4)
+    const failures = Array.from({ length: RAVEN_LIMITS.limitations }, (_value, index) => ({
+      kind: 'coverage',
+      detail: `No record of the ${word(index)} subject was found where one would exist.`,
+    }))
+    expect(new Set(failures.map(item => item.detail)).size).toBe(RAVEN_LIMITS.limitations)
+    const atCap = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'analyze',
+      summary: 'Exactly at the Limitation cap.',
+      artifact: 'A paragraph recording every coverage gap.',
+      failures,
+    }, { sessionId: 'session-limit-cap', signal })
+    expect(atCap.status).toBe('active')
+    expect(atCap.state.limitations).toHaveLength(RAVEN_LIMITS.limitations)
+
+    // A5/A2: over the cap, the Checkpoint still publishes. The dropped Limitation
+    // is reported rather than thrown, because throwing here used to discard the
+    // Sources, Claims, and Artifact submitted in the same call.
+    const overCap = await engine.dispatch(atCap.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'refine',
+      summary: 'One Limitation past the cap.',
+      artifact: 'A paragraph published despite a full Limitation list.',
+      failures: [{ kind: 'tool', detail: 'A wholly unrelated tool failure worth recording.' }],
+    }, { sessionId: 'session-limit-cap', signal })
+    expect(overCap.status).toBe('active')
+    expect(overCap.state.checkpoints).toHaveLength(2)
+    expect(overCap.state.limitations).toHaveLength(RAVEN_LIMITS.limitations)
+    expect(overCap.issues.join(' ')).toContain('could not be recorded')
+  })
+
+  it('folds near-identical Limitation details instead of accumulating them', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Record repeated verifier noise.',
+    }, { sessionId: 'session-limit-fold', signal })
+
+    // A11: exact-detail comparison never folded these, so a flaky host filled the
+    // Limitation list with one fact reported with different timestamps and codes.
+    const published = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'verify',
+      summary: 'Repeated verifier noise.',
+      artifact: 'A paragraph about a flaky host.',
+      failures: [
+        { kind: 'tool', detail: 'Fetch failed: HTTP 503 after 1200ms at 2026-08-16T16:00:00Z' },
+        { kind: 'tool', detail: 'Fetch failed: HTTP 504 after 1900ms at 2026-08-16T16:05:00Z' },
+        { kind: 'tool', detail: 'Fetch failed: HTTP 503 after 3100ms at 2026-08-16T16:10:00Z' },
+        { kind: 'coverage', detail: 'A genuinely different failure worth its own record.' },
+      ],
+    }, { sessionId: 'session-limit-fold', signal })
+
+    expect(published.state.limitations).toHaveLength(2)
+    // The retained record keeps the FIRST detail verbatim: this is a dedupe, not
+    // a summarization.
+    expect(published.state.limitations[0]?.detail).toContain('HTTP 503 after 1200ms')
+
+    // A10: identity is a monotonic counter over everything the Task ever recorded,
+    // never the array index. Three tool failures were submitted and two folded away,
+    // so a positional id would renumber the coverage Limitation to 'coverage-2' and
+    // disagree with the codec the moment a later append interleaves kinds.
+    expect(published.state.limitations.map(item => item.limitationId)).toEqual(['tool-1', 'coverage-2'])
+    const later = await engine.dispatch(published.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'verify',
+      summary: 'A further, unrelated failure.',
+      artifact: 'A paragraph about a second unrelated failure.',
+      failures: [{ kind: 'tool', detail: 'A completely unrelated subsystem refused the request.' }],
+    }, { sessionId: 'session-limit-fold', signal })
+    // The new id continues the counter (tool-3); a positional scheme would emit
+    // 'tool-3' only by coincidence here, so assert the whole ordering stays stable
+    // AND that every id remains unique, which is what the codec actually requires.
+    const ids = later.state.limitations.map(item => item.limitationId)
+    expect(ids).toEqual(['tool-1', 'coverage-2', 'tool-3'])
+    expect(new Set(ids).size).toBe(ids.length)
+
+    // The case where a positional id and the counter actually diverge: submit a
+    // batch in which an EARLIER addition folds away, so the array grows by less
+    // than the number of additions. A positional scheme numbers from the resulting
+    // length and reuses 'tool-3'; the counter keeps going. A reused id is what the
+    // codec rejects, taking the whole Task with it on replay.
+    const folded = await engine.dispatch(later.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'verify',
+      summary: 'A batch whose first entry folds into an existing record.',
+      artifact: 'A paragraph about a folded batch.',
+      failures: [
+        // Folds into tool-1 (digits and punctuation are normalized away).
+        { kind: 'tool', detail: 'Fetch failed: HTTP 507 after 4200ms at 2026-08-16T17:00:00Z' },
+        { kind: 'coverage', detail: 'A distinct coverage gap in an unrelated area of the record.' },
+      ],
+    }, { sessionId: 'session-limit-fold', signal })
+    const foldedIds = folded.state.limitations.map(item => item.limitationId)
+    expect(folded.state.limitations).toHaveLength(4)
+    expect(foldedIds).toEqual(['tool-1', 'coverage-2', 'tool-3', 'coverage-4'])
+    expect(new Set(foldedIds).size).toBe(foldedIds.length)
+  })
+
+  it('does not treat a quoted code block or link definition as an unregistered URL', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Quote a config snippet inside a research Artifact.',
+    }, { sessionId: 'session-code-urls', signal })
+
+    // A6: the scanner used to read the WHOLE Artifact, so quoting a config file
+    // refused the Checkpoint even though nobody had asserted an external source.
+    // The protected regions are the ones the Prose Layout already refuses to
+    // reflow, plus inline code spans.
+    const artifact = [
+      '---',
+      'endpoint: https://frontmatter.example/api',
+      '---',
+      '',
+      '# Configuration',
+      '',
+      'The snippet below is quoted, not asserted.',
+      '',
+      '```yaml',
+      'upstream: https://fenced.example/api',
+      '```',
+      '',
+      'Inline, the value is `https://inline.example/api` in the sample.',
+      '',
+      '[ref]: https://reference.example/doc',
+    ].join('\n')
+
+    const published = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'A snippet-bearing draft.',
+      artifact,
+    }, { sessionId: 'session-code-urls', signal })
+    expect(published.status).toBe('active')
+
+    // A bare prose URL outside every protected region is still refused.
+    await expect(engine.dispatch(published.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'A draft asserting a bare link.',
+      artifact: 'The claim rests on https://prose.example/page which was never registered.',
+    }, { sessionId: 'session-code-urls', signal })).rejects.toThrow('unregistered external URL')
+  })
+
+  it('lets a registered Source authorize its own fragment and trailing slash', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Cite the exact anchor the excerpt came from.',
+    }, { sessionId: 'session-fragment', signal })
+
+    // A6: citing the precise anchor is the more honest form and used to be refused.
+    // A fragment points inside the SAME retrieved document, so it is authorized.
+    const published = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'read',
+      summary: 'A fragment-precise citation.',
+      artifact: 'The record states the figure [@F1]. See https://example.test/report#findings and https://example.test/report/ as well.',
+      sources: [{
+        sourceId: 'F1',
+        url: 'https://example.test/report',
+        title: 'The report',
+        locator: 'Findings',
+        excerpt: 'the figure as recorded',
+        role: 'primary',
+      }],
+      claims: [{
+        claimId: 'F-C1',
+        text: 'The record states the figure.',
+        kind: 'external',
+        importance: 'material',
+        disposition: 'supported',
+        sourceIds: ['F1'],
+      }],
+    }, { sessionId: 'session-fragment', signal })
+    expect(published.status).toBe('active')
+
+    // A different PATH retrieves a different document and is still refused.
+    await expect(engine.dispatch(published.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'read',
+      summary: 'A sibling path.',
+      artifact: 'The record states the figure [@F1]. See also https://example.test/report-two.',
+    }, { sessionId: 'session-fragment', signal })).rejects.toThrow('unregistered external URL')
+  })
+
+  it('names the accepted values in every enum rejection', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    // A9: "stage is invalid" named neither what it received nor what it would
+    // take, so the only repair available to a caller was to guess an enum member.
+    await expect(engine.dispatch(null, {
+      action: 'start',
+      outcome: 'archaeology',
+      request: 'Reject an unknown Outcome.',
+    }, { sessionId: 'session-enum', signal }))
+      .rejects.toThrow(/outcome must be one of: research, general-writing, academic-writing, learning\. Received: "archaeology"/)
+
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Reject an unknown stage.',
+    }, { sessionId: 'session-enum', signal })
+    await expect(engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'pondering',
+      summary: 'An unknown stage.',
+      artifact: 'A paragraph.',
+    }, { sessionId: 'session-enum', signal }))
+      .rejects.toThrow(/stage must be one of: discover, read, analyze, draft, verify, refine/)
+
+    // The same rule reaches nested evidence enums, not only the action fields.
+    await expect(engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'An unknown Claim kind.',
+      artifact: 'A paragraph.',
+      claims: [{
+        claimId: 'ENUM-C1',
+        text: 'A Claim with an unknown kind.',
+        kind: 'hearsay',
+        importance: 'material',
+        disposition: 'supported',
+        sourceIds: [],
+      }],
+    }, { sessionId: 'session-enum', signal }))
+      .rejects.toThrow(/claim\.kind must be one of: external, analysis/)
+  })
+
+  it('classifies engine failures without changing their human sentence', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    // A8: every failure was an untyped prose string, so a caller could not tell a
+    // terminal request defect from a retryable dependency outage.
+    const error = await engine.dispatch(null, { action: 'dance' }, { sessionId: 'session-codes', signal })
+      .then(() => undefined, (reason: unknown) => reason)
+    expect(error).toBeInstanceOf(RavenTypeError)
+    // Still a TypeError by prototype, so existing instanceof guards keep working.
+    expect(error).toBeInstanceOf(TypeError)
+    expect((error as RavenTypeError).code).toBe('unsupported-action')
+    expect((error as RavenTypeError).category).toBe('invalid-request')
+    expect((error as RavenTypeError).retryable).toBe(false)
+    // The human sentence is unchanged, which is what keeps plugin.ts working.
+    expect((error as Error).message).toBe('Unsupported Raven action: dance')
+
+    const missing = await engine.dispatch(null, { action: 'status' }, { sessionId: 'session-codes', signal })
+      .then(() => undefined, (reason: unknown) => reason)
+    expect(missing).toBeInstanceOf(RavenError)
+    expect((missing as RavenError).code).toBe('task-not-found')
+    expect((missing as RavenError).category).toBe('not-found')
+    expect((missing as Error).message).toBe('No Raven Task exists in this session')
+
+    // Only an unavailable dependency is worth retrying unchanged.
+    expect(isRetryableRavenError('unavailable')).toBe(true)
+    expect(isRetryableRavenError('invalid-request')).toBe(false)
+    expect(isRetryableRavenError('conflict')).toBe(false)
+    expect(isRetryableRavenError('capacity')).toBe(false)
+    expect(isRetryableRavenError('not-found')).toBe(false)
+  })
+
+  it('preserves the actionable tail of a long verifier detail', async () => {
+    // A15: compactError truncated to a flat 300 characters, which cut the
+    // verifier's nearest-passage repair guidance mid-quotation. A truncated
+    // quotation is worse than none: it invites weakening a correct excerpt until
+    // it matches the visible prefix, which is the opposite of the repair intended.
+    const head = 'The recorded excerpt diverges from the retrieved source. '
+    const filler = 'x'.repeat(1_200)
+    const tail = ' NEAREST PASSAGE: "the figure as it actually reads in the record".'
+    // compactError formats THROWN failures, not the verifier's own `detail` field
+    // (which is bounded separately). The path under test is therefore a verifier
+    // that throws: the adapter's message is what gets compacted into the issue.
+    const verifier: SourceVerifier = {
+      verify: async () => {
+        throw new Error(head + filler + tail)
+      },
+    }
+    const engine = createRavenEngine({ now, sourceVerifier: verifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Report a long verifier detail.',
+    }, { sessionId: 'session-compact', signal })
+    const refused = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'verify',
+      summary: 'A Source whose check reports a long detail.',
+      artifact: 'The record states the figure [@LONG1].',
+      sources: [{
+        sourceId: 'LONG1',
+        url: 'https://example.test/long',
+        title: 'A long-detail source',
+        locator: 'Section 1',
+        excerpt: 'the figure as recorded',
+        role: 'primary',
+      }],
+    }, { sessionId: 'session-compact', signal })
+
+    const reported = refused.issues.join(' ')
+    // Both ends survive: the diagnosis AND the passage the agent must repair from.
+    expect(reported).toContain('diverges from the retrieved source')
+    expect(reported).toContain('the figure as it actually reads in the record')
+  })
+
+  it('escapes an ampersand in a Source title exactly once', async () => {
+    // A12: HTML-escaping first and backslash-escaping second composed, so the
+    // entity's own semicolon was escaped too and "&" rendered as "&amp\\;".
+    const rendered = renderArtifact('The record [@AMP1].', [{
+      sourceId: 'AMP1',
+      url: 'https://example.test/ampersand',
+      title: 'Ways & Means Committee',
+      locator: 'Section 1 & 2',
+      excerpt: 'excerpt',
+      role: 'primary',
+      inspectedAt: now(),
+      check: {
+        status: 'reachable',
+        checkedAt: now(),
+        statusCode: 200,
+        resolvedUrl: 'https://example.test/ampersand',
+      },
+    }])
+    expect(rendered).toContain('Ways &amp; Means Committee')
+    // The precise defect: escaping HTML first let the entity's own '&' be re-escaped
+    // by the later pass, producing '&amp;amp;'. Assert the doubled entity is absent,
+    // because '&amp;' alone survives the buggy order too and would pass vacuously.
+    expect(rendered).not.toContain('&amp;amp;')
+    expect(rendered).not.toContain('&amp\\;')
+    // Exactly one entity per source ampersand, in the title and in the Sources list.
+    expect(rendered.match(/&amp;/g)).toHaveLength(3)
+    // The Sources list renders the locator through the same escape.
+    expect(rendered).toContain('Section 1 &amp; 2')
   })
 })

@@ -6,6 +6,7 @@ import {
   formatDraftRoute,
   parseDraftRoute,
   type RavenDraftLimits,
+  renderVariants,
 } from '../../src/engine.js'
 import { RAVEN_LIMITS } from '../../src/domain.js'
 import type {
@@ -167,6 +168,59 @@ describe('Draft Variants', () => {
 
     expect(round.variants?.variants.map(variant => variant.status)).toEqual(['failed', 'drafted'])
     expect(round.issues.join(' ')).toContain('compare the ones that did')
+  })
+
+  it('reports an explicit unavailability when EVERY route fails, never an empty success', async () => {
+    // The partial case above is the easy one. When no route survives there is no
+    // 'compare the ones that did' to fall back on, and a round that renders zero
+    // variants while reporting `status: active` with no stated reason reads to the
+    // agent as 'the models had nothing to add' rather than 'drafting did not run'.
+    // The per-route reasons are the whole value of the round in that case.
+    const drafter = recordingDrafter(route => ({
+      status: 'failed',
+      detail: `${route.provider} refused the request`,
+    }))
+    const engine = harness({ draft: drafter.generator })
+    const started = await startedTask(engine, 'session-draft-all-failed')
+
+    const round = await engine.dispatch(started.state, {
+      action: 'draft',
+      taskId: started.state.taskId,
+      instruction: 'Draft it.',
+    }, { sessionId: 'session-draft-all-failed', signal })
+
+    // Every route is accounted for, and each carries its own reason.
+    expect(round.variants?.variants).toHaveLength(2)
+    expect(round.variants?.variants.every(variant => variant.status === 'failed')).toBe(true)
+    expect(round.variants?.variants.map(variant => variant.detail))
+      .toEqual(['alpha refused the request', 'beta refused the request'])
+
+    // The round must SAY it produced nothing rather than presenting an empty set as
+    // a successful comparison.
+    const reported = [
+      round.message,
+      round.variants?.unavailable ?? '',
+      ...round.issues,
+    ].join(' ')
+    // The wording must state that NO route produced anything. The partial-failure
+    // phrasing ('one or more routes produced no variant; compare the ones that did')
+    // is specifically wrong here: it points the agent at a comparison set that is
+    // empty, and the surrounding message reads '0 Draft Variant(s) from 2 route(s)',
+    // which is an empty success rather than a stated failure.
+    expect(reported).toMatch(/no route produced|every route|none of the .* routes|did not run/i)
+    expect(round.issues.join(' ')).not.toContain('compare the ones that did')
+
+    // The rendered round names every failed route and its reason, because that is
+    // the only actionable content a fully failed round has.
+    const rendered = renderVariants(round.variants ?? { variants: [] })
+    expect(rendered).toContain('Routes that produced no variant')
+    expect(rendered).toContain('alpha/fast')
+    expect(rendered).toContain('alpha refused the request')
+    expect(rendered).toContain('beta/org/deep-v2')
+
+    // Nothing was published: a failed comparison round is not a Checkpoint.
+    expect(round.state.latestArtifact).toBe(started.state.latestArtifact)
+    expect(round.state.checkpoints).toEqual(started.state.checkpoints)
   })
 
   it('records bounded route provenance without retaining the variant text, and survives replay', async () => {

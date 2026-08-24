@@ -91,9 +91,44 @@ function sha256(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`
 }
 
-/** Decode and fully validate the schema-v1 compact replay snapshot. */
+/** The schema version this build writes. Older versions are migrated forward. */
+export const RAVEN_SCHEMA_VERSION = 1
+
+/**
+ * Forward migrations, keyed by the version being migrated FROM.
+ *
+ * The decoder used to reject any `schemaVersion` but 1 outright, so the first
+ * bump would have silently dropped every stored Task on replay — a data-loss
+ * path with no code path to fix it in. The seam exists now even though it holds
+ * nothing: the next bump adds one entry here instead of rediscovering that the
+ * only place to put it does not exist.
+ */
+const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<string, unknown> | undefined> = {}
+
+function migrateToCurrent(state: Record<string, unknown>): Record<string, unknown> | undefined {
+  let current = state
+  let guard = 0
+  while (current.schemaVersion !== RAVEN_SCHEMA_VERSION) {
+    const version = current.schemaVersion
+    if (typeof version !== 'number' || !Number.isSafeInteger(version)) return undefined
+    // A snapshot from a NEWER build cannot be migrated backwards; refusing it is
+    // correct, and it is the one case the seam deliberately does not rescue.
+    if (version > RAVEN_SCHEMA_VERSION) return undefined
+    const migrate = MIGRATIONS[version]
+    if (migrate === undefined) return undefined
+    const migrated = migrate(current)
+    if (migrated === undefined) return undefined
+    current = migrated
+    guard += 1
+    if (guard > RAVEN_SCHEMA_VERSION) return undefined
+  }
+  return current
+}
+
+/** Decode and fully validate the compact replay snapshot, migrating older versions forward. */
 export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined {
-  const state = record(value)
+  const raw = record(value)
+  const state = raw === undefined ? undefined : migrateToCurrent(raw)
   if (state === undefined
     || !exactKeys(state, [
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
@@ -101,7 +136,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
       'startedAt', 'updatedAt',
     ])
-    || state.schemaVersion !== 1
+    || state.schemaVersion !== RAVEN_SCHEMA_VERSION
     || !string(state.taskId)
     || !integer(state.ordinal, 1)
     || !member(state.outcome, OUTCOMES)
@@ -138,16 +173,25 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || !timestamp(item.createdAt)) return undefined
   }
 
-  for (const [index, raw] of state.checkpoints.entries()) {
+  // Checkpoint identity is NOT positional any more. Ordinals used to be
+  // `index + 1` and ids `${taskId}-cp-${ordinal}`, so trimming an older
+  // descriptor at the cap — the fix for the terminal 128-Checkpoint deadlock —
+  // made every surviving snapshot undecodable, and two concurrent Agent Team
+  // writers minted the same id. What is still required is what actually matters:
+  // ids belong to this Task, are unique, and ordinals strictly increase.
+  const checkpointIds = new Set<string>()
+  let previousCheckpointOrdinal = 0
+  for (const raw of state.checkpoints) {
     const item = record(raw)
-    const ordinal = index + 1
     if (item === undefined
       || !exactKeys(item, [
         'checkpointId', 'ordinal', 'stage', 'summary', 'artifactSha256', 'artifactChars',
         'steeringRevision', 'createdAt', 'proseLayout',
       ])
-      || item.checkpointId !== `${state.taskId}-cp-${ordinal}`
-      || item.ordinal !== ordinal
+      || !string(item.checkpointId)
+      || !item.checkpointId.startsWith(`${state.taskId}-cp-`)
+      || checkpointIds.has(item.checkpointId)
+      || !integer(item.ordinal, previousCheckpointOrdinal + 1)
       || !member(item.stage, RAVEN_STAGES)
       || !string(item.summary)
       || item.summary.length > RAVEN_LIMITS.summaryChars
@@ -159,6 +203,8 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       // Absent means the record predates Prose Layouts, which is `as-written`.
       || (item.proseLayout !== undefined && !member(item.proseLayout, PROSE_LAYOUTS))
       || !timestamp(item.createdAt)) return undefined
+    checkpointIds.add(item.checkpointId)
+    previousCheckpointOrdinal = item.ordinal as number
   }
 
   if (state.drafts !== undefined) {
@@ -223,6 +269,24 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     sourceChecks.set(item.sourceId, item.check as RavenSourceCheck)
   }
 
+  // A single unusable Claim must never cost the whole Task.
+  //
+  // Rejecting the snapshot when one external supported/qualified Claim's Sources
+  // are not currently reachable meant plugin.ts's replay skipped the state
+  // entirely and the Task vanished — a whole research session lost to one dead
+  // link. Downgrading that Claim to `deferred` is exactly what the engine's own
+  // propagation does when a Source later fails (`propagateSourceChecks`), so the
+  // repair is the engine's rule applied at the boundary rather than a second
+  // policy. The threshold below is therefore "no Source reachable", NOT "any
+  // Source unreachable": those are not complements for a multi-Source Claim, and
+  // the stricter reading silently turned a published `supported` Claim into a
+  // `deferred` one on replay whenever one of several Sources had failed — a Claim
+  // trace and an Artifact citation that changed meaning across a restart, with no
+  // message, Limitation, or issue anywhere. The
+  // structural checks below still reject the snapshot: a malformed Claim is a
+  // corrupt record, not a stale one.
+  const repairedClaims: Record<string, unknown>[] = []
+  let repairedAnyClaim = false
   const claimIds = new Set<string>()
   for (const raw of state.claims) {
     const item = record(raw)
@@ -240,10 +304,15 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || (item.contradicts !== undefined
         && (!uniqueStrings(item.contradicts, id => STABLE_ID.test(id) && id !== item.claimId)
           || item.contradicts.length > RAVEN_LIMITS.claims))) return undefined
-    if (item.kind === 'external'
-      && (item.disposition === 'supported' || item.disposition === 'qualified')) {
-      if (item.sourceIds.length === 0
-        || item.sourceIds.some(sourceId => sourceChecks.get(sourceId)?.status !== 'reachable')) return undefined
+    const unsupportable = item.kind === 'external'
+      && (item.disposition === 'supported' || item.disposition === 'qualified')
+      && (item.sourceIds.length === 0
+        || !item.sourceIds.some(sourceId => sourceChecks.get(sourceId)?.status === 'reachable'))
+    if (unsupportable) {
+      repairedAnyClaim = true
+      repairedClaims.push({ ...item, disposition: 'deferred' })
+    } else {
+      repairedClaims.push(item)
     }
     claimIds.add(item.claimId)
   }
@@ -254,14 +323,21 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     if (contradicts.some(other => typeof other !== 'string' || !claimIds.has(other))) return undefined
   }
 
+  // Limitation identity is NOT positional either. Requiring
+  // `${kind}-${index + 1}` made a legally constructed ordering undecodable the
+  // moment two kinds interleaved, which dropped the whole Task on replay. Unique
+  // and well-shaped for its kind is the invariant that is actually load-bearing.
   const limitationIds = new Set<string>()
-  for (const [index, raw] of state.limitations.entries()) {
+  for (const raw of state.limitations) {
     const item = record(raw)
     if (item === undefined
       || !exactKeys(item, ['limitationId', 'kind', 'detail', 'sourceId', 'createdAt'])
-      || item.limitationId !== `${String(item.kind)}-${index + 1}`
-      || limitationIds.has(item.limitationId)
+      // Kind is validated BEFORE it is interpolated into a pattern, so a stored
+      // snapshot can never smuggle regex syntax through this check.
       || !member(item.kind, LIMITATION_KINDS)
+      || !string(item.limitationId)
+      || !new RegExp(`^${item.kind}-\\d{1,9}$`).test(item.limitationId)
+      || limitationIds.has(item.limitationId)
       || !string(item.detail)
       || item.detail.length > RAVEN_LIMITS.limitationDetailChars
       || (item.sourceId !== undefined && (!string(item.sourceId) || !sourceIds.has(item.sourceId)))
@@ -310,5 +386,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     if (latest?.steeringRevision !== state.steeringRevision) return undefined
   } else if (state.finalArtifactSha256 !== null) return undefined
 
-  return state as unknown as RavenTaskState
+  return (repairedAnyClaim
+    ? { ...state, claims: repairedClaims }
+    : state) as unknown as RavenTaskState
 }

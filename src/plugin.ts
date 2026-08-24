@@ -31,8 +31,8 @@ import {
 } from './engine.js'
 import { RAVEN_PROMPT } from './prompt.js'
 import type { ProseLayoutOptions } from './prose.js'
-import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
-import { RAVEN_LIMITS } from './domain.js'
+import { canonicalSourceUrl, redactedLeadUrl, sameSourceIdentity } from './url.js'
+import { RavenError, RAVEN_LIMITS } from './domain.js'
 import type {
   DraftGenerator,
   DraftRequest,
@@ -243,7 +243,55 @@ function bookKeyFor(agent: Agent, membership: TeamMembershipLike | undefined): s
   return membership === undefined ? `agent:${agent.id}` : `team:${membership.id}`
 }
 
-/** The Task book for this Agent, folding its own durable log in the first time it is seen. */
+/**
+ * How many session/Team Task books stay resident.
+ *
+ * The book is a CACHE, not the source of truth: the architecture records that the
+ * in-memory registry only covers calls before results are durably appended, and
+ * that replay metadata is the restart source of truth. Without a bound it was still
+ * a leak — `taskBookFor` only ever inserted, so in a long-lived host every session
+ * that ever touched Raven kept its Task states resident, and one Task state can
+ * carry a 100k-character Artifact plus 256 Sources (~800 KB at the documented
+ * ceilings, several Tasks per book).
+ *
+ * Eviction is safe precisely because {@link mergeSessionRecords} can rebuild a book
+ * from the Agent's own durable log: an evicted book costs ONE re-fold on the next
+ * call, never a Task. The cap is generous enough that an active multi-session host
+ * never pays that re-fold on a session it is still using.
+ */
+const TASK_BOOK_LIMIT = 64
+
+/**
+ * The Task book for this Agent, folding its own durable log in the first time it is
+ * seen, and evicting the least recently used book once {@link TASK_BOOK_LIMIT} is
+ * exceeded.
+ *
+ * Recency is maintained by re-inserting the key on every access: a JS Map iterates in
+ * insertion order, so deleting and re-setting moves the entry to the end and
+ * `keys().next()` is therefore always the least recently used one. The key being
+ * requested is re-inserted BEFORE anything is evicted, so the book this very call is
+ * about can never be the one dropped.
+ *
+ * An evicted book is not a lost Task, for a SINGLE-agent book: `seeded` is dropped
+ * with it, the next call from that session re-folds the Agent's own durable log and
+ * rebuilds the same state, and the only cost is that one re-fold.
+ *
+ * Two limits of that claim, stated because the earlier version of this comment
+ * overstated it and a reader would have relied on it:
+ *
+ *   - A TEAM book folds several members' logs, but a re-fold seeds only the CALLING
+ *     agent's log. So a rebuilt Team book carries that member's contributions and not
+ *     yet its teammates'; each teammate's own next call folds its own log back in.
+ *     Recency is also per book rather than per contributing session, so a Lead that is
+ *     idle while teammates call elsewhere is not what keeps the Team book resident.
+ *   - A step whose result was never durably appended cannot be re-folded at all. For a
+ *     single agent that window belongs to a session actively making calls, which the
+ *     LRU does keep resident; for a Team book that argument does not hold, for the
+ *     recency reason above.
+ *
+ * Both are bounded by the cap being reached at all, which needs more than
+ * {@link TASK_BOOK_LIMIT} live books in one host process.
+ */
 function taskBookFor(
   ctx: Context,
   books: Map<string, SessionTaskBook>,
@@ -252,7 +300,15 @@ function taskBookFor(
   const key = bookKeyFor(agent, teamMembership(ctx, agent))
   const existing = books.get(key)
   const book = existing ?? { tasks: new Map<string, RavenTaskState>(), seeded: new Set<string>() }
-  if (existing === undefined) books.set(key, book)
+  // Re-insert to mark this book most-recently-used, and to make it ineligible for the
+  // eviction below no matter how small the cap is.
+  books.delete(key)
+  books.set(key, book)
+  while (books.size > TASK_BOOK_LIMIT) {
+    const oldest = books.keys().next()
+    if (oldest.done === true || oldest.value === key) break
+    books.delete(oldest.value)
+  }
   if (!book.seeded.has(agent.id)) {
     book.seeded.add(agent.id)
     mergeSessionRecords(book, agent.session.events)
@@ -287,11 +343,93 @@ function webHalf<K extends 'fetch' | 'search'>(ctx: Context, method: K): Pick<We
   return typeof candidate?.[method] === 'function' ? service as Pick<WebRuntime, K> : undefined
 }
 
+/**
+ * What a Source check reports when the fetch half is simply not there. Named
+ * once so the startup warning, the start-time refusal, and the per-Source result
+ * cannot drift apart and describe the same deployment three different ways.
+ */
+const WEB_FETCH_ABSENT_DETAIL = 'DeepSeek Harness web capability is not composed'
+
+/** What the retrieval capability can actually do right now. */
+type WebCapabilityState = 'usable' | 'no-provider' | 'absent' | 'unknown'
+
+/**
+ * What the retrieval capability can actually do RIGHT NOW, as opposed to whether
+ * a service object exists.
+ *
+ * `ctx.get('web')` answering is not the same question as a usable provider being
+ * registered: the seam resolves its provider at call time and throws
+ * WEB_PROVIDER_UNAVAILABLE when none is usable. That distinction stayed invisible
+ * until the money was spent -- a grounding-required Task would start, discover,
+ * read, draft, and only then find every Source check reporting the capability
+ * missing, which makes the Checkpoint and then Completion refuse, against a floor
+ * that `research` and `academic-writing` cannot lower. The failure has to arrive
+ * BEFORE the research spend, so the provider registries are probed structurally.
+ *
+ * Structural, contained, and pessimistic-toward-`unknown` on purpose: the provider
+ * maps are class fields the published types keep private, so this reads a shape it
+ * does not own. An unrecognized shape yields `unknown`, which warns nobody and
+ * blocks nothing -- a probe that guessed would either spam a healthy deployment or
+ * refuse a Task that would have worked.
+ */
+function webCapabilityState(ctx: Context, half: 'fetch' | 'search'): WebCapabilityState {
+  const service = webHalf(ctx, half)
+  if (service === undefined) return 'absent'
+  try {
+    const registry = asRecord(service)?.[half === 'fetch' ? 'fetchProviders' : 'searchProviders']
+    if (!(registry instanceof Map)) return 'unknown'
+    for (const provider of registry.values()) {
+      const available = asRecord(provider)?.available
+      // A provider that does not answer the usability question is assumed usable:
+      // the seam would still select it, so refusing on Raven's behalf would be
+      // Raven inventing a failure the Harness does not have.
+      if (typeof available !== 'function') return 'usable'
+      if ((available as () => unknown).call(provider) !== false) return 'usable'
+    }
+    return 'no-provider'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** One sentence naming the missing capability and what composing it takes. */
+function webCapabilityAdvice(state: WebCapabilityState, half: 'fetch' | 'search'): string | undefined {
+  const capability = half === 'fetch' ? 'web fetch' : 'web search'
+  if (state === 'absent') {
+    return 'the DeepSeek Harness ' + capability + ' capability is not composed at all: add the'
+      + ' @deepseek-ai/dsh-web service to this profile and register a ' + half + ' provider'
+  }
+  if (state === 'no-provider') {
+    return 'the DeepSeek Harness ' + capability + ' seam is composed but no usable provider is'
+      + ' registered: compose a ' + half + ' provider plugin and give it the credentials it needs'
+      + ' (a provider whose API key is missing reports itself unavailable)'
+  }
+  return undefined
+}
+/**
+ * The renderable form of one backend-supplied candidate URL, or nothing.
+ *
+ * A Lead is stored and RENDERED into the transcript, so a backend answering with
+ * `https://user:token@host/path` would print a live credential into the model's
+ * context and into the durable session log, where no later redaction reaches it.
+ * The previous code swallowed the parse failure and kept the raw string, which
+ * meant the one case that most needed handling was the one that fell through.
+ * Credentials are stripped rather than the candidate refused, because a Lead is
+ * not evidence and dropping it would silently narrow discovery; a URL that does
+ * not parse at all cannot be inspected for credentials, so it IS dropped.
+ */
+function leadUrl(url: string): string | undefined {
+  return redactedLeadUrl(url)
+}
+
 /** Identity used to fold one candidate returned by several queries into one Lead. */
 function leadKey(url: string): string {
   try {
     return canonicalSourceUrl(url)
   } catch {
+    // Already redacted and parsed by {@link leadUrl}; a href that still refuses
+    // canonicalization (a non-public scheme) folds under its own text rather than
+    // silently merging with an unrelated candidate.
     return url
   }
 }
@@ -340,7 +478,9 @@ function mergeLeads(outcomes: readonly QueryOutcome[], cap: number): {
       const source = outcome.result.sources[rank]
       if (source === undefined) continue
       seen = true
-      const key = leadKey(source.url)
+      const safeUrl = leadUrl(source.url)
+      if (safeUrl === undefined) continue
+      const key = leadKey(safeUrl)
       const existing = byKey.get(key)
       if (existing !== undefined) {
         if (!existing.queries.includes(outcome.query)) existing.queries.push(outcome.query)
@@ -354,7 +494,7 @@ function mergeLeads(outcomes: readonly QueryOutcome[], cap: number): {
       const snippet = boundedField(source.snippet, RAVEN_LIMITS.leadSnippetChars)
       const publishedAt = boundedField(source.publishedAt, RAVEN_LIMITS.sourceAsOfChars)
       byKey.set(key, {
-        url: source.url.slice(0, 2048),
+        url: safeUrl.slice(0, 2048),
         ...(title === undefined ? {} : { title }),
         ...(snippet === undefined ? {} : { snippet }),
         ...(publishedAt === undefined ? {} : { publishedAt }),
@@ -371,6 +511,42 @@ function mergeLeads(outcomes: readonly QueryOutcome[], cap: number): {
   return { leads, dropped }
 }
 
+/**
+ * Widest fan-out one discovery batch may have in flight against a search backend.
+ *
+ * The batch is the unit and every query keeps its own deadline, but `searchMaxQueries`
+ * is settings-reachable from the browser card, so an operator typing a large number
+ * into a form previously decided how many simultaneous requests one Task step aimed
+ * at one provider. The schema now caps that value, and this caps the CONCURRENCY
+ * independently, so the two bounds cannot be defeated together: raising the query
+ * bound buys more angles, never a wider burst. Nothing about the batch's semantics
+ * changes -- every query still runs, still fails independently, and still records its
+ * own Limitation.
+ */
+const SEARCH_CONCURRENCY = 4
+
+/** Map with a hard ceiling on in-flight work, preserving input order in the result. */
+async function mapBounded<T, R>(
+  items: readonly T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = Array.from<R>({ length: items.length })
+  let next = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next
+      next += 1
+      // Terminate on the length, never on `items[index] === undefined`: a nullable
+      // element would end that worker early and silently drop every item after it.
+      if (index >= items.length) return
+      const item = items[index] as T
+      results[index] = await run(item)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker))
+  return results
+}
 /**
  * Lead discovery over the Harness `ctx.web` search half.
  *
@@ -399,11 +575,19 @@ function sourceSearcher(ctx: Context, settings: () => RavenConfig): SourceSearch
           + ' (raven-research.sourceDiscovery=disabled)',
         )
       }
+      // The state, not merely the presence, of the seam: a composed search runtime
+      // with no usable provider throws at call time, and reporting that as a generic
+      // failure told the agent its queries were bad rather than that the deployment
+      // has no search backend.
+      const capability = webCapabilityState(ctx, 'search')
+      if (capability !== 'usable' && capability !== 'unknown') {
+        return unavailable(webCapabilityAdvice(capability, 'search') ?? 'DeepSeek Harness web search capability is not composed')
+      }
       const web = webHalf(ctx, 'search')
       if (web === undefined) return unavailable('DeepSeek Harness web search capability is not composed')
       const timeoutMs = config.searchTimeoutMs ?? 0
       signal.throwIfAborted()
-      const outcomes = await Promise.all(request.queries.map(async (query): Promise<QueryOutcome> => {
+      const outcomes = await mapBounded(request.queries, SEARCH_CONCURRENCY, async (query): Promise<QueryOutcome> => {
         // One deadline per query: a slow backend costs that angle, not the batch.
         const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
         const attempt = deadline === undefined ? signal : AbortSignal.any([signal, deadline])
@@ -423,7 +607,7 @@ function sourceSearcher(ctx: Context, settings: () => RavenConfig): SourceSearch
               : compactError(error),
           }
         }
-      }))
+      })
       signal.throwIfAborted()
       const cap = Math.min(request.queries.length * request.maxResults, RAVEN_LIMITS.leads)
       const { leads, dropped } = mergeLeads(outcomes, cap)
@@ -525,29 +709,159 @@ function draftGenerator(ctx: Context, settings: () => RavenConfig): DraftGenerat
   }
 }
 
-function decodeHtmlEntities(value: string): string {
-  const named: Record<string, string> = {
-    amp: '&',
-    apos: "'",
-    gt: '>',
-    lt: '<',
-    nbsp: ' ',
-    quot: '"',
-  }
-  return value
-    .replace(/&#(\d+);/g, (entity, decimal: string) => {
-      const codePoint = Number.parseInt(decimal, 10)
-      return Number.isSafeInteger(codePoint) ? String.fromCodePoint(codePoint) : entity
-    })
-    .replace(/&#x([\da-f]+);/gi, (entity, hexadecimal: string) => {
-      const codePoint = Number.parseInt(hexadecimal, 16)
-      return Number.isSafeInteger(codePoint) ? String.fromCodePoint(codePoint) : entity
-    })
-    .replace(/&([a-z]+);/gi, (entity, name: string) => named[name.toLowerCase()] ?? entity)
+/**
+ * The entities real prose actually carries, not merely the five the HTML spec
+ * requires escaping. A page that writes `&mdash;` or `&rsquo;` and an agent that
+ * copied the rendered character are quoting the SAME text, and leaving the entity
+ * undecoded made the comparison fail on presentation rather than on evidence.
+ * The table stays a fixed list rather than a full HTML5 entity set: the whole set
+ * is thousands of entries whose long tail never appears in a quotable passage, and
+ * an unknown entity is left verbatim, which is inert.
+ */
+const HTML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  nbsp: ' ',
+  quot: '"',
+  // Typographic punctuation, the overwhelming majority of real mismatches.
+  mdash: '\u2014',
+  ndash: '\u2013',
+  horbar: '\u2015',
+  minus: '\u2212',
+  lsquo: '\u2018',
+  rsquo: '\u2019',
+  sbquo: '\u201A',
+  ldquo: '\u201C',
+  rdquo: '\u201D',
+  bdquo: '\u201E',
+  laquo: '\u00AB',
+  raquo: '\u00BB',
+  lsaquo: '\u2039',
+  rsaquo: '\u203A',
+  hellip: '\u2026',
+  bull: '\u2022',
+  middot: '\u00B7',
+  prime: '\u2032',
+  Prime: '\u2033',
+  // Spaces a layout engine emits and a copy-paste preserves.
+  ensp: '\u2002',
+  emsp: '\u2003',
+  thinsp: '\u2009',
+  hairsp: '\u200A',
+  shy: '\u00AD',
+  zwnj: '\u200C',
+  zwj: '\u200D',
+  // Marks that ride real citations.
+  copy: '\u00A9',
+  reg: '\u00AE',
+  trade: '\u2122',
+  deg: '\u00B0',
+  plusmn: '\u00B1',
+  times: '\u00D7',
+  divide: '\u00F7',
+  frac12: '\u00BD',
+  frac14: '\u00BC',
+  frac34: '\u00BE',
+  sect: '\u00A7',
+  para: '\u00B6',
+  dagger: '\u2020',
+  Dagger: '\u2021',
+  permil: '\u2030',
+  euro: '\u20AC',
+  pound: '\u00A3',
+  yen: '\u00A5',
+  cent: '\u00A2',
+  larr: '\u2190',
+  rarr: '\u2192',
+  harr: '\u2194',
+  ne: '\u2260',
+  le: '\u2264',
+  ge: '\u2265',
 }
 
+/**
+ * A numeric reference above the Unicode maximum is not a code point, and
+ * `String.fromCodePoint` THROWS a RangeError on one. That throw escaped the
+ * verifier's per-Source try/catch as a generic failure and was reported as an
+ * unavailable Source, so one malformed entity anywhere in a retrieved page could
+ * silently unverify honest evidence. Out-of-range references are left verbatim
+ * instead, exactly as an unknown named entity is.
+ */
+function entityCodePoint(codePoint: number): string | undefined {
+  if (!Number.isSafeInteger(codePoint) || codePoint < 0 || codePoint > 0x10FFFF) return undefined
+  // Lone surrogates are not scalar values; `fromCodePoint` accepts them but the
+  // result cannot equal anything a real body carries, so leaving them verbatim
+  // keeps the comparison honest.
+  if (codePoint >= 0xD800 && codePoint <= 0xDFFF) return undefined
+  return String.fromCodePoint(codePoint)
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&#(\d+);/g, (entity, decimal: string) =>
+      entityCodePoint(Number.parseInt(decimal, 10)) ?? entity)
+    .replace(/&#x([\da-f]+);/gi, (entity, hexadecimal: string) =>
+      entityCodePoint(Number.parseInt(hexadecimal, 16)) ?? entity)
+    .replace(/&([a-z][a-z\d]*);/gi, (entity, name: string) => HTML_ENTITIES[name]
+      ?? HTML_ENTITIES[name.toLowerCase()]
+      ?? entity)
+}
+
+/**
+ * Presentation-only folding applied to BOTH the retrieved body and the recorded
+ * excerpt before they are compared.
+ *
+ * Every rule here erases a difference that no reader would call a different
+ * quotation, and the safety argument is that each one is many-to-one onto a
+ * character that already carries the same meaning in running prose:
+ *
+ * - NFC first, so a precomposed `é` and a decomposed `e` + U+0301 are one string.
+ *   Composition is the canonical form; it never merges two distinct graphemes.
+ * - Curly quotes and primes fold to ASCII `'` and `"`. A publishing pipeline
+ *   chooses these typographically and a copy-paste preserves whichever it saw, so
+ *   the distinction is never evidential.
+ * - En dash, em dash, horizontal bar and the other HYPHEN-like dashes fold to `-`,
+ *   because both spellings occur for the SAME range in real sources.
+ *   U+2212 MINUS SIGN is deliberately NOT folded, though it was at first. It is not
+ *   a dash: in a financial or scientific record `−5` and `-5` are the same number
+ *   written with the correct glyph and with the wrong one, and folding them let a
+ *   recorded excerpt carrying the wrong sign glyph verify against a source carrying
+ *   the right one. The fold's own justification — that the two spellings mean the
+ *   same range — is false for arithmetic.
+ * - The soft hyphen, the zero-width SPACE, the word joiner and the BOM are deleted.
+ *   Those are line-breaking and byte-order hints with no orthographic role: an
+ *   excerpt and a body that differ only by one are identical on the page, which is
+ *   precisely the failure that made the mismatch report show a "nearest passage"
+ *   indistinguishable from the recorded excerpt.
+ *   ZWNJ (U+200C) and ZWJ (U+200D) are deliberately NOT deleted, though they were
+ *   at first. They are orthographic in Persian, Arabic and the Indic scripts, and
+ *   deleting them joins two tokens the source keeps apart — `re‌sign` (sign again)
+ *   became `resign` (quit), which is a false ACCEPT of a different word, not a
+ *   presentation difference.
+ * - Whitespace collapses, as it already did.
+ *
+ * What is deliberately NOT folded: case, accents themselves, ASCII punctuation,
+ * CJK full-width forms, and any letter. Folding those would let genuinely
+ * different passages match, which is the failure mode that matters — a false
+ * ACCEPT publishes a quotation the source does not carry, while a false reject
+ * only asks the agent to look again.
+ */
+const TYPOGRAPHIC_FOLDS: readonly (readonly [RegExp, string])[] = [
+  // Invisible formatting with no orthographic role: deleted, never replaced by a
+  // space. ZWNJ (U+200C) and ZWJ (U+200D) are absent on purpose — see above.
+  [/\u00AD|\u200B|\u2060|\uFEFF/g, ''],
+  [/[\u2018\u2019\u201A\u201B\u2032\u02BC\u2035]/g, "'"],
+  [/[\u201C\u201D\u201E\u201F\u2033\u2036\u3003]/g, '"'],
+  // U+2212 MINUS SIGN is absent on purpose — see above.
+  [/[\u2010\u2011\u2012\u2013\u2014\u2015\u2043\uFE58\uFE63\uFF0D]/g, '-'],
+]
+
 function normalizedEvidence(value: string): string {
-  return decodeHtmlEntities(value).replaceAll(/\s+/g, ' ').trim()
+  let text = decodeHtmlEntities(value).normalize('NFC')
+  for (const [pattern, replacement] of TYPOGRAPHIC_FOLDS) text = text.replaceAll(pattern, replacement)
+  return text.replaceAll(/\s+/g, ' ').trim()
 }
 
 /**
@@ -637,6 +951,249 @@ function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise
   })
 }
 
+/**
+ * Bound on the WHOLE verification pass, not merely on one Source.
+ *
+ * The pass walks the recorded Sources sequentially, and both Checkpoint and
+ * Completion re-run it, so a per-Source deadline alone still multiplies: 256
+ * Sources at a 20s deadline each is an eighty-minute Task step that no caller
+ * asked for. The pass bound is what makes the worst case a number rather than a
+ * product. It is not a per-Source deadline in disguise: a Source the pass no
+ * longer has time for is reported unavailable with the pass named, so it is
+ * clearly a Raven budget rather than an origin that failed.
+ */
+const VERIFICATION_PASS_BUDGET_MS = 180_000
+
+/**
+ * Minimum spacing between two checks against the SAME host.
+ *
+ * Raven fetches every recorded Source on every Checkpoint and Completion, and a
+ * research Task's Sources cluster on a handful of publishers. Hammering one
+ * origin is how Raven earns the 429 it then has to classify -- a rate limit Raven
+ * caused reads to the agent exactly like a hostile origin. The spacing is small
+ * because the loop is already sequential; it only prevents the degenerate case
+ * where every Source on one host is a fast local hit.
+ */
+const HOST_THROTTLE_MS = 250
+
+/** Bounded retry backoff for ONE Source. One retry, never a loop: see {@link retryableFetchError}. */
+const SOURCE_RETRY_BACKOFF_MS = 500
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const aborted = (): void => {
+      clearTimeout(timer)
+      reject(signal.reason as Error)
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', aborted)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', aborted, { once: true })
+  })
+}
+
+interface HttpStatusOutcome {
+  readonly status: 'failed' | 'unavailable'
+  readonly detail: string
+  readonly retryable: boolean
+}
+
+/**
+ * How one HTTP status bears on the CITATION rather than on the transport.
+ *
+ * Collapsing every non-2xx into `failed` was wrong in both directions. `failed`
+ * permanently defers the Claims a Source supports, which is the right answer for
+ * a citation that does not exist and the wrong answer for one behind a login, a
+ * proxy, a rate limit, or a broken origin -- none of which say anything about
+ * whether the quotation is real. Only 404 and 410 are statements about the
+ * resource itself: it is not there, or it was deliberately removed. Everything
+ * else is a condition between Raven and the document, so it reports `unavailable`,
+ * which the engine accepts without HTTP identity and which does not accuse anyone.
+ */
+function httpStatusOutcome(statusCode: number): HttpStatusOutcome | undefined {
+  if (statusCode >= 200 && statusCode < 400) return undefined
+  if (statusCode === 404 || statusCode === 410) {
+    return {
+      status: 'failed',
+      detail: 'HTTP ' + statusCode + ': the cited document is not served at this URL'
+        + (statusCode === 410 ? ' and the origin reports it permanently removed' : '')
+        + '. This is an evidence defect rather than a retrieval problem: locate the record at its'
+        + ' current address and register a new Source, or defer the Claim',
+      retryable: false,
+    }
+  }
+  if (statusCode === 401 || statusCode === 403 || statusCode === 407) {
+    return {
+      status: 'unavailable',
+      detail: 'HTTP ' + statusCode + ': the document exists but Raven is not authorized to retrieve it'
+        + ' (login, subscription, or proxy authentication). Nothing here disputes the excerpt, and'
+        + ' retrying will not clear it: cite an openly retrievable version of the same record, or keep'
+        + ' the Claim deferred with a coverage Limitation naming the access barrier',
+      retryable: false,
+    }
+  }
+  if (statusCode === 408 || statusCode === 425 || statusCode === 429) {
+    return {
+      status: 'unavailable',
+      detail: 'HTTP ' + statusCode + ': the origin declined this attempt as a timing or rate condition'
+        + (statusCode === 429 ? ' (rate limited)' : '')
+        + ', not as a statement about the document. Retrying later is sensible;'
+        + ' do not weaken the excerpt',
+      retryable: true,
+    }
+  }
+  if (statusCode >= 500) {
+    return {
+      status: 'unavailable',
+      detail: 'HTTP ' + statusCode + ': the origin failed to serve the document, which says nothing'
+        + ' about the excerpt. Retrying later is sensible; do not weaken the excerpt',
+      retryable: true,
+    }
+  }
+  return {
+    status: 'unavailable',
+    detail: 'HTTP ' + statusCode + ': the retrieval did not produce the document, and the status is not'
+      + ' a statement that the citation is wrong. Confirm the URL, then retry or defer the Claim',
+    retryable: false,
+  }
+}
+
+/**
+ * Whether a THROWN retrieval error is worth one more attempt.
+ *
+ * Conservative on purpose: an unrecognized failure is not retried, because the
+ * cost of a wrong "retryable" is doubling the load on an origin already refusing
+ * Raven, while the cost of a wrong "not retryable" is one honest unavailable
+ * result the agent can act on.
+ */
+function retryableFetchError(error: unknown): boolean {
+  const text = (error instanceof Error ? error.message : String(error)).toLowerCase()
+  return /econnreset|etimedout|econnrefused|epipe|enetunreach|eai_again|socket hang up|network|temporarily|timed out/.test(text)
+}
+
+/** Below this, an extraction produced no passage an excerpt could honestly be looked for in. */
+const PROSE_FLOOR_CHARS = 24
+
+/**
+ * Whether a retrieved body yielded prose an excerpt could be looked for in.
+ *
+ * This is the difference between "the source does not say that" and "Raven could
+ * not read this document", and getting it wrong is what made honest work look like
+ * fabrication. A PDF, an SPA whose HTML is a script tag and an empty root element,
+ * or a paywall interstitial are all COMPLETE retrievals carrying no extractable
+ * prose -- and they are disproportionately the primary records research depends on
+ * most. Reporting those as `failed` told the agent to treat a correct excerpt as a
+ * possible fabricated quotation, and the prompt then pushed it to weaken a correct
+ * excerpt to fit a body that contained nothing at all.
+ *
+ * The test is deliberately about what was EXTRACTED rather than about a declared
+ * content type: the fetch seam classifies a body only as `html` or `text` and hands
+ * back no headers, so the extraction result is the only honest signal available.
+ */
+function unreadableBodyDetail(
+  fetched: WebFetchResult,
+  extracted: string,
+  locator: string,
+): string | undefined {
+  const raw = fetched.body.content
+  if (raw.trimStart().startsWith('%PDF-')) {
+    return 'the retrieved body is a PDF, which Raven cannot text-extract, so the excerpt at ' + locator
+      + ' could be neither confirmed nor disproved. Cite an HTML or plain-text rendering of the same'
+      + ' record, or keep the Claim deferred with a coverage Limitation naming the format;'
+      + ' do NOT weaken the excerpt to fit a body Raven never read'
+  }
+  if (extracted.length >= PROSE_FLOOR_CHARS) return undefined
+  const scriptOnly = fetched.body.kind === 'html' && /<script\b/i.test(raw)
+  return 'the retrieved body could not be text-extracted: it yielded ' + extracted.length
+    + ' usable character(s)'
+    + (scriptOnly ? ', being a script-only shell whose text is rendered client-side' : '')
+    + ', so the excerpt at ' + locator + ' could be neither confirmed nor disproved.'
+    + ' Cite a server-rendered or plain-text version of the same record, retrieve it with a tool that'
+    + " runs the page's scripts, or keep the Claim deferred with a coverage Limitation naming the"
+    + ' extraction failure; do NOT weaken the excerpt to fit a body Raven never read'
+}
+/**
+ * Turn one retrieved body into a Source check outcome.
+ *
+ * Shared by the first attempt and the retry so the two cannot classify the same
+ * body differently -- a retry that judged a mismatch more leniently than the first
+ * attempt would reintroduce exactly the non-determinism the retry exists to remove.
+ */
+function classifyFetched(
+  source: SourceCheckRequest,
+  fetched: WebFetchResult,
+  checkedAt: string,
+  retried: boolean,
+): SourceCheckResult {
+  const statusOutcome = httpStatusOutcome(fetched.statusCode)
+  const identityMatched = sameSourceIdentity(source.url, fetched.url)
+  const extracted = statusOutcome === undefined && identityMatched
+    ? normalizedEvidence(fetchedVisibleText(fetched))
+    : ''
+  const excerpt = normalizedEvidence(source.excerpt)
+  const excerptMatched = extracted.length > 0 && extracted.includes(excerpt)
+  const retryNote = retried ? ' (unchanged after one retry)' : ''
+  const outcome = ((): { status: 'reachable' | 'failed' | 'unavailable'; detail?: string } => {
+    if (excerptMatched) {
+      // A match inside a truncated retrieval is still a match: the excerpt occurred
+      // in bytes this URL actually returned, which is the whole of what the check
+      // asks. Suppressing it would be worse than useless — the fetch seam carries no
+      // size control, so long primary documents are routinely truncated, and calling
+      // every one of them unverifiable would refuse exactly the sources research
+      // depends on.
+      //
+      // What it must NOT do is stay silent about it, because "a truncated retrieval
+      // reported as a match" is named in SECURITY.md as a citation-integrity defect.
+      // So the confirmation is recorded WITH the cut: the quotation is confirmed, the
+      // document beyond the cut was never seen, and the trace and the wiki export
+      // both carry that sentence next to the Source.
+      return fetched.truncated === true
+        ? {
+            status: 'reachable',
+            detail: 'confirmed inside a retrieval the provider truncated: the excerpt occurs in the'
+              + ' returned bytes, but the document past the cut was never seen, so this confirms the'
+              + ' quotation and not its surrounding context' + retryNote,
+          }
+        : { status: 'reachable' }
+    }
+    if (statusOutcome !== undefined) {
+      return { status: statusOutcome.status, detail: statusOutcome.detail + retryNote }
+    }
+    if (!identityMatched) {
+      // Host drift is an identity defect in the citation itself: the bytes that
+      // answered are not the ones this Source names.
+      return {
+        status: 'failed',
+        detail: 'source resolved to a different host: ' + new URL(fetched.url).hostname,
+      }
+    }
+    // A cut-off body cannot disprove an excerpt drawn from the tail. Report it as
+    // unverifiable rather than as an evidence defect: both block publication, but
+    // only one of them accuses the agent of fabricating a quotation.
+    if (fetched.truncated === true) {
+      return {
+        status: 'unavailable',
+        detail: 'the retrieved body was truncated before the excerpt at ' + source.locator
+          + ' could be confirmed; narrow the retrieval or cite a passage inside the retrieved range,'
+          + ' and do not weaken the excerpt to fit the visible prefix',
+      }
+    }
+    const unreadable = unreadableBodyDetail(fetched, extracted, source.locator)
+    if (unreadable !== undefined) return { status: 'unavailable', detail: unreadable }
+    // `failed` is reserved for what it was always meant to mean: a body that WAS
+    // retrieved as readable prose and genuinely does not carry the excerpt.
+    return { status: 'failed', detail: excerptMismatchDetail(extracted, excerpt, source.locator) }
+  })()
+  return {
+    sourceId: source.sourceId,
+    status: outcome.status,
+    checkedAt,
+    statusCode: fetched.statusCode,
+    resolvedUrl: fetched.url,
+    ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
+  }
+}
 function sourceVerifier(
   ctx: Context,
   now: () => string,
@@ -663,59 +1220,86 @@ function sourceVerifier(
         )
       }
       const web = webHalf(ctx, 'fetch')
-      if (web === undefined) return unverifiable('DeepSeek Harness web capability is not composed')
+      if (web === undefined) return unverifiable(WEB_FETCH_ABSENT_DETAIL)
       const timeoutMs = config.sourceCheckTimeoutMs ?? 0
+      const passDeadline = Date.now() + VERIFICATION_PASS_BUDGET_MS
+      const lastHostCheck = new Map<string, number>()
       const results: SourceCheckResult[] = []
       for (const source of sources) {
         signal.throwIfAborted()
         const checkedAt = now()
-        // One deadline per Source: a slow origin costs that Source its verification,
-        // not the whole Checkpoint.
-        const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
-        const attempt = deadline === undefined ? signal : AbortSignal.any([signal, deadline])
-        try {
-          const fetched = await settleWithAbort(web.fetch({ url: source.url }, attempt), attempt)
-          const httpReachable = fetched.statusCode >= 200 && fetched.statusCode < 400
-          const resolvedUrl = new URL(fetched.url)
-          const identityMatched = sameSourceIdentity(source.url, fetched.url)
-          const body = httpReachable && identityMatched
-            ? normalizedEvidence(fetchedVisibleText(fetched))
-            : ''
-          const excerpt = normalizedEvidence(source.excerpt)
-          const excerptMatched = body.length > 0 && body.includes(excerpt)
-          // A cut-off body cannot disprove an excerpt from the tail. Report it as
-          // unverifiable rather than as an evidence defect: both block publication,
-          // but only one of them accuses the agent of fabricating a quotation.
-          const truncatedMiss = !excerptMatched && httpReachable && identityMatched && fetched.truncated === true
-          results.push({
-            sourceId: source.sourceId,
-            status: excerptMatched ? 'reachable' : truncatedMiss ? 'unavailable' : 'failed',
-            checkedAt,
-            statusCode: fetched.statusCode,
-            resolvedUrl: fetched.url,
-            ...(excerptMatched
-              ? {}
-              : {
-                  detail: !httpReachable
-                    ? `HTTP ${fetched.statusCode}`
-                    : !identityMatched
-                      ? `source resolved to a different host: ${resolvedUrl.hostname}`
-                      : truncatedMiss
-                        ? `the retrieved body was truncated before the excerpt at ${source.locator} could be confirmed;`
-                          + ' narrow the retrieval or cite a passage inside the retrieved range,'
-                          + ' and do not weaken the excerpt to fit the visible prefix'
-                        : excerptMismatchDetail(body, excerpt, source.locator),
-                }),
-          })
-        } catch (error) {
-          signal.throwIfAborted()
+        if (Date.now() >= passDeadline) {
+          // The budget is Raven's own, so it says so rather than implying the origin failed.
           results.push({
             sourceId: source.sourceId,
             status: 'unavailable',
             checkedAt,
-            detail: deadline?.aborted === true
-              ? `the Source check exceeded the configured ${timeoutMs}ms deadline`
-              : compactError(error),
+            detail: 'the ' + VERIFICATION_PASS_BUDGET_MS + 'ms verification pass budget was exhausted'
+              + ' before this Source was checked; re-run the Checkpoint, or record fewer Sources per'
+              + ' Checkpoint so one pass can reach all of them',
+          })
+          continue
+        }
+        // One deadline per Source: a slow origin costs that Source its verification,
+        // not the whole Checkpoint. The pass budget caps their sum.
+        const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
+        const attempt = deadline === undefined ? signal : AbortSignal.any([signal, deadline])
+        try {
+          // Spread checks against ONE host so Raven does not manufacture the 429 it
+          // would then have to classify. Registration guarantees the URL parses.
+          const host = new URL(source.url).hostname.toLowerCase()
+          const last = lastHostCheck.get(host)
+          const wait = last === undefined ? 0 : HOST_THROTTLE_MS - (Date.now() - last)
+          if (wait > 0) await sleep(Math.min(wait, HOST_THROTTLE_MS), attempt)
+          lastHostCheck.set(host, Date.now())
+
+          // ONE bounded retry, for transient conditions only. Checkpoint and
+          // Completion both re-verify, so without it a flaky origin makes the SAME
+          // unchanged Task complete or refuse depending on which attempt it landed
+          // on. A 404, a 401, an excerpt mismatch, and a cancellation are never
+          // retried: none of them can change on a second identical request, and a
+          // retried mismatch is pure duplicated load on an origin that already
+          // answered correctly.
+          let fetched = await settleWithAbort(web.fetch({ url: source.url }, attempt), attempt)
+          let retried = false
+          if (httpStatusOutcome(fetched.statusCode)?.retryable === true
+            && Date.now() + SOURCE_RETRY_BACKOFF_MS < passDeadline) {
+            await sleep(SOURCE_RETRY_BACKOFF_MS, attempt)
+            fetched = await settleWithAbort(web.fetch({ url: source.url }, attempt), attempt)
+            retried = true
+          }
+          results.push(classifyFetched(source, fetched, checkedAt, retried))
+        } catch (error) {
+          signal.throwIfAborted()
+          if (deadline?.aborted === true) {
+            results.push({
+              sourceId: source.sourceId,
+              status: 'unavailable',
+              checkedAt,
+              detail: 'the Source check exceeded the configured ' + timeoutMs + 'ms deadline',
+            })
+            continue
+          }
+          // A thrown transient failure gets the same single bounded retry an
+          // explicitly transient status does, for the same determinism reason.
+          const recovered = retryableFetchError(error)
+            && Date.now() + SOURCE_RETRY_BACKOFF_MS < passDeadline
+            ? await sleep(SOURCE_RETRY_BACKOFF_MS, attempt)
+              .then(async () => settleWithAbort(web.fetch({ url: source.url }, attempt), attempt))
+              .then(fetched => classifyFetched(source, fetched, checkedAt, true))
+              .catch(() => undefined)
+            : undefined
+          signal.throwIfAborted()
+          if (recovered !== undefined) {
+            results.push(recovered)
+            continue
+          }
+          results.push({
+            sourceId: source.sourceId,
+            status: 'unavailable',
+            checkedAt,
+            detail: 'the retrieval did not complete, which is a transport condition rather than a'
+              + ' statement about the excerpt: ' + compactError(error),
           })
         }
       }
@@ -823,6 +1407,48 @@ const FAILURE_SCHEMA = {
   },
 } as const
 
+/**
+ * Outcomes whose evidence floor defaults to `required` and cannot be switched off.
+ * Mirrored here rather than imported because the engine owns the floor as Task
+ * policy while this is a DEPLOYMENT precondition asked before a Task exists; the
+ * check below re-reads the caller's own `grounding` argument, so a Task that
+ * narrowed itself to `optional` is never blocked by it.
+ */
+const GROUNDING_REQUIRED_OUTCOMES = new Set(['research', 'academic-writing'])
+
+/**
+ * Why this `start` cannot succeed, or nothing.
+ *
+ * Refusal rather than a warning, argued: a warning at `start` is a line the agent
+ * reads once and then spends an entire research budget past, and the refusal it
+ * eventually hits arrives at Completion, phrased as a Source problem. Refusing here
+ * costs one call and names the exact composition change; the deployment can still
+ * run the same work as `general-writing`, or as `research` with `grounding=optional`,
+ * both of which this check lets through. It fires ONLY where the floor is genuinely
+ * unreachable, so a deployment that composes web normally never sees it.
+ */
+function groundedStartBlocker(
+  ctx: Context,
+  input: Record<string, unknown> | undefined,
+): string | undefined {
+  const outcome = input?.outcome
+  if (typeof outcome !== 'string' || !GROUNDING_REQUIRED_OUTCOMES.has(outcome)) return undefined
+  const grounding = input?.grounding
+  // An explicitly narrowed floor is the deployment's own answer to this problem.
+  if (typeof grounding === 'string' && grounding !== 'required') return undefined
+  // `sourceVerification=structural-only` deliberately does NOT block here. It is a
+  // deployment saying it cannot reach the network, and the recorded design answer is
+  // that the Checkpoint is refused with the policy named — an honest degradation the
+  // settings surface owns and tests. Refusing the Task outright would replace that
+  // documented behaviour. A missing capability is not the same thing: nobody chose
+  // it, and nothing downstream names it as a decision.
+  const advice = webCapabilityAdvice(webCapabilityState(ctx, 'fetch'), 'fetch')
+  if (advice === undefined) return undefined
+  return 'a ' + outcome + ' Raven Task cannot reach its evidence floor in this deployment: it needs at'
+    + ' least one Source whose excerpt Raven re-fetched and matched, and ' + advice
+    + '. Compose the capability and start again, or start this Task as general-writing, or pass'
+    + ' grounding=optional if an unverifiable-Source outcome is genuinely acceptable for this work.'
+}
 function toolDefinition(
   ctx: Context,
   engine: ReturnType<typeof createRavenEngine>,
@@ -946,10 +1572,57 @@ function toolDefinition(
         && [...book.tasks.values()].some(state => state.taskId !== requestedTaskId && state.phase === 'active')) {
         throw new Error('stop the current active Raven Task before resuming another Task in this session')
       }
+      // The evidence floor is checked against the DEPLOYMENT before the Task exists.
+      // A grounding-required Outcome whose Sources can never be verified is not a Task
+      // that degrades gracefully: every Source reports unavailable, so the Checkpoint
+      // is refused, then Completion is refused, and the floor cannot be lowered because
+      // it belongs to the Outcome rather than to the executor. Discovering that after
+      // the research is a total loss of the spend, so it is refused HERE, naming the
+      // capability and how to compose it. Only a state the probe is certain about
+      // refuses; 'unknown' proceeds, because a probe that guessed would refuse Tasks
+      // that would have worked.
+      if (action === 'start') {
+        const blocker = groundedStartBlocker(ctx, input)
+        if (blocker !== undefined) throw new Error(blocker)
+      }
       const result = await engine.dispatch(previous, args, {
         sessionId: agent.id,
         signal: exec.signal,
       })
+      // Compare-and-set, not last-writer-wins. `previous` was read BEFORE an
+      // await-heavy verification pass, so inside an Agent Team two teammates
+      // checkpointing concurrently both read revision N, both verify, and the second
+      // write silently discarded the first one's Sources, Claims, and Checkpoint --
+      // a lost contribution that looked exactly like a successful one. The losing
+      // call fails instead, naming the action that recovers it: the Task itself is
+      // untouched, so re-reading and resubmitting is always correct.
+      const stored = book.tasks.get(result.state.taskId)
+      const expected = previous?.taskId === result.state.taskId ? previous.revision : undefined
+      if (expected === undefined && stored !== undefined) {
+        // The FIRST write needs a guard of its own. `expected` is undefined exactly
+        // when this call did not branch from a stored state — which is what `start`
+        // does — so a revision comparison has nothing to compare and the write would
+        // fall straight through. Two Team members racing to create the Team's Task
+        // both produced revision 1 and the later `set` silently discarded the earlier
+        // Task, which is the same lost contribution the comparison below exists to
+        // prevent, one step earlier.
+        throw new RavenError(
+          'task-already-active',
+          'Raven Task ' + result.state.taskId + ' already exists in this session at revision '
+          + stored.revision + ': another Agent Team member created it while this call was running.'
+          + ' Nothing was lost and nothing was written. Continue that Task with'
+          + ' raven_task action=status taskId=' + result.state.taskId + ' instead of starting a replacement.',
+        )
+      }
+      if (stored !== undefined && expected !== undefined && stored.revision !== expected) {
+        throw new Error(
+          'Raven Task ' + result.state.taskId + ' advanced to revision ' + stored.revision
+          + ' while this call was verifying against revision ' + expected
+          + ': another Agent Team member contributed to it first. Nothing was lost and nothing was'
+          + ' written. Re-read the Task with raven_task action=status taskId=' + result.state.taskId
+          + ' and resubmit this contribution against the current revision.',
+        )
+      }
       book.tasks.set(result.state.taskId, result.state)
       if (action !== 'status' || book.currentTaskId === undefined) book.currentTaskId = result.state.taskId
       const currentTaskId = book.currentTaskId ?? result.state.taskId
@@ -1021,6 +1694,36 @@ function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike
   ].join('\n')
 }
 
+/**
+ * Process-wide count of live Raven mounts.
+ *
+ * `cordis.patch.yml` documents the double-mount hazard and cannot prevent it:
+ * mounting the host bundle AND the preset row registers `raven_task` into two
+ * different layers with two independent Task books, so an agent's Checkpoint lands
+ * in whichever copy the layered registry resolved and `action=status` may then
+ * answer from the other one. That reads as a Task that lost its own Checkpoint.
+ * Nothing here can decide which mount is the intended one, so it warns rather than
+ * throws — refusing the second mount would break a deployment merely reloading.
+ */
+let liveMounts = 0
+
+/**
+ * Log a deployment problem where an operator will see it, and never fail because of
+ * logging. `ctx.logger` is an ordinary Harness service that a bare test context or a
+ * reduced host need not provide, and a startup warning must not be the thing that
+ * stops Raven from loading.
+ */
+function warnOperator(ctx: Context, message: string): void {
+  try {
+    const loggerService = (ctx as unknown as { logger?: unknown }).logger
+    if (typeof loggerService !== 'function') return
+    const logger = asRecord((loggerService as (label: string) => unknown)(name))
+    const warn = logger?.warn
+    if (typeof warn === 'function') (warn as (text: string) => void).call(logger, message)
+  } catch {
+    // A logger that throws is not a reason to fail a mount.
+  }
+}
 export const name = 'raven-research'
 export const inject = ['tools', 'systemPrompt'] as const
 
@@ -1052,17 +1755,55 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
       maxResults: config.searchMaxResults ?? RAVEN_LIMITS.searchResults,
     }
   }
+  // Skipped route specs already reported, so a settings thunk read on every draft
+  // round does not repeat one warning per call. Keyed by the exact spec because the
+  // operator has to be told WHICH entry was dropped.
+  const reportedBadRoutes = new Set<string>()
   const draftLimits = (): RavenDraftLimits => {
     const config = settings()
     const routes: RavenDraftRoute[] = []
     const seen = new Set<string>()
+    const skipped: string[] = []
+    const dropped: string[] = []
     for (const spec of config.draftRoutes ?? []) {
       const route = parseDraftRoute(spec)
       // A malformed entry is skipped rather than thrown: settings are edited by
       // hand, and one typo must not take every other configured route down with it.
-      if (route === undefined || seen.has(`${route.provider}/${route.model}`)) continue
-      seen.add(`${route.provider}/${route.model}`)
+      // But a SILENT skip made an all-typo list indistinguishable from a deliberately
+      // empty one -- the operator was told 'no Draft Variant route is configured' about
+      // a list they could see in front of them. The skip stays; the silence does not.
+      if (route === undefined) {
+        skipped.push(spec)
+        continue
+      }
+      const identity = `${route.provider}/${route.model}`
+      if (seen.has(identity)) continue
+      seen.add(identity)
       if (routes.length < RAVEN_LIMITS.draftRoutes) routes.push(route)
+      else dropped.push(identity)
+    }
+    const unreported = [...skipped, ...dropped].filter(spec => !reportedBadRoutes.has(spec))
+    if (unreported.length > 0) {
+      for (const spec of unreported) reportedBadRoutes.add(spec)
+      const unusable = skipped.filter(spec => unreported.includes(spec))
+      const beyondBound = dropped.filter(spec => unreported.includes(spec))
+      warnOperator(
+        ctx,
+        'Raven ignored ' + unreported.length + ' raven-research.draftRoutes entr'
+        + (unreported.length === 1 ? 'y' : 'ies') + ': '
+        + (unusable.length > 0
+          ? unusable.map(spec => JSON.stringify(spec)).join(', ')
+            + ' — each must be "provider/model", split on the FIRST slash, with a non-empty'
+            + ' segment on each side. '
+          : '')
+        + (beyondBound.length > 0
+          ? beyondBound.join(', ') + ' — beyond the ' + RAVEN_LIMITS.draftRoutes + '-route ceiling. '
+          : '')
+        + (routes.length === 0
+          ? 'No usable route remains, so Draft Variants are OFF and raven_task action=draft will'
+            + ' report that none is configured.'
+          : routes.length + ' usable route(s) remain.'),
+      )
     }
     return { maxTokens: config.draftMaxTokens ?? 0, routes }
   }
@@ -1083,6 +1824,52 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
     proseLayout,
   })
   const pendingLogState = new Map<string, RavenTaskMeta>()
+
+  // Probe the retrieval seam AT MOUNT, and say so loudly. Every grounded Raven Task
+  // depends on re-fetching a Source, and the previous behaviour reported that
+  // dependency for the first time as one unavailable Source per Checkpoint, after
+  // the research had already been paid for. An operator reading the log at startup
+  // can compose the provider before anyone spends a Task on it.
+  const fetchAdvice = webCapabilityAdvice(webCapabilityState(ctx, 'fetch'), 'fetch')
+  if (fetchAdvice !== undefined) {
+    warnOperator(
+      ctx,
+      'Raven cannot verify any Source in this deployment: ' + fetchAdvice
+      + '. Until it is composed, every recorded Source reports unavailable, so a research or'
+      + ' academic-writing Task cannot reach a Checkpoint or Completion and raven_task will'
+      + ' refuse to start one.',
+    )
+  }
+  const searchAdvice = webCapabilityAdvice(webCapabilityState(ctx, 'search'), 'search')
+  if (searchAdvice !== undefined) {
+    // Discovery is optional by design, so this is information rather than a blocker.
+    warnOperator(ctx, 'Raven Lead discovery is unavailable: ' + searchAdvice
+      + '. raven_task action=discover will report this instead of returning Leads; the agent'
+      + ' can still inspect Sources with its own tools.')
+  }
+  // See {@link liveMounts}: the documented double-mount hazard is otherwise silent.
+  liveMounts += 1
+  if (liveMounts > 1) {
+    warnOperator(
+      ctx,
+      'Raven is mounted ' + liveMounts + ' times in this process. The raven_task tool is registered'
+      + ' once per mount, into a different registry layer each time, and each mount keeps its OWN'
+      + ' Task book -- a Checkpoint recorded through one mount is invisible to the other. Mount the'
+      + ' host bundle (cordis.patch.yml) OR the preset row (examples/agent-row.cordis.yml), never both.',
+    )
+  }
+  // Released when the fiber unloads, so a reload does not accumulate a phantom
+  // second mount. Read structurally and contained: `effect` is a Cordis lifetime
+  // primitive this plugin's typed Context surface does not declare, and a missing
+  // one costs an over-count in the warning, never a failed mount.
+  try {
+    const effect = asRecord(ctx)?.effect
+    if (typeof effect === 'function') {
+      (effect as (callback: () => () => void) => unknown).call(ctx, () => () => { liveMounts -= 1 })
+    }
+  } catch {
+    // A host without this primitive keeps the warning conservative, nothing more.
+  }
 
   ctx.systemPrompt.section({ name: 'tool:raven-task', order: 116, text: RAVEN_PROMPT })
   ctx.tools.register(toolDefinition(ctx, engine, books, pendingLogState))

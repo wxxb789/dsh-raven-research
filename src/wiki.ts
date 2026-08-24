@@ -57,8 +57,20 @@ function blockquote(value: string): string {
   return value.split('\n').map(line => `> ${line}`).join('\n')
 }
 
+/**
+ * Path for one Source's immutable raw page.
+ *
+ * The slug is truncated to 80 characters, so two long, similarly-titled Sources
+ * produced the SAME path and the second silently overwrote the first — losing an
+ * inspected Source and leaving the artifact page's `sources:` list pointing at a
+ * page describing something else. A short digest of the full identity is
+ * therefore appended: it is derived only from the Source's own stable ID and
+ * title, so the path is a pure function of the record and exporting the same Task
+ * twice still produces byte-identical paths.
+ */
 function rawPagePath(source: RavenSourceRecord): string {
-  return `wiki/raw/articles/${slug(`${source.sourceId} ${source.title}`)}.md`
+  const identity = `${source.sourceId} ${source.title}`
+  return `wiki/raw/articles/${slug(identity)}-${digest(identity).slice(0, 8)}.md`
 }
 
 /**
@@ -89,12 +101,20 @@ function renderRawPage(source: RavenSourceRecord, state: RavenTaskState, at: str
     `- Inspected: ${source.inspectedAt}`,
   ]
   if (source.asOf !== undefined) lines.push(`- As of: ${source.asOf}`)
-  if (source.check.status !== 'unchecked') {
+  if (source.check.status === 'unchecked') {
+    lines.push('- Verification: unverified (Raven never reopened this URL)')
+  } else {
     lines.push(`- Verification: ${source.check.status} at ${source.check.checkedAt}`)
     if (source.check.resolvedUrl !== undefined) lines.push(`- Resolved URL: ${source.check.resolvedUrl}`)
     if (source.check.detail !== undefined) lines.push(`- Detail: ${source.check.detail}`)
   }
-  lines.push('', `Recorded by Raven Task ${state.taskId}. Excerpt verified against the retrieved body; this page is not a full-page capture.`, '')
+  lines.push(
+    '',
+    source.check.status === 'reachable'
+      ? `Recorded by Raven Task ${state.taskId}. Excerpt verified against the retrieved body; this page is not a full-page capture.`
+      : `Recorded by Raven Task ${state.taskId}. The excerpt below was NOT confirmed against the retrieved body; do not treat it as verified fact.`,
+    '',
+  )
   const body = lines.join('\n')
 
   const frontmatter = [
@@ -107,7 +127,14 @@ function renderRawPage(source: RavenSourceRecord, state: RavenTaskState, at: str
   ]
   if (source.sourceFamily !== undefined) frontmatter.push(`source_family: ${yamlString(source.sourceFamily)}`)
   if (source.asOf !== undefined) frontmatter.push(`as_of: ${yamlString(source.asOf)}`)
-  if (source.check.status !== 'unchecked') {
+  // An unchecked Source must declare itself unverified rather than simply omitting
+  // the field. Omission left the page carrying only `capture: excerpt-only` and a
+  // sha256, which read exactly like a verified capture — the sha256 covers the page
+  // body, not the upstream document, so nothing on the page contradicted it and an
+  // unverified excerpt could harden into wiki fact on the next read.
+  if (source.check.status === 'unchecked') {
+    frontmatter.push('verification: unverified')
+  } else {
     frontmatter.push(`verification: ${source.check.status}`, `verified_at: ${source.check.checkedAt}`)
   }
   frontmatter.push(`raven_task: ${state.taskId}`)
@@ -164,10 +191,15 @@ capture: excerpt-only
 locator: "Section 3"
 source_role: primary | secondary | dataset | user-provided
 source_family: "originating record or institutional lineage"
-verification: reachable | failed | unavailable
+verification: reachable | failed | unavailable | unverified
 verified_at: <timestamp>
 ---
 \`\`\`
+
+\`verification: unverified\` means Raven never reopened \`source_url\`, so the excerpt on that
+page carries no verification receipt at all and \`verified_at\` is absent. It is an explicit
+negative marker rather than an omission, so an unverified excerpt cannot read as a verified
+capture.
 
 \`capture: excerpt-only\` means the page stores the verified excerpt and its verification
 receipt rather than a full page capture. \`sha256\` therefore detects drift in what was
@@ -215,7 +247,18 @@ export function renderWikiPages(
   const date = options.at.slice(0, 10)
   const artifactSlug = slug(options.title)
   const artifactPath = `wiki/queries/query-${date}-${artifactSlug}.md`
-  const rawPages = state.sources.map(source => renderRawPage(source, state, options.at))
+  // Deduplicate by path as a second line of defence. Source IDs are unique, so
+  // the digested path already is — but an emission that ever repeated a path
+  // would ask the agent to write one file twice with different bytes, and a
+  // silently discarded write is exactly the failure the digest above prevents.
+  const rawPages: RavenWikiPage[] = []
+  const seenRawPaths = new Set<string>()
+  for (const source of state.sources) {
+    const rendered = renderRawPage(source, state, options.at)
+    if (seenRawPaths.has(rendered.path)) continue
+    seenRawPaths.add(rendered.path)
+    rawPages.push(rendered)
+  }
   const contested = state.claims.some(claim => (claim.contradicts ?? []).length > 0)
 
   const frontmatter = [

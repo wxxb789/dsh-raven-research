@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { Config, RAVEN_SETTINGS_NAMESPACE, SOURCE_DISCOVERY_MODES, SOURCE_VERIFICATION_MODES } from '../../src/config.js'
+import {
+  Config,
+  RAVEN_SETTINGS_CEILINGS,
+  RAVEN_SETTINGS_NAMESPACE,
+  SOURCE_DISCOVERY_MODES,
+  SOURCE_VERIFICATION_MODES,
+} from '../../src/config.js'
 
 describe('Raven deployment settings', () => {
   it('names one namespace and defaults to remote verification and seam discovery', () => {
@@ -9,7 +15,7 @@ describe('Raven deployment settings', () => {
     expect(SOURCE_DISCOVERY_MODES).toEqual(['seam', 'disabled'])
     expect(Config({})).toEqual({
       sourceVerification: 'remote',
-      sourceCheckTimeoutMs: 0,
+      sourceCheckTimeoutMs: 20_000,
       sourceDiscovery: 'seam',
       searchMaxQueries: 4,
       searchMaxResults: 8,
@@ -54,5 +60,43 @@ describe('Raven deployment settings', () => {
     expect(Config({ sourceCheckTimeoutMs: 30_000 }).sourceCheckTimeoutMs).toBe(30_000)
     expect(() => Config({ sourceCheckTimeoutMs: -1 })).toThrow()
     expect(() => Config({ sourceCheckTimeoutMs: 1.5 })).toThrow()
+  })
+
+  it('gives the Source deadline a real default while keeping 0 available', () => {
+    // 0 meant "no deadline" over a SEQUENTIAL loop that both Checkpoint and
+    // Completion re-run, so one hung origin held a Task step open indefinitely.
+    expect(Config({}).sourceCheckTimeoutMs).toBe(20_000)
+    // ...and a deployment that deliberately waits out a slow archive still can.
+    expect(Config({ sourceCheckTimeoutMs: 0 }).sourceCheckTimeoutMs).toBe(0)
+  })
+
+  it('caps every settings-reachable numeric so the card cannot ask for a self-DoS', () => {
+    // These fields are editable from the browser settings card and drive concurrent
+    // fan-out and model spend, so a lower bound alone is not a bound.
+    expect(() => Config({ searchMaxQueries: 100_000 })).toThrow()
+    expect(() => Config({ searchMaxResults: 100_000 })).toThrow()
+    expect(() => Config({ draftMaxTokens: 10_000_000 })).toThrow()
+    expect(() => Config({ searchTimeoutMs: 86_400_000 })).toThrow()
+    expect(() => Config({ draftTimeoutMs: 86_400_000 })).toThrow()
+    expect(() => Config({ sourceCheckTimeoutMs: 86_400_000 })).toThrow()
+    // The ceiling itself stays accepted, so the bound is inclusive and reachable.
+    expect(Config({ searchMaxQueries: RAVEN_SETTINGS_CEILINGS.searchMaxQueries }).searchMaxQueries)
+      .toBe(RAVEN_SETTINGS_CEILINGS.searchMaxQueries)
+    expect(Config({ draftMaxTokens: RAVEN_SETTINGS_CEILINGS.draftMaxTokens }).draftMaxTokens)
+      .toBe(RAVEN_SETTINGS_CEILINGS.draftMaxTokens)
+  })
+
+  it('refuses a malformed model route where the operator can still see the typo', () => {
+    // A silently skipped entry made an all-typo list indistinguishable from an
+    // intentionally empty one, and the operator was told "no route is configured".
+    expect(() => Config({ draftRoutes: ['noslash'] })).toThrow()
+    expect(() => Config({ draftRoutes: ['/fast'] })).toThrow()
+    expect(() => Config({ draftRoutes: ['alpha/'] })).toThrow()
+    // A namespaced model id still passes: the split is on the FIRST slash.
+    expect(Config({ draftRoutes: ['openrouter/deepseek/deepseek-chat'] }).draftRoutes)
+      .toEqual(['openrouter/deepseek/deepseek-chat'])
+    expect(() => Config({
+      draftRoutes: Array.from({ length: RAVEN_SETTINGS_CEILINGS.draftRoutes + 1 }, (_item, index) => `p${index}/m`),
+    })).toThrow()
   })
 })

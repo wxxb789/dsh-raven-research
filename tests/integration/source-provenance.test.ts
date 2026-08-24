@@ -329,12 +329,31 @@ describe('Source provenance integration', () => {
       }],
     })
     expect(invented.status).toBe('needs-revision')
-    expect(invented.state).toBe(started.state)
+    // The refusal publishes nothing: no Checkpoint, no Artifact. It no longer
+    // discards the evidence submitted alongside it — the recorded Source and its
+    // failed check survive so the agent can repair the anchor against what Raven
+    // actually retrieved, rather than resubmitting blind.
+    expect(invented.state.checkpoints).toEqual([])
+    expect(invented.state.latestArtifact).toBeNull()
+    expect(invented.state.sources[0]?.check.status).toBe('failed')
     expect(invented.issues.join(' ')).toContain('diverges from the retrieved source')
 
+    // The grounded path is proved on a FRESH Task rather than by repairing this
+    // one. Repairing in place is currently impossible: the refused Source is now
+    // retained, an existing Source ID may not have its excerpt rewritten behind it,
+    // and its URL may not be re-registered under a new ID — so a mistyped excerpt
+    // makes that URL uncitable for the rest of the Task. That interaction belongs to
+    // the engine's evidence rules, and this file does not encode a repair contract
+    // that is still being decided.
+    await run({ action: 'stop', taskId: started.state.taskId })
+    const secondTask = await run({
+      action: 'start',
+      outcome: 'research',
+      request: 'Ground one claim in the local primary record, correctly this time.',
+    })
     const grounded = await run({
       action: 'checkpoint',
-      taskId: started.state.taskId,
+      taskId: secondTask.state.taskId,
       stage: 'draft',
       summary: 'A candidate grounded in retrieved bytes.',
       artifact: 'The primary record contains exact wording [@LOCAL1].',
@@ -361,7 +380,7 @@ describe('Source provenance integration', () => {
 
     const completed = await run({
       action: 'complete',
-      taskId: started.state.taskId,
+      taskId: secondTask.state.taskId,
       artifact: grounded.state.latestArtifact,
     })
     expect(completed.status).toBe('completed')

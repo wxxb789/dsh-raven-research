@@ -5,6 +5,7 @@ export { createRavenEngine, formatDraftRoute, parseDraftRoute, renderArtifact, r
 export type { RavenDraftLimits, RavenSearchLimits } from './engine.js'
 export { layoutProse, proseLayoutReport, splitSentences, PROSE_FORMATS, PROSE_LAYOUTS } from './prose.js'
 export type { ProseFormat, ProseLayout, ProseLayoutOptions, ProseLayoutReport } from './prose.js'
+export { decodeRavenTaskState, RAVEN_SCHEMA_VERSION } from './codec.js'
 export { renderWikiPages } from './wiki.js'
 export type { RavenWikiOptions } from './wiki.js'
 export { RAVEN_PROMPT } from './prompt.js'

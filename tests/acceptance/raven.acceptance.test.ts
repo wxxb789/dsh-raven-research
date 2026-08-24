@@ -290,7 +290,15 @@ describe('Raven end-to-end acceptance', () => {
       claims: [claim('C404', 'S404', 'The documented fact appears here.')],
     })
     expect(draft.status).toBe('needs-revision')
-    expect(draft.state).toBe(started.state)
+    // A2: the Checkpoint is withheld, but the submitted evidence is retained with
+    // its failed check so the agent repairs the named Source instead of resending
+    // the whole contribution.
+    expect(draft.state.checkpoints).toHaveLength(0)
+    expect(draft.state.latestArtifact).toBeNull()
+    expect(draft.state.sources.map(item => item.sourceId)).toEqual(['S404'])
+    expect(draft.state.sources[0]?.check.status).toBe('failed')
+    // The Claim whose only support broke is deferred, not left asserted.
+    expect(draft.state.claims[0]?.disposition).toBe('deferred')
     expect(draft.state.phase).toBe('active')
     expect(draft.issues.join(' ')).toContain('S404')
     expect(draft.issues.join(' ')).toContain('HTTP 404')
