@@ -71,6 +71,16 @@ export class RavenCardController {
   private saving = false
   private failed = false
   /**
+   * Set by `dispose`, and checked before every publication.
+   *
+   * A Save is asynchronous while the card that started it is not: the tab can
+   * unmount a card mid-write, and the write still settles afterwards. Without
+   * this fence the settlement would publish into a store the page no longer
+   * reads, resurrecting a snapshot for a card that is gone — and the drafts it
+   * republishes are exactly the ones disposal was meant to drop.
+   */
+  private disposed = false
+  /**
    * Rehydrating parses a reference-preserving envelope, so it is cached against
    * the exact serialized value it came from. Identity is the right key: the
    * mirror replaces the row wholesale, and a namespace re-registered with a
@@ -119,6 +129,7 @@ export class RavenCardController {
   }
 
   private publish(): void {
+    if (this.disposed) return
     this.store.set(this.project())
   }
 
@@ -203,6 +214,7 @@ export class RavenCardController {
   }
 
   dispose(): void {
+    this.disposed = true
     for (const dispose of this.disposers) dispose()
   }
 }
