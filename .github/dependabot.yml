@@ -1,0 +1,38 @@
+# Dependabot is scoped so it can never silently move the Harness seam.
+#
+# The nine `@deepseek-ai/*` packages are pinned to the exact Service Definition
+# versions this repository builds and tests against, and `scripts/verify-dsh.ts`
+# checks Raven against a Harness checkout that those published packages LAG on
+# purpose. An automated bump of one of them would change the compiled seam without
+# touching `dshRaven`, so the pin metadata would still claim a compatibility that no
+# longer held and every gate would stay green. Moving them is a deliberate act that
+# belongs with a `test:dsh` run against a matching checkout — see CONTRIBUTING.md.
+#
+# Everything else here is ordinary development tooling that never reaches a consumer
+# (Raven ships zero runtime dependencies), so those updates are welcome and grouped.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    ignore:
+      # The Harness seam and the cordis instance it shares. Bump these by hand.
+      - dependency-name: '@deepseek-ai/*'
+    groups:
+      dev-toolchain:
+        patterns: ['*']
+        update-types: ['minor', 'patch']
+    labels:
+      - dependencies
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci

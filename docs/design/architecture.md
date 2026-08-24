@@ -511,7 +511,7 @@ ever learning what the namespace means.
 
 The declaring package's own augmentation cannot be imported across the client
 bundle-purity boundary, and its published copy lags the running Harness — at
-`0.1.0-rc.6` the slot is `kind: 'list'`, at `0.1.1-rc.1` it is `kind: 'keyed'`. A card
+`0.1.0-rc.6` the slot is `kind: 'list'`, at `0.1.1-rc.2` it is `kind: 'keyed'`. A card
 registered under the older shape compiles and then never renders, with nothing logged
 anywhere. `src/client/slot-contract.ts` therefore restates the targeted augmentation,
 and `scripts/verify-dsh.ts` asserts that shape against the Harness checkout under
@@ -580,8 +580,21 @@ a specific agent graph.
 
 ## Compatibility target
 
-Raven v1 targets DeepSeek Harness `0.1.1-rc.1` at commit
-`528c682e061696f5a160f363f236ecbf53cbd006`, Node `^22.19.0 || >=24`, and pnpm
+Raven v1 targets DeepSeek Harness `0.1.1-rc.2` at commit
+`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`, Node `^22.19.0 || >=24`, and pnpm
 `11.21.0`. Release checks use built ESM and declarations, a real Loader-path smoke
 test against that checkout, and a packed clean-consumer install. The version is an
 RC, so the package claims only the exact tested compatibility family.
+
+That target has exactly ONE machine-readable source: `dshRaven.harnessVersion` and
+`dshRaven.harnessCommit` in `package.json`. `scripts/verify-dsh.ts` READS them rather
+than restating them, because the previous second copy inside that script had already
+drifted away from any reachable checkout — and since the two copies agreed with each
+other, the gate reported a healthy pin while naming a commit nobody could produce. The
+prose above is documentation of that value, never a third definition of it.
+
+The published `@deepseek-ai/*` packages this repository builds against sit at
+`0.1.0-rc.6` and legitimately lag the pinned Harness release; the two numbers describe
+different things. Where that gap has teeth — the client slot contract, reshaped between
+them — `src/client/slot-contract.ts` vendors the newer shape and the release gate asserts
+it against the pinned checkout, so the drift fails a gate instead of a browser.

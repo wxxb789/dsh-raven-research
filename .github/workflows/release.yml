@@ -1,0 +1,136 @@
+name: Release
+
+# Publishing is tag-driven so the released bytes are a named, immutable commit rather
+# than whatever main happened to be when someone clicked a button. The tag is the
+# request; every gate below is a veto.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run every gate and pack, but do not publish'
+        type: boolean
+        default: true
+
+# Minimal and explicit at the workflow level; the publish job widens `id-token` only
+# for itself, because that token is what mints the npm provenance attestation and no
+# other job in this file has any business holding it.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `check` is lint + typecheck + build + test. `test:pack` proves the tarball.
+      # `test:dsh` is deliberately NOT here — see the note in the publish job.
+      - name: Full check
+        run: pnpm run check
+
+      - name: Packed consumer install
+        run: pnpm run test:pack
+
+      # A tag that does not name the version being published produces a release whose
+      # git tag and npm version disagree forever, and nothing downstream can repair it.
+      - name: Tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+
+      # The Harness pin is metadata a consumer reads to decide whether this build can
+      # run at all, so a release that ships an absent or malformed pin ships a lie. The
+      # VALUE cannot be checked here — that needs a Harness checkout, which CI has no
+      # cheap way to obtain — so this asserts only that the pin is present and
+      # well-formed, and `test:dsh` remains the local gate that checks it against reality.
+      - name: Harness pin is present and well-formed
+        run: |
+          node -e '
+            const m = require("./package.json").dshRaven ?? {};
+            const version = m.harnessVersion, commit = m.harnessCommit;
+            if (typeof version !== "string" || version.length === 0) {
+              console.error("::error::package.json dshRaven.harnessVersion is missing; a release must state the Harness it was tested against");
+              process.exit(1);
+            }
+            if (typeof commit !== "string" || !/^[a-f0-9]{40}$/.test(commit)) {
+              console.error("::error::package.json dshRaven.harnessCommit must be a full 40-character commit sha, got " + String(commit));
+              process.exit(1);
+            }
+            console.log("harness pin: " + version + "@" + commit.slice(0, 12));
+          '
+
+      # A tree that installs or builds dirty is a tree whose published bytes are not the
+      # ones in the tag. `pnpm install --frozen-lockfile` above would already have failed
+      # on a stale lockfile; this catches a build or a lifecycle script that WRITES into
+      # the working tree, which frozen-lockfile does not see.
+      - name: Working tree is clean after the gate
+        run: |
+          if [ -n "$(git status --porcelain=v1)" ]; then
+            echo "::error::the release gate left the working tree dirty; the published bytes would not match the tag"
+            git status --porcelain=v1
+            exit 1
+          fi
+
+  publish:
+    name: publish to npm
+    needs: gate
+    # A manual run defaults to a dry run: the gate above still runs in full, and this
+    # job is skipped unless the operator explicitly unticked it. Only a tag publishes
+    # by default.
+    if: github.event_name == 'push' || inputs.dry_run == false
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: read
+      # Provenance: npm records WHICH workflow at WHICH commit produced the tarball, so
+      # a consumer can verify the published bytes came from this repository rather than
+      # from someone's laptop. It requires an OIDC token, which is why this scope exists
+      # here and nowhere else in the file.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
+
+      # `test:dsh` is NOT run in CI and that is a decision, not an omission. It composes
+      # Raven against a real DeepSeek Harness checkout by SOURCE path — the pinned commit
+      # of a separate repository — and there is no honest way for this workflow to obtain
+      # one at the pinned commit without either vendoring it or trusting a floating
+      # clone, both of which would make a green gate mean less than it does today. It is
+      # therefore a documented LOCAL release gate: run
+      #   DSH_CHECKOUT=/path/to/deepseek-harness pnpm run check:release
+      # on a machine that has the pinned checkout BEFORE pushing the release tag. See
+      # CONTRIBUTING.md ("Releasing").
+      - name: Publish with provenance
+        run: pnpm publish --provenance --no-git-checks --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

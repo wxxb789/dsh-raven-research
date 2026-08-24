@@ -1,0 +1,90 @@
+name: Bug report
+description: Something Raven did, or refused to do, that it should not have
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Most Raven reports are decided by four facts: which Harness you run, what the pin
+        says, whether a web provider is composed, and the exact refusal text. The fields
+        below ask for those first so the issue does not need a round trip.
+
+  - type: input
+    id: raven-version
+    attributes:
+      label: Raven version
+      description: From your deployment's lockfile, or the tarball you installed.
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: harness-version
+    attributes:
+      label: DeepSeek Harness version
+      description: >-
+        Compare it with dshRaven.harnessVersion in Raven's package.json. Raven claims
+        only the exact tested family, so a different RC is itself a plausible cause.
+      placeholder: 0.1.1-rc.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: web-capability
+    attributes:
+      label: Is a web capability composed in this deployment?
+      description: >-
+        Fetch is what re-opens a Source to confirm its excerpt; search is what discover
+        uses. They are separate providers and one can work while the other does not.
+      options:
+        - Fetch and search both work
+        - Fetch works, search does not
+        - Search works, fetch does not
+        - Neither is composed
+        - I do not know
+    validations:
+      required: true
+
+  - type: textarea
+    id: refusal
+    attributes:
+      label: The exact message Raven returned
+      description: >-
+        Paste it verbatim, including any Source id, Claim id, or check detail. Raven's
+        refusals are written to be diagnostic, so the wording usually identifies the
+        branch that produced it.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead, and why
+      description: >-
+        If the report is that a citation was refused, say what the source actually says
+        at that locator — a refusal that is CORRECT is the common case, and the useful
+        report is the one where the excerpt really is present.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >-
+        The raven_task actions in order, with the Outcome and grounding used. A public
+        URL that reproduces a verification failure is worth more than a description of one.
+    validations:
+      required: false
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Relevant raven-research settings
+      description: >-
+        Especially sourceVerification, sourceCheckTimeoutMs, sourceDiscovery, and
+        draftRoutes. Do not paste credentials; Raven stores none and never needs one here.
+      render: yaml
+    validations:
+      required: false

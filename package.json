@@ -77,6 +77,21 @@
     "check": "pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test",
     "check:release": "pnpm run check && pnpm run test:pack && pnpm run test:dsh"
   },
+  "peerDependenciesComment": [
+    "Every peer is '*' on purpose, and it is not laziness about ranges.",
+    "A profile installs plugins with autoInstallPeers:false and nodeLinker:hoisted precisely so an",
+    "out-of-tree plugin's peers fall through to the RUNNING Harness installation and every plugin",
+    "shares ONE cordis instance. A narrowed range cannot make a mismatched deployment work: it makes",
+    "the install fail, or resolves a second copy whose services the Harness cannot see -- a failure",
+    "that looks like an absent service rather than a version conflict. So the range is not where",
+    "compatibility is expressed.",
+    "The 'dshRaven' block at the bottom of this file is. It names the exact Harness version and commit",
+    "this build was tested against, scripts/verify-dsh.ts is the executable check of it, and the",
+    "release workflow refuses to publish without it. Read the pin, not the ranges, to know what runs.",
+    "Consequence to accept: a pre-1.0 RC that reshapes a seam gives NO install-time signal here. The",
+    "pin plus 'pnpm run test:dsh' against a matching checkout is the only thing that catches it, which",
+    "is why that gate is mandatory before a release. See README.md, 'Version pinning and peer dependencies'."
+  ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-agent": "*",
@@ -113,8 +128,8 @@
     "vitest": "4.1.10"
   },
   "dshRaven": {
-    "harnessVersion": "0.1.1-rc.1",
-    "harnessCommit": "528c682e061696f5a160f363f236ecbf53cbd006",
+    "harnessVersion": "0.1.1-rc.2",
+    "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e",
     "plane": "host",
     "publishesService": false
   }

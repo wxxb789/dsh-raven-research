@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { runProcess } from './process.js'
 
@@ -128,6 +129,20 @@ try {
     readFile(join(staging, 'lib', 'index.d.ts'), 'utf8'),
   ])
   assert.ok(builtFiles.every(file => file.length > 0), 'prepack did not build runtime and declaration outputs in staging')
+  // The schema defaults the CONSUMER must see, taken from the source build rather
+  // than written out by hand. A hand-maintained expectation is repaired by editing
+  // it until it matches, which is how the duplicated Harness pin in verify-dsh.ts
+  // drifted while both of its copies agreed with each other. Read from staging's own
+  // `lib`, so the comparison is genuinely packed-against-source and a packaging skew
+  // that changed a default would fail here with no literal to update.
+  const sourceBuild = await import(pathToFileURL(join(staging, 'lib', 'index.js')).href) as {
+    Config: (value: Record<string, unknown>) => Record<string, unknown>
+  }
+  const sourceDefaults = sourceBuild.Config({})
+  assert.ok(
+    Object.keys(sourceDefaults).length > 0,
+    'the source build produced no settings defaults to compare the packed build against',
+  )
 
   const localTarball = join(consumer, 'raven.tgz')
   await cp(tarball, localTarball)
@@ -221,19 +236,14 @@ assert.equal(tools[0].name, 'raven_task')
 assert.equal(sections.length, 1)
 assert.deepEqual(injected, [['settings']])
 assert.equal(Raven.RAVEN_SETTINGS_NAMESPACE, 'raven-research')
-assert.deepEqual(Raven.Config({}), {
-  sourceVerification: 'remote',
-  sourceCheckTimeoutMs: 0,
-  sourceDiscovery: 'seam',
-  searchMaxQueries: 4,
-  searchMaxResults: 8,
-  searchTimeoutMs: 30000,
-  proseLayout: 'sentence-per-line',
-  proseFormat: 'markdown',
-  draftRoutes: [],
-  draftMaxTokens: 4000,
-  draftTimeoutMs: 120000,
-})
+// The expectation is the SOURCE build's own defaults, injected by the gate rather
+// than restated here. Raven on this side is the PACKED tarball, so this compares
+// packed against source and needs no hand-maintained copy to drift from.
+assert.deepEqual(
+  Raven.Config({}),
+  ${JSON.stringify(sourceDefaults)},
+  'the packed build resolves different settings defaults than the source build',
+)
 assert.deepEqual(Raven.SOURCE_DISCOVERY_MODES, ['seam', 'disabled'])
 assert.equal(typeof Raven.renderLeads, 'function')
 assert.equal(typeof Raven.renderVariants, 'function')

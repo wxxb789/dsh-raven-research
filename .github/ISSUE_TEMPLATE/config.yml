@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Citation-integrity or credential defect
+    url: https://github.com/wxxb789/dsh-raven-research/security/advisories/new
+    about: >-
+      Anything that lets a Claim look verified when its excerpt is not in the retrieved
+      body, or that records or renders a credential, is handled as a security report and
+      not as a public issue. See SECURITY.md.
+  - name: DeepSeek Harness itself
+    url: https://github.com/deepseek-ai/deepseek-harness
+    about: >-
+      Raven runs inside the Harness. If the tool never appears, no web provider is
+      composed, or a provider has no credential, the fix is in the deployment rather than
+      here — check the Operating Raven section of the README first.

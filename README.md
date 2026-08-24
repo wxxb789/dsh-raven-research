@@ -11,7 +11,7 @@ Early checkpoints you can steer mid-run · citations verified against the bytes 
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.1-rc.1](https://img.shields.io/badge/harness-0.1.1--rc.1-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Harness 0.1.1-rc.2](https://img.shields.io/badge/harness-0.1.1--rc.2-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -19,12 +19,12 @@ Early checkpoints you can steer mid-run · citations verified against the bytes 
 
 English · [中文](README.zh.md)
 
-[**TL;DR**](#tldr) · [**Install**](#install) · [**Usage**](#usage) · [**How it works**](#how-it-works-under-the-hood) · [**Configuration**](#configuration) · [**FAQ**](#faq)
+[**TL;DR**](#tldr) · [**Install**](#install) · [**Usage**](#usage) · [**How it works**](#how-it-works-under-the-hood) · [**Configuration**](#configuration) · [**Operating**](#operating-raven) · [**FAQ**](#faq)
 
 </div>
 
 > [!IMPORTANT]
-> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.1-rc.1`, which is itself an RC and ships
+> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.1-rc.2`, which is itself an RC and ships
 > breaking changes. Not published to npm yet — [install from a checkout](#install).
 
 ## TL;DR
@@ -108,7 +108,7 @@ you never edit a Harness checkout or a shipped preset.
 
 | Requirement | Version |
 | --- | --- |
-| DeepSeek Harness | `0.1.1-rc.1` (checkout `528c682e061696f5a160f363f236ecbf53cbd006`) |
+| DeepSeek Harness | `0.1.1-rc.2` (checkout `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`) — see [Version pinning and peer dependencies](#version-pinning-and-peer-dependencies) |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
 | Peer dependencies | Nine `@deepseek-ai/*` packages — the cordis framework, the schema library, and seven Harness Service Definitions (`cordis`, `dsh-agent`, `dsh-llm`, `dsh-session`, `dsh-settings`, `dsh-system-prompt`, `dsh-tools`, `dsh-web`, `schemastery`) — supplied by the Harness deployment, never bundled |
@@ -516,7 +516,7 @@ card declining to offer an action whose effect would be silence, and it is repor
 Three honest requirements. The card only appears in a deployment that composes
 `@deepseek-ai/dsh-client-ui-settings-plugins` — the Harness web app bundle does. It injects the browser `locale` and
 `settingsSchema` services, so a client shell without them runs none of this wiring. And the keyed
-`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.1-rc.1`; `0.1.0-rc.6` is still
+`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.1-rc.2`; `0.1.0-rc.6` is still
 the newest version published to npm and declares the older list-shaped slot, so Raven vendors the newer shape —
 together with the locale registration signature, the schema service, the describe face, and the card chrome it
 mirrors — and `scripts/verify-dsh.ts` asserts all of them against the Harness checkout under test, which turns any
@@ -528,12 +528,221 @@ and injects one `<style data-plugin="dsh-raven-research">` tag at module scope, 
 preset produces. Losing that injection does not fail a build — it renders an unstyled blob inside a list of styled
 cards — so `tests/integration/client-bundle.test.ts` asserts the CSS is in the artifact.
 
+## Operating Raven
+
+Everything in this section is a runtime property of the deployment, not a Raven setting.
+A user who skips it discovers most of it when a Task refuses to complete.
+
+### Prerequisites
+
+| Outcome | Needs a composed `web` capability? | Needs a search credential? |
+| --- | --- | --- |
+| `research` | **Required** | Only for `action=discover` |
+| `academic-writing` | **Required** | Only for `action=discover` |
+| `general-writing` | Only if the Task registers Sources | Only for `action=discover` |
+| `learning` | Only if the Task registers Sources | Only for `action=discover` |
+
+**A composed `web` capability with a fetch provider is required for `research` and
+`academic-writing`.** These two Outcomes default to `grounding: required`, and that floor
+cannot be lowered to `none` by a setting or by the agent. Verification is what makes a
+Source a Source: Raven reopens each recorded URL and requires the recorded excerpt to
+occur in the retrieved body. With no fetch provider, **no Source can ever be verified**,
+so no externally grounded Checkpoint can be published and Completion cannot succeed — a
+grounding-required Task with zero verified Claims stays `active` rather than being
+labelled complete. That is deliberate: the alternative is a "completed" research
+document whose citations were never checked.
+
+You will see the refusal as a Source check reporting:
+
+```text
+DeepSeek Harness web capability is not composed
+```
+
+and, when a provider is composed but none of them can serve the request, the Harness's
+own error:
+
+```text
+no usable web provider is registered
+```
+
+**Discovery additionally needs the search provider's credential.** `action=discover` uses
+the `web` **search** half, which is a different provider from the fetch half — fetch can
+work while search does not. The DeepSeek search provider resolves a credential through
+the credentials service, and without it the query fails with:
+
+```text
+DeepSeek search has no API key for "DEEPSEEK_API_KEY"; store it through the credentials service
+```
+
+That failure is recorded as a `tool` Limitation on the Task and the sibling queries keep
+their Leads — a batch is never lost to one failing query. With no search half composed at
+all, `discover` reports:
+
+```text
+DeepSeek Harness web search capability is not composed
+```
+
+Discovery is a convenience, not a requirement: the agent's own retrieval tools still
+work, and it is always the agent — never `discover` — that opens a Lead and records the
+excerpt.
+
+Drafting is off by default and needs no credential of its own; if `draftRoutes` is empty,
+`action=draft` reports `no Draft Variant route is configured` instead of quietly drafting
+from the session model. A configured route does require that provider's credential in the
+Harness.
+
+### Cost
+
+Raven adds no model of its own, but two actions multiply work the deployment pays for.
+
+- **A draft round bills every configured route, in parallel.** `action=draft` sends the
+  same instruction to every route in `draftRoutes` (or the subset the agent selects) and
+  runs them concurrently, so the cost of one round is the sum over routes, not the cost
+  of one model. Three routes is three billed completions for one instruction. Each is
+  bounded by `draftMaxTokens` (default `4000` output tokens) and `draftTimeoutMs`
+  (default `120000`). This is why the deployment owns the route list and the agent may
+  only pick a subset: naming a model is naming spend and a data path.
+- **Verification re-fetches every cited Source, twice per publication.** Sources are
+  reopened at `checkpoint` **and** again at `complete` — Completion does not trust the
+  Checkpoint's earlier result, because a volatile page can change between them and a
+  stale pass is exactly the failure the verification exists to prevent. A Task with 20
+  Sources checkpointed four times and completed once performs on the order of 100 fetches.
+  Bound each one with `sourceCheckTimeoutMs`.
+- **Discovery** costs one search-backend call per query in the batch, up to
+  `searchMaxQueries` (default `4`), each requesting up to `searchMaxResults` (default `8`)
+  candidates.
+
+Checkpoints, steering, status, stop, resume, and export perform no network calls and
+bill nothing.
+
+### Data handling
+
+Raven has no store, no telemetry, and no network destination of its own. Everything that
+leaves the machine leaves through a Harness capability the deployment composed:
+
+| What leaves | Where it goes | When |
+| --- | --- | --- |
+| Recorded Source **URLs**, re-fetched in full | The origin host of each Source | Every `checkpoint` with Sources, and every `complete` |
+| **Search queries** you or the agent formulate | The composed search backend (e.g. the DeepSeek search provider) | Every `discover` |
+| The **draft instruction** and whatever context the drafter sends with it | Every configured model route in the round | Every `draft` |
+
+Note the third row: **Artifact and instruction text is sent to each draft route**, so a
+route pointed at a third-party provider is a data path for the text being written. That
+is the reason `draftRoutes` is a deployment setting and not something the agent can widen.
+
+Nothing else is transmitted. Recorded excerpts, Claims, Limitations, and Artifacts live
+in the Harness **session log** and nowhere else; Raven writes no file at any point.
+
+**On `export`, Raven still writes nothing.** `action=export` is a pure projection: it
+returns llm-wiki page bytes and their intended paths, and the *agent* writes them with
+ordinary Harness file tools, inside that agent's existing approval and sandbox boundary.
+What lands on disk when you accept those writes is:
+
+```text
+wiki/queries/<slug>.md    the Artifact page, with derived frontmatter
+wiki/raw/<source-id>.md   one immutable page per Source: the verified excerpt only
+                          (capture: excerpt-only) plus its verification receipt and a
+                          sha256 over that page's own body
+wiki/log.md               one appended entry
+wiki/SCHEMA.md            seeded only with init=true
+wiki/index.md             seeded only with init=true
+```
+
+The `raw/` pages store the bounded excerpt, **not** a full page capture, so an export is
+not a copy of the sources you read.
+
+### Limits
+
+Every ceiling is per Task and enforced by the engine, so a direct caller cannot bypass
+it. They exist because Task state is replayed from the session log on every resume:
+unbounded state would eventually make a session unloadable.
+
+| Cap | Limit | What happens at the limit |
+| --- | --- | --- |
+| Sources | **256** | Further Source registrations in the submitted batch are rejected; the Checkpoint is refused with the cap named, leaving prior state intact. |
+| Claims | **512** | Same — the batch is refused rather than silently truncated, so provenance is never partially recorded. |
+| Checkpoints | **128** | `checkpoint` is refused. The Task stays active and completable against its latest existing Checkpoint. |
+| Limitations | **256** | Recorded failures stop accumulating. The Task keeps working; the cap is reported so a Limitation is never dropped silently. |
+| Artifact | **100,000 characters** | The submitted Artifact is rejected before it is laid out or hashed. Split the work or export and continue. |
+| Steering Revisions | **128** | `steer` is refused; existing Checkpoints and evidence are untouched. |
+
+Two rules make these survivable rather than terminal: a refused contribution **never
+mutates state** — resubmit a smaller batch — and a Task that has hit a cap can always
+still `complete` and `export`. Individual field ceilings (a request or correction at
+20,000 characters, a summary at 2,000, an excerpt at 20,000, a Source title at 1,000, a
+locator at 4,000) are reported the same way.
+
+### Troubleshooting
+
+| What you see | Why | What to do |
+| --- | --- | --- |
+| `DeepSeek Harness web capability is not composed` | No fetch provider. No Source can be verified. | Compose the `web` capability. For non-grounded writing or learning, start the Task with `grounding: none`. |
+| `no usable web provider is registered` | `web` is composed but no registered provider can serve the request. | Check which providers the deployment registers and whether they are `available()`. |
+| `DeepSeek search has no API key for "DEEPSEEK_API_KEY"` | Discovery reached the search provider, which has no credential. | Store the key through the credentials service (Models page in the Web GUI, or the environment). Fetch is unaffected. |
+| `DeepSeek Harness web search capability is not composed` | No search half at all. | Compose a search provider, or let the agent use its own retrieval tools — discovery is optional. |
+| Discovery reports unavailable and records a Limitation, with no error | `sourceDiscovery: disabled`. | Deliberate: an empty result would read as "nothing exists". Set it back to `seam`. |
+| `no Draft Variant route is configured` | `draftRoutes` is empty — the default. | Set `draftRoutes` to `provider/model` entries. Drafting is off until you do. |
+| A route is refused with the configured set named | The agent selected a route outside `draftRoutes`. | Expected: the agent may only select a subset. Add the route to the deployment setting if it should be allowed. |
+| A Checkpoint recording Sources is refused, naming `structural-only` | `sourceVerification: structural-only` withholds every remote check. | Set it back to `remote`. It never turns unchecked Sources into confirmed ones. |
+| Completion is refused: candidate bytes differ from the latest Checkpoint | The final edit was never published as a Checkpoint, or the *submitted* bytes were edited rather than the *stored* ones. | Re-read the rendered Artifact and complete with exactly those bytes. Storage is in the Task's Prose Layout, so the returned bytes differ from what was sent. |
+| Completion is refused: a Steering Revision has no subsequent Checkpoint | A correction arrived after the last Checkpoint. | Publish a Checkpoint that applies the correction, then complete. |
+| A cited Source reports its excerpt absent, naming the nearest passage | The excerpt does not occur in the retrieved body. | Repair the excerpt from the named passage. Do not weaken a correct excerpt until it fits — an *absent* excerpt is a different signal from a *diverging* one. |
+| A Source reports `unavailable` on a truncated retrieval | The fetch was cut off; a cut-off body cannot disprove an excerpt from the tail. | Not an accusation of fabrication. Retry, or cite a locator earlier in the document. |
+| A grounded Task will not complete despite good work | No material supported/qualified external Claim has a currently reachable, excerpt-matched Source. | Verify at least one Source, or accept `completed-with-limits` by deferring the affected Claims explicitly. |
+| The settings card is missing from Settings › Plugins | The deployment does not compose `@deepseek-ai/dsh-client-ui-settings-plugins`, or the client shell lacks the `locale`/`settingsSchema` services. | Edit `settings.yaml` directly. The Harness web app bundle does compose it. |
+| An in-flight Task vanished | Task state lives in the session, not on disk. | `export` before swapping builds or ending a session. Use `status` after a resume to reconstruct the book. |
+
+## Version pinning and peer dependencies
+
+Two version numbers in `package.json` look like they disagree. They do not, and the
+difference is worth understanding before reading it as drift.
+
+```json
+"peerDependencies": { "@deepseek-ai/dsh-tools": "*", ... },
+"devDependencies":  { "@deepseek-ai/dsh-tools": "0.1.0-rc.6", ... },
+"dshRaven": {
+  "harnessVersion": "0.1.1-rc.2",
+  "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e"
+}
+```
+
+**The peers are `*` deliberately.** A profile installs plugins with
+`autoInstallPeers: false` and `nodeLinker: hoisted` precisely so an out-of-tree plugin's
+peers fall through to the running Harness installation and every plugin shares **one**
+cordis instance. A narrowed range cannot make a mismatched deployment work — it either
+fails the install or resolves a *second* copy whose services the Harness cannot see, and
+that failure presents as an absent service rather than as a version conflict. So the
+range is not where compatibility is expressed.
+
+**The `dshRaven` pin is where it is expressed.** It names the exact Harness version and
+commit this build was tested against. `scripts/verify-dsh.ts` is its executable check —
+it reads the pin from `package.json` (there is deliberately no second copy) and composes
+Raven against a real checkout — and the release workflow refuses to publish a build whose
+pin is absent or malformed. **Read the pin, not the ranges, to know what this build runs
+against.**
+
+**The `@deepseek-ai/*` devDependencies are at `0.1.0-rc.6` while the pin says
+`0.1.1-rc.2`, and that gap is expected.** Those devDependencies are the newest Service
+Definition packages *published to npm*; the pin targets the *Harness release*, which
+moves ahead of them. The two numbers describe different things and are not required to
+match. Where the gap actually matters — the client slot contract, whose shape changed
+between them — Raven vendors the newer shape in `src/client/slot-contract.ts` and
+`scripts/verify-dsh.ts` asserts it against the pinned checkout, so the drift breaks the
+release gate instead of silently producing a card that never renders. Dependabot is
+configured to ignore `@deepseek-ai/*` so an automated bump cannot move that seam while
+leaving the pin claiming a compatibility that no longer holds.
+
+The honest consequence of `*`: a pre-1.0 RC that reshapes a seam gives **no install-time
+signal**. The pin plus `pnpm run test:dsh` against a matching checkout is the only thing
+that catches it, which is why that gate is mandatory before a release — see
+[CONTRIBUTING.md](./CONTRIBUTING.md).
+
 ## Compatibility
 
 Raven v1 is pinned and tested against:
 
-- DeepSeek Harness `0.1.1-rc.1`;
-- Harness checkout commit `528c682e061696f5a160f363f236ecbf53cbd006`;
+- DeepSeek Harness `0.1.1-rc.2`;
+- Harness checkout commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`;
 - Node.js `^22.19.0 || >=24.0.0`; and
 - pnpm `11.21.0`.
 
@@ -663,8 +872,10 @@ behind.
 
 ## Contributing
 
-Issues and pull requests are welcome. Run `pnpm check` before opening a PR; the release-equivalent gate is
-`pnpm check:release` with `DSH_CHECKOUT` pointing at a Harness checkout.
+Issues and pull requests are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for the gates, the pin rules, and
+the release procedure, and [SECURITY.md](./SECURITY.md) to report a vulnerability. Run `pnpm check` before opening a
+PR; the release-equivalent gate is `pnpm check:release` with `DSH_CHECKOUT` pointing at a Harness checkout. Changes
+are recorded in [CHANGELOG.md](./CHANGELOG.md).
 
 If Raven saves you a rewrite, a ⭐ helps other DeepSeek Harness users find it — and browse
 [`dsh-plugin`](https://github.com/topics/dsh-plugin) for the rest of the ecosystem.
@@ -677,7 +888,7 @@ If Raven saves you a rewrite, a ⭐ helps other DeepSeek Harness users find it �
 
 <div align="center">
 
-[TL;DR](#tldr) · [Install](#install) · [Upgrade](#upgrade) · [Uninstall](#uninstall) · [Usage](#usage) · [How it works](#how-it-works-under-the-hood) · [FAQ](#faq)
+[TL;DR](#tldr) · [Install](#install) · [Upgrade](#upgrade) · [Uninstall](#uninstall) · [Usage](#usage) · [How it works](#how-it-works-under-the-hood) · [Operating](#operating-raven) · [Troubleshooting](#troubleshooting) · [FAQ](#faq)
 
 <sub><b>Keywords:</b> DeepSeek Harness plugin · dsh-plugin · Cordis plugin · AI research agent · deep research · agentic research · source grounding · citation verification · evidence-based writing · academic writing assistant · learning assistant · retrieval-augmented generation · hallucination mitigation · TypeScript · Node.js</sub>
 

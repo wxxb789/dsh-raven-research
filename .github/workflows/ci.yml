@@ -44,3 +44,32 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+  # The packed-consumer gate is a separate job, not another step in `check`, because it
+  # tests a different thing and fails for different reasons: `check` proves the source
+  # tree is correct, while this proves the PUBLISHED tarball is — the exact file
+  # allowlist, the `prepack` lifecycle, and an install into a clean external consumer.
+  # It was previously only ever run by hand, which is precisely why a pin that no
+  # longer matched any reachable checkout survived into a release candidate.
+  #
+  # It needs registry access to install Raven's peers, which GitHub has and the
+  # development machine behind a blocked registry does not, so CI is the RIGHT owner of
+  # this gate rather than a convenience copy of a local one. One Node version is enough:
+  # the matrix above already covers the runtime, and packing is Node-version-independent.
+  pack:
+    name: packed consumer install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Packed consumer install
+        run: pnpm run test:pack

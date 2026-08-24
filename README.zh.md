@@ -11,7 +11,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.1-rc.1](https://img.shields.io/badge/harness-0.1.1--rc.1-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Harness 0.1.1-rc.2](https://img.shields.io/badge/harness-0.1.1--rc.2-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -19,12 +19,12 @@
 
 [English](README.md) · 中文
 
-[**TL;DR**](#tldr) · [**安装**](#安装) · [**使用**](#使用) · [**工作原理**](#工作原理-under-the-hood) · [**配置**](#配置) · [**FAQ**](#faq)
+[**TL;DR**](#tldr) · [**安装**](#安装) · [**使用**](#使用) · [**工作原理**](#工作原理-under-the-hood) · [**配置**](#配置) · [**运维**](#运维须知) · [**FAQ**](#faq)
 
 </div>
 
 > [!IMPORTANT]
-> **v1 developer preview。** 锚定并针对 DeepSeek Harness `0.1.1-rc.1` 测试，而 Harness 本身仍是 RC、会有破坏性变更。
+> **v1 developer preview。** 锚定并针对 DeepSeek Harness `0.1.1-rc.2` 测试，而 Harness 本身仍是 RC、会有破坏性变更。
 > 尚未发布到 npm —— 请[从源码安装](#安装)。
 
 ## TL;DR
@@ -98,7 +98,7 @@ Raven **尚未发布到 npm**，请从仓库源码安装。下面所有操作都
 
 | 要求 | 版本 |
 | --- | --- |
-| DeepSeek Harness | `0.1.1-rc.1`（checkout `528c682e061696f5a160f363f236ecbf53cbd006`） |
+| DeepSeek Harness | `0.1.1-rc.2`（checkout `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`）—— 见[版本锚定与 peer dependencies](#版本锚定与-peer-dependencies) |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
 | Peer dependencies | 九个 `@deepseek-ai/*` 包 —— cordis 框架、schema 库，以及七个 Harness Service Definition（`cordis`、`dsh-agent`、`dsh-llm`、`dsh-session`、`dsh-settings`、`dsh-system-prompt`、`dsh-tools`、`dsh-web`、`schemastery`）—— 由 Harness 部署提供，绝不打包进产物 |
@@ -472,7 +472,7 @@ executable helpers from one another."* 因此被拒绝的输入会直接显示 s
 
 三个需要如实说明的前置条件。其一，只有组合了 `@deepseek-ai/dsh-client-ui-settings-plugins` 的部署才会出现这张
 卡片 —— Harness web app bundle 属于此类。其二，它注入浏览器端 `locale` 与 `settingsSchema` 服务，缺其一则这部分接线
-根本不会运行。其三，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness `0.1.1-rc.1` 声明的那一版；而
+根本不会运行。其三，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness `0.1.1-rc.2` 声明的那一版；而
 `0.1.0-rc.6` 至今仍是 npm 上最新的已发布版本，声明的仍是较旧的 list 形态，因此 Raven 内联了较新的形态 —— 连同 locale
 注册签名、schema 服务、describe face 与它所镜像的卡片外观 —— 并由 `scripts/verify-dsh.ts` 对被测 Harness checkout
 逐一断言 —— 于是契约漂移会导致 release gate 失败，而不是让卡片在浏览器里悄无声息地不渲染、把自己的字典 key 直接显示
@@ -483,12 +483,182 @@ executable helpers from one another."* 因此被拒绝的输入会直接显示 s
 只会在一列有样式的卡片中渲染出一坨没有样式的内容，因此 `tests/integration/client-bundle.test.ts` 会断言 CSS 确实
 存在于产物中。
 
+## 运维须知
+
+本节讲的都是部署的运行时属性，而不是 Raven 的配置项。跳过它的用户，通常会在 Task 拒绝完成的那一刻才发现这些事。
+
+### 前置条件
+
+| Outcome | 需要组合 `web` 能力吗？ | 需要搜索凭据吗？ |
+| --- | --- | --- |
+| `research` | **必需** | 仅 `action=discover` 需要 |
+| `academic-writing` | **必需** | 仅 `action=discover` 需要 |
+| `general-writing` | 仅当 Task 登记 Source 时 | 仅 `action=discover` 需要 |
+| `learning` | 仅当 Task 登记 Source 时 | 仅 `action=discover` 需要 |
+
+**`research` 与 `academic-writing` 必需一个组合了 fetch provider 的 `web` 能力。** 这两种 Outcome 的
+`grounding` 默认是 `required`，且该底线不能被任何配置或 agent 降到 `none`。让 Source 成其为 Source 的正是校验：
+Raven 会重新打开每个已记录的 URL，并要求记录的摘录出现在抓取到的正文中。没有 fetch provider，就
+**没有任何 Source 能被验证**，因此无法发布有据可依的 Checkpoint，Completion 也无法成功 —— 一个要求 grounding
+却没有任何已验证 Claim 的 Task 会保持 `active`，而不会被标记为完成。这是刻意的：另一种做法，是交出一份引用从未被
+检查过的"已完成"研究文档。
+
+你会在 Source 检查中看到这样的拒绝：
+
+```text
+DeepSeek Harness web capability is not composed
+```
+
+而当 provider 已组合、但没有任何一个能服务该请求时，看到的是 Harness 自己的报错：
+
+```text
+no usable web provider is registered
+```
+
+**发现（discovery）还额外需要搜索 provider 的凭据。** `action=discover` 用的是 `web` 的**搜索**半边，它与 fetch
+半边是不同的 provider —— fetch 正常而搜索不可用是完全可能的。DeepSeek 搜索 provider 通过 credentials 服务解析凭据，
+缺少凭据时该 query 会失败并报出：
+
+```text
+DeepSeek search has no API key for "DEEPSEEK_API_KEY"; store it through the credentials service
+```
+
+该失败会被记为 Task 上的一条 `tool` Limitation，其兄弟 query 的 Lead 照常保留 —— 一整批绝不会因为一个 query
+失败而作废。若根本没有组合搜索半边，`discover` 报告的是：
+
+```text
+DeepSeek Harness web search capability is not composed
+```
+
+发现是便利功能而非必需品：agent 自己的检索工具照常可用，而且打开 Lead、记录摘录的始终是 agent，永远不是 `discover`。
+
+起草默认关闭，自身不需要凭据；`draftRoutes` 为空时，`action=draft` 会报告 `no Draft Variant route is configured`，
+而不是悄悄改用会话模型起草。已配置的 route 则确实需要该 provider 在 Harness 中的凭据。
+
+### 成本
+
+Raven 不引入自己的模型，但有两个动作会成倍放大部署实际支付的开销。
+
+- **一轮 draft 会并行计费每一个已配置的 route。** `action=draft` 把同一条指令发给 `draftRoutes` 中的每个 route
+  （或 agent 选定的子集）并发执行，因此一轮的成本是各 route 之和，而不是一个模型的成本。三个 route 就是为一条指令
+  付三次补全费用。每份变体受 `draftMaxTokens`（默认 `4000` 输出 token）与 `draftTimeoutMs`（默认 `120000`）约束。
+  这正是 route 清单归部署所有、agent 只能选子集的原因：指定一个模型，就是在指定花费和一条数据通路。
+- **校验会重新抓取每一个被引用的 Source，且每次发布抓两遍。** Source 在 `checkpoint` **以及** `complete` 时各重开
+  一次 —— Completion 不信任 Checkpoint 早先的结果，因为易变页面可能在两者之间改变，而"凭旧结论放行"恰恰是校验本身
+  要防的失败。一个含 20 个 Source、checkpoint 四次并完成一次的 Task，量级上会产生约 100 次抓取。请用
+  `sourceCheckTimeoutMs` 给每一次设限。
+- **发现**的成本是每批中每个 query 一次搜索后端调用，query 数最多 `searchMaxQueries`（默认 `4`），每个 query 最多
+  请求 `searchMaxResults`（默认 `8`）个候选。
+
+Checkpoint、steer、status、stop、resume 与 export 不发起任何网络调用，不产生费用。
+
+### 数据流向
+
+Raven 没有自己的存储、遥测和网络目的地。所有离开本机的数据，都经由部署自己组合的 Harness 能力：
+
+| 离开的内容 | 去向 | 时机 |
+| --- | --- | --- |
+| 已记录的 Source **URL**，并完整重新抓取 | 各 Source 的源站 | 每次带 Source 的 `checkpoint`，以及每次 `complete` |
+| 你或 agent 拟定的**搜索 query** | 已组合的搜索后端（例如 DeepSeek 搜索 provider） | 每次 `discover` |
+| **起草指令**及 drafter 随附的上下文 | 本轮中每一个已配置的模型 route | 每次 `draft` |
+
+请特别注意第三行：**Artifact 与指令文本会发送给每一个 draft route**，因此指向第三方 provider 的 route，就是正在
+撰写的文本的一条数据通路。这正是 `draftRoutes` 属于部署配置、而 agent 无法自行扩大的原因。
+
+除此之外不再传输任何内容。记录的摘录、Claim、Limitation 与 Artifact 只存在于 Harness 的 **session log** 中；
+Raven 在任何环节都不写文件。
+
+**即使 `export`，Raven 依然不写任何文件。** `action=export` 是一次纯投影：它返回 llm-wiki 的页面字节及其目标路径，
+由 *agent* 用普通的 Harness 文件工具写入，处在该 agent 既有的审批与沙箱边界之内。你接受这些写入后，落到磁盘上的是：
+
+```text
+wiki/queries/<slug>.md    Artifact 页，带派生出的 frontmatter
+wiki/raw/<source-id>.md   每个 Source 一张不可变页：仅含已验证的摘录
+                          （capture: excerpt-only）、其校验回执，以及对该页自身正文的 sha256
+wiki/log.md               追加一条记录
+wiki/SCHEMA.md            仅在 init=true 时播种
+wiki/index.md             仅在 init=true 时播种
+```
+
+`raw/` 页保存的是有界摘录，**不是**整页快照，因此一次 export 并不是你读过的那些来源的副本。
+
+### 上限
+
+每个上限都以 Task 为单位、由引擎强制执行，因此直接调用方也无法绕开。它们存在的原因是：Task 状态会在每次 resume 时
+从 session log 重放，无界的状态最终会让会话无法加载。
+
+| 上限项 | 数值 | 触顶时会怎样 |
+| --- | --- | --- |
+| Source | **256** | 本次提交批次中后续的 Source 登记被拒；该 Checkpoint 连同上限一并被拒绝，既有状态原封不动。 |
+| Claim | **512** | 同上 —— 整批被拒而不是静默截断，因此不会出现只记录了一半的 provenance。 |
+| Checkpoint | **128** | `checkpoint` 被拒。Task 保持 active，仍可基于最新的既有 Checkpoint 完成。 |
+| Limitation | **256** | 记录的失败不再累积。Task 照常工作；上限会被报告，因此不会有 Limitation 被静默丢弃。 |
+| Artifact | **100,000 字符** | 提交的 Artifact 在排布与哈希之前即被拒绝。请拆分工作，或先 export 再继续。 |
+| Steering Revision | **128** | `steer` 被拒；既有 Checkpoint 与证据不受影响。 |
+
+有两条规则让触顶是可恢复的而非终局：被拒绝的提交**绝不改变状态**（重新提交一个更小的批次即可），且一个已经触顶的
+Task 始终仍可 `complete` 与 `export`。单字段上限（request 与 correction 各 20,000 字符、summary 2,000、摘录 20,000、
+Source 标题 1,000、locator 4,000）的报告方式与此相同。
+
+### 疑难排查
+
+| 你看到的 | 原因 | 怎么办 |
+| --- | --- | --- |
+| `DeepSeek Harness web capability is not composed` | 没有 fetch provider，任何 Source 都无法验证。 | 组合 `web` 能力。若只是非取证类的写作或学习，可用 `grounding: none` 起 Task。 |
+| `no usable web provider is registered` | `web` 已组合，但没有任何已注册 provider 能服务该请求。 | 检查部署注册了哪些 provider，以及它们的 `available()` 是否为真。 |
+| `DeepSeek search has no API key for "DEEPSEEK_API_KEY"` | 发现已到达搜索 provider，但它没有凭据。 | 通过 credentials 服务存入 key（Web GUI 的 Models 页，或环境变量）。不影响 fetch。 |
+| `DeepSeek Harness web search capability is not composed` | 根本没有搜索半边。 | 组合一个搜索 provider，或让 agent 用自己的检索工具 —— 发现本就是可选的。 |
+| 发现报告不可用并记下一条 Limitation，但没有报错 | `sourceDiscovery: disabled`。 | 这是刻意的：空结果会被读成"什么都不存在"。改回 `seam` 即可。 |
+| `no Draft Variant route is configured` | `draftRoutes` 为空 —— 即默认值。 | 把 `draftRoutes` 配成若干 `provider/model` 条目。在此之前起草是关闭的。 |
+| 某个 route 被拒绝，并列出了已配置的集合 | agent 选了 `draftRoutes` 之外的 route。 | 符合预期：agent 只能选子集。若该 route 确实应被允许，把它加进部署配置。 |
+| 记录了 Source 的 Checkpoint 被拒，并指明 `structural-only` | `sourceVerification: structural-only` 屏蔽了所有远程检查。 | 改回 `remote`。它绝不会把未检查的 Source 变成已确认。 |
+| Completion 被拒：候选字节与最新 Checkpoint 不一致 | 最后一次编辑没有先发布为 Checkpoint，或改的是*提交过*的字节而不是*存下来*的那份。 | 重新读取渲染后的 Artifact，并用那份字节完成。存储采用 Task 的 Prose Layout，因此返回的字节与提交的并不相同。 |
+| Completion 被拒：某个 Steering Revision 之后没有 Checkpoint | 纠偏发生在最后一次 Checkpoint 之后。 | 先发布一个应用了该纠偏的 Checkpoint，再完成。 |
+| 被引用的 Source 报告摘录不存在，并给出最接近的片段 | 该摘录未出现在抓取到的正文中。 | 依据给出的片段修正摘录。不要为了"能对上"而把一条正确的摘录削弱 —— 摘录*完全不存在*与摘录*有偏差*是两种不同的信号。 |
+| 抓取被截断的 Source 报告为 `unavailable` | 抓取被切断；被切掉的正文无法证伪一条取自尾部的摘录。 | 这不是在指控伪造。重试，或改引文档靠前位置的 locator。 |
+| 工作做得不错，但有据要求的 Task 就是无法完成 | 没有任何关键的 supported/qualified 外部 Claim 拥有当前可达且摘录匹配的 Source。 | 至少验证一个 Source；或显式 defer 受影响的 Claim，接受 `completed-with-limits`。 |
+| Settings › Plugins 里没有这张卡片 | 部署没有组合 `@deepseek-ai/dsh-client-ui-settings-plugins`，或客户端 shell 缺少 `locale`/`settingsSchema` 服务。 | 直接编辑 `settings.yaml`。Harness web app bundle 是组合了的。 |
+| 进行中的 Task 不见了 | Task 状态存在会话里，不在磁盘上。 | 换构建或结束会话前先 `export`。resume 之后用 `status` 重建 Task book。 |
+
+## 版本锚定与 peer dependencies
+
+`package.json` 里有两个版本号看起来彼此矛盾。它们并不矛盾，而且在把它读成"漂移"之前，值得先理解这个差别。
+
+```json
+"peerDependencies": { "@deepseek-ai/dsh-tools": "*", ... },
+"devDependencies":  { "@deepseek-ai/dsh-tools": "0.1.0-rc.6", ... },
+"dshRaven": {
+  "harnessVersion": "0.1.1-rc.2",
+  "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e"
+}
+```
+
+**peer 全部写成 `*` 是刻意的。** profile 以 `autoInstallPeers: false` 与 `nodeLinker: hoisted` 安装插件，正是为了
+让仓外插件的 peer 穿透到运行中的 Harness installation，从而所有插件共享**同一个** cordis 实例。收窄范围并不能让一个
+不匹配的部署跑起来 —— 它要么让安装失败，要么解析出**第二份**副本，而 Harness 看不见那份副本的服务；这种失败表现为
+"服务不存在"，而不是"版本冲突"。因此版本范围并不是表达兼容性的地方。
+
+**`dshRaven` 这块才是。** 它指明了本次构建实际测试所针对的 Harness 版本与 commit。`scripts/verify-dsh.ts` 是它的
+可执行检查 —— 它从 `package.json` 读取该锚定值（刻意不存在第二份副本），并把 Raven 组合到一个真实 checkout 上运行 ——
+而发布工作流会拒绝发布锚定缺失或格式错误的构建。**要知道这次构建针对什么运行，请看锚定值，而不是版本范围。**
+
+**`@deepseek-ai/*` 的 devDependency 停在 `0.1.0-rc.6`，而锚定写的是 `0.1.1-rc.2`，这个落差是预期之内的。**
+那些 devDependency 是*已发布到 npm* 的最新 Service Definition 包；而锚定针对的是 *Harness 发行版*，后者走在前面。
+两个数字描述的是不同的东西，并不要求一致。在这个落差真正有影响的地方 —— 即形态发生过变化的客户端 slot 契约 ——
+Raven 在 `src/client/slot-contract.ts` 内联了较新的形态，并由 `scripts/verify-dsh.ts` 对锚定的 checkout 断言，
+因此漂移会打断 release gate，而不是悄悄产出一张永远不渲染的卡片。Dependabot 被配置为忽略 `@deepseek-ai/*`，
+以免自动升级在锚定值不变的情况下挪动这道接缝、让锚定继续宣称一个已经不成立的兼容性。
+
+`*` 需要如实承担的后果是：一个重塑了接缝的 pre-1.0 RC，在安装期**不会给出任何信号**。唯一能发现它的，是锚定值加上
+针对匹配 checkout 运行的 `pnpm run test:dsh` —— 这正是该门禁在发布前不可省略的原因，见
+[CONTRIBUTING.md](./CONTRIBUTING.md)。
+
 ## 兼容性
 
 Raven v1 锚定并测试于：
 
-- DeepSeek Harness `0.1.1-rc.1`；
-- Harness checkout commit `528c682e061696f5a160f363f236ecbf53cbd006`；
+- DeepSeek Harness `0.1.1-rc.2`；
+- Harness checkout commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`；
 - Node.js `^22.19.0 || >=24.0.0`；以及
 - pnpm `11.21.0`。
 
@@ -606,7 +776,9 @@ Claim 的判断仍由 agent 负责。
 
 ## 贡献
 
-欢迎 issue 与 PR。提 PR 前请跑 `pnpm check`；与发布等价的门禁是设置 `DSH_CHECKOUT` 后运行 `pnpm check:release`。
+欢迎 issue 与 PR —— 门禁、锚定规则与发布流程见 [CONTRIBUTING.md](./CONTRIBUTING.md)，报告安全问题见
+[SECURITY.md](./SECURITY.md)。提 PR 前请跑 `pnpm check`；与发布等价的门禁是设置 `DSH_CHECKOUT` 后运行
+`pnpm check:release`。变更记录在 [CHANGELOG.md](./CHANGELOG.md)。
 
 如果 Raven 帮你省下了一次重写，点一个 ⭐ 能让更多 DeepSeek Harness 用户找到它 —— 也欢迎浏览
 [`dsh-plugin`](https://github.com/topics/dsh-plugin) 话题下的生态。
@@ -619,7 +791,7 @@ Claim 的判断仍由 agent 负责。
 
 <div align="center">
 
-[TL;DR](#tldr) · [安装](#安装) · [升级](#升级) · [卸载](#卸载) · [使用](#使用) · [工作原理](#工作原理-under-the-hood) · [FAQ](#faq)
+[TL;DR](#tldr) · [安装](#安装) · [升级](#升级) · [卸载](#卸载) · [使用](#使用) · [工作原理](#工作原理-under-the-hood) · [运维](#运维须知) · [疑难排查](#疑难排查) · [FAQ](#faq)
 
 <sub><b>关键词：</b> DeepSeek Harness 插件 · dsh-plugin · Cordis plugin · AI 研究 agent · deep research · 深度研究 · 可溯源写作 · 引用校验 · 学术写作助手 · 学习助手 · RAG · 幻觉抑制 · TypeScript · Node.js</sub>
 

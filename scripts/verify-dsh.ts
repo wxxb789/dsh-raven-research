@@ -6,27 +6,74 @@ import { pathToFileURL } from 'node:url'
 
 import { runProcess } from './process.js'
 
-const EXPECTED_VERSION = '0.1.1-rc.1'
-const EXPECTED_COMMIT = '528c682e061696f5a160f363f236ecbf53cbd006'
+// The Harness pin has exactly ONE source of truth: `dshRaven` in this package's own
+// package.json, which is what ships to a consumer and what the README documents. The
+// second hardcoded copy this file used to carry was not a duplicate that might drift —
+// it HAD drifted, and because both copies agreed with each other the gate reported a
+// green pin while naming a checkout nobody could produce. Reading the manifest makes
+// retargeting a one-line edit in the file the release actually publishes.
+const ravenManifest = JSON.parse(
+  await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+) as {
+  name: string
+  dsh?: { bundle?: { patch?: string } }
+  dshRaven?: { harnessVersion?: unknown; harnessCommit?: unknown }
+}
+const EXPECTED_VERSION = ravenManifest.dshRaven?.harnessVersion
+const EXPECTED_COMMIT = ravenManifest.dshRaven?.harnessCommit
+if (typeof EXPECTED_VERSION !== 'string' || EXPECTED_VERSION.length === 0) {
+  throw new TypeError('package.json is missing dshRaven.harnessVersion; the release gate has no pin to check against.')
+}
+if (typeof EXPECTED_COMMIT !== 'string' || !/^[a-f0-9]{40}$/.test(EXPECTED_COMMIT)) {
+  throw new TypeError('package.json dshRaven.harnessCommit must be a full 40-character commit sha.')
+}
 const checkout = process.env.DSH_CHECKOUT
 if (checkout === undefined || checkout.trim().length === 0) {
-  throw new Error('Set DSH_CHECKOUT to the DeepSeek Harness checkout under test.')
+  throw new Error(
+    'Set DSH_CHECKOUT to a DeepSeek Harness checkout at ' + EXPECTED_VERSION
+    + ' (commit ' + EXPECTED_COMMIT + '). '
+    + 'Example: DSH_CHECKOUT=/path/to/deepseek-harness pnpm run test:dsh',
+  )
 }
 const root = resolve(checkout)
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { version?: unknown }
-assert.equal(manifest.version, EXPECTED_VERSION, `Raven v1 requires DeepSeek Harness ${EXPECTED_VERSION}`)
+// Every mismatch below names BOTH values and the one file to edit, because an operator
+// who hits this gate has two legitimate repairs — move the checkout, or move the pin —
+// and a bare 'does not match' tells them neither which is which nor where to go.
+assert.equal(
+  manifest.version,
+  EXPECTED_VERSION,
+  'DeepSeek Harness version mismatch: package.json dshRaven.harnessVersion pins ' + EXPECTED_VERSION
+  + ', but DSH_CHECKOUT=' + root + ' is ' + String(manifest.version) + '.'
+  + ' Check out the pinned release in that repository, or retarget the pin in package.json'
+  + ' (dshRaven.harnessVersion and dshRaven.harnessCommit together).',
+)
 const revision = (await runProcess('git', ['rev-parse', 'HEAD'], {
   cwd: root,
   timeoutMs: 10_000,
   capture: true,
 })).stdout.trim()
-assert.equal(revision, EXPECTED_COMMIT, 'DeepSeek Harness checkout commit does not match Raven compatibility metadata')
+assert.equal(
+  revision,
+  EXPECTED_COMMIT,
+  'DeepSeek Harness commit mismatch: package.json dshRaven.harnessCommit pins ' + EXPECTED_COMMIT
+  + ', but DSH_CHECKOUT=' + root + ' is at ' + revision + '.'
+  + ' Run `git -C ' + root + ' checkout ' + EXPECTED_COMMIT + '`, or retarget'
+  + ' dshRaven.harnessCommit in package.json to ' + revision + '.',
+)
 const dirty = (await runProcess('git', ['status', '--porcelain=v1'], {
   cwd: root,
   timeoutMs: 10_000,
   capture: true,
 })).stdout.trim()
-assert.equal(dirty, '', 'DeepSeek Harness compatibility checkout must be clean')
+assert.equal(
+  dirty,
+  '',
+  'DeepSeek Harness compatibility checkout must be clean, but DSH_CHECKOUT=' + root
+  + ' has uncommitted changes:\n' + dirty + '\n'
+  + 'A dirty checkout is not the pinned commit, so a pass here would prove nothing.'
+  + ' Commit, stash, or run `git -C ' + root + ' restore .` before rerunning.',
+)
 
 const source = (path: string) => pathToFileURL(join(root, path)).href
 const ravenUrl = new URL('../lib/index.js', import.meta.url).href
@@ -149,7 +196,12 @@ try {
       signal,
       ...parent === undefined ? {} : { parent },
     })
-    assert.equal(result.isError, false)
+    assert.equal(
+      result.isError,
+      false,
+      'raven_task ' + String(arguments_.action) + ' failed inside the real Harness composition: '
+      + (result.content ?? []).map((block: { type: string; text?: string }) => block.type === 'text' ? block.text ?? '' : '').join(''),
+    )
     return result
   }
   const attempt = async (arguments_: Record<string, unknown>) => ctx.tools.execute({
@@ -266,15 +318,29 @@ try {
     .find((entry: { ns: string }) => entry.ns === Raven.RAVEN_SETTINGS_NAMESPACE) as {
       value: { sourceVerification?: string; sourceCheckTimeoutMs?: number }
     }
-  assert.equal(described.value.sourceVerification, 'remote')
-  assert.equal(described.value.sourceCheckTimeoutMs, 0)
+  const configDefaults = Raven.Config({}) as Record<string, unknown>
+  assert.deepEqual(
+    { sourceVerification: described.value.sourceVerification, sourceCheckTimeoutMs: described.value.sourceCheckTimeoutMs },
+    { sourceVerification: configDefaults.sourceVerification, sourceCheckTimeoutMs: configDefaults.sourceCheckTimeoutMs },
+    'the registered settings section must serve the Config schema\'s own defaults through the Harness settings surface',
+  )
 
   // A stored write reaches the running plugin: the next Source check is local,
   // so the evidence is reported unverifiable instead of silently trusted.
+  //
+  // `grounding: optional` is required to observe that, and is not a weakening of the
+  // check. Under `structural-only` the engine now refuses to START a grounding-required
+  // Task at all — no Source could ever be confirmed, so the Task could never complete,
+  // and refusing at `start` is better than accepting work that is doomed. That refusal
+  // is a DIFFERENT property from the one this section exists to prove, which is that a
+  // stored settings write reaches the running plugin and changes the next Source check.
+  // A grounding-optional Task is the one shape that still reaches a Source check under
+  // this policy, so it is what makes the write observable.
   await ctx.settings.update(Raven.RAVEN_SETTINGS_NAMESPACE, { sourceVerification: 'structural-only' })
   const offline = await execute({
     action: 'start',
     outcome: 'research',
+    grounding: 'optional',
     request: 'Verify the settings-driven verification policy.',
   })
   const offlineTaskId = /Task: (rvn-[a-f0-9]{12}-\d+)/.exec(offline)?.[1]
@@ -354,6 +420,13 @@ try {
       value: await request.bindings[0]!.functions.raven_task!({
         action: 'start',
         outcome: 'research',
+        // This composition deliberately mounts no `web` capability — it exists to drive
+        // the Code Mode bridge, not the verification seam — and the engine now refuses to
+        // start a grounding-REQUIRED Task where no Source could ever be confirmed. What is
+        // under test here is durability of a Task step taken from inside `run_code`, which
+        // is independent of the evidence floor, so the Task is started at the floor this
+        // composition can actually honour.
+        grounding: 'optional',
         request: 'Verify Code Mode durability through the real bridge.',
       }),
     })
@@ -451,9 +524,6 @@ try {
     composeEntries(layers: readonly unknown[][]): Array<{ id?: string; name?: string }>
     loadOverlayPatches(binName: string, file: string): unknown[]
   }
-  const ravenManifest = JSON.parse(
-    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
-  ) as { name: string; dsh?: { bundle?: { patch?: string } } }
   const declared = ravenManifest.dsh?.bundle?.patch
   assert.equal(declared, './cordis.patch.yml', 'the bundle manifest field the profile composer reads')
   const patchPath = new URL(`../${declared.replace('./', '')}`, import.meta.url)

@@ -1,0 +1,12 @@
+# One owner for the whole package: Raven is a single plugin with one release gate,
+# and a per-directory split would only spread review of changes that always land
+# together — the engine, the seam it calls, and the prose the tool speaks are one
+# contract.
+*                       @wxxb789
+
+# Called out separately because a change here is a compatibility claim, not a code
+# change: the Harness pin, the release gate that enforces it, and the workflows that
+# publish under it. See CONTRIBUTING.md, "Releasing".
+/package.json           @wxxb789
+/scripts/verify-dsh.ts  @wxxb789
+/.github/workflows/     @wxxb789
