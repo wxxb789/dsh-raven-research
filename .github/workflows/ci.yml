@@ -39,11 +39,17 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Test
-        run: pnpm run test
-
+      # Build BEFORE Test, and not for speed: `tests/unit/card-*.test.ts` load
+      # `lib/client.js` and fail with "the browser half is a build artifact, so this
+      # suite runs after a build" when it is absent. `pnpm run check` already orders
+      # them this way locally, which is exactly why this job passed review while
+      # every CI run since 2026-08-20 failed — the local gate and this one disagreed
+      # about the order, and only this one was wrong.
       - name: Build
         run: pnpm run build
+
+      - name: Test
+        run: pnpm run test
 
   # The packed-consumer gate is a separate job, not another step in `check`, because it
   # tests a different thing and fails for different reasons: `check` proves the source
