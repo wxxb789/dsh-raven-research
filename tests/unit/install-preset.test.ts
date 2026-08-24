@@ -26,6 +26,25 @@ import {
 
 const run = promisify(execFile)
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
+
+/**
+ * An absolute path on the platform the test is RUNNING on.
+ *
+ * Drive-letter fixtures like `Q:/checkout` are absolute on Windows and merely
+ * relative on Linux, where `resolve()` then prefixes the working directory —
+ * which is how a suite written on Windows passed locally and failed in CI with
+ * `/home/runner/work/…/Q:/checkout/…`. The behaviour under test is base
+ * RESOLUTION, not drive letters, so each fixture gets a root its own platform
+ * agrees is absolute.
+ * @param drive - the Windows drive letter this fixture used.
+ * @param parts - path segments below it.
+ * @returns an absolute path.
+ */
+function absolute(drive: string, ...parts: string[]): string {
+  return process.platform === 'win32'
+    ? join(`${drive}:\\`, ...parts)
+    : join('/', drive.toLowerCase(), ...parts)
+}
 // The BUILT bin, which is what `dsh-raven-install-preset` runs. Spawning the
 // TypeScript source through tsx instead would pay a compile per run, and several
 // runs of that is slower than the work under test.
@@ -159,13 +178,13 @@ describe('installer arguments', () => {
 
 describe('base resolution', () => {
   it('looks in the user preset root, then each --base-root, then the checkout', () => {
-    process.env.DSH_CHECKOUT = join('Q:', 'checkout')
+    process.env.DSH_CHECKOUT = absolute('Q', 'checkout')
     try {
-      const candidates = baseCandidates('code', [join('X:', 'roots')], join('Y:', '.agent-presets'))
+      const candidates = baseCandidates('code', [absolute('X', 'roots')], absolute('Y', '.agent-presets'))
       expect(candidates).toHaveLength(3)
-      expect(candidates[0]).toBe(join('Y:', '.agent-presets', 'code'))
-      expect(candidates[1]).toBe(join('X:', 'roots', 'code'))
-      expect(candidates[2]).toBe(join('Q:', 'checkout', 'apps', 'cli', 'config', 'agent-presets', 'code'))
+      expect(candidates[0]).toBe(join(absolute('Y', '.agent-presets'), 'code'))
+      expect(candidates[1]).toBe(join(absolute('X', 'roots'), 'code'))
+      expect(candidates[2]).toBe(join(absolute('Q', 'checkout'), 'apps', 'cli', 'config', 'agent-presets', 'code'))
     } finally {
       delete process.env.DSH_CHECKOUT
     }
@@ -173,16 +192,16 @@ describe('base resolution', () => {
 
   it('omits the checkout candidate when DSH_CHECKOUT is unset', () => {
     delete process.env.DSH_CHECKOUT
-    expect(baseCandidates('code', [], join('Y:', '.agent-presets'))).toHaveLength(1)
+    expect(baseCandidates('code', [], absolute('Y', '.agent-presets'))).toHaveLength(1)
   })
 
   it('names every location tried when nothing carries the base', () => {
-    const message = baseNotFound('code', [join('A:', 'code'), join('B:', 'code')]).join('\n')
+    const message = baseNotFound('code', [absolute('A', 'code'), absolute('B', 'code')]).join('\n')
     // The operator is the only one who knows where this deployment keeps its
     // presets, so the failure has to be actionable rather than merely true.
     expect(message).toContain('base preset "code" not found')
-    expect(message).toContain(join('A:', 'code', 'agent.cordis.yml'))
-    expect(message).toContain(join('B:', 'code', 'agent.cordis.yml'))
+    expect(message).toContain(join(absolute('A', 'code'), 'agent.cordis.yml'))
+    expect(message).toContain(join(absolute('B', 'code'), 'agent.cordis.yml'))
     expect(message).toContain('--base-root')
     expect(message).toContain('config/agent-presets')
   })
@@ -198,17 +217,26 @@ describe('include path', () => {
     expect(includePath(windows).startsWith('file:///')).toBe(true)
   })
 
-  it('survives the include\'s own resolution, where a bare path does not', () => {
+  it('survives the include\'s own resolution', () => {
+    const file = absolute('Q', 'presets', 'code', 'agent.cordis.yml')
+    const baseUrl = pathToFileURL(absolute('Q', 'home', '.agent-presets', 'raven', 'agent.cordis.yml')).href
+    // What the include does, in the order it does it.
+    expect(fileURLToPath(new URL(includePath(file), baseUrl))).toBe(file)
+  })
+
+  // Windows only, because the failure IS the drive letter: `Q:` is a valid URL
+  // scheme, so `new URL` hands `fileURLToPath` a `q:` URL instead of resolving
+  // the path relative to the base. On POSIX the same string is an ordinary
+  // relative path and there is nothing to assert.
+  it.skipIf(process.platform !== 'win32')('rejects a bare drive-letter path', () => {
     const windows = join('Q:', 'presets', 'code', 'agent.cordis.yml')
     const baseUrl = pathToFileURL(join('Q:', 'home', '.agent-presets', 'raven', 'agent.cordis.yml')).href
-    // What the include does, in the order it does it.
-    expect(fileURLToPath(new URL(includePath(windows), baseUrl))).toBe(windows)
     expect(() => fileURLToPath(new URL(windows, baseUrl))).toThrow(/scheme/i)
   })
 
   it('round-trips a path containing spaces', () => {
-    const spaced = join('Q:', 'my presets', 'code', 'agent.cordis.yml')
-    const baseUrl = pathToFileURL(join('Q:', 'home', 'raven', 'agent.cordis.yml')).href
+    const spaced = absolute('Q', 'my presets', 'code', 'agent.cordis.yml')
+    const baseUrl = pathToFileURL(absolute('Q', 'home', 'raven', 'agent.cordis.yml')).href
     expect(fileURLToPath(new URL(includePath(spaced), baseUrl))).toBe(spaced)
   })
 })
