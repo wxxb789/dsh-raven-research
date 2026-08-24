@@ -158,20 +158,26 @@ settings 命名空间是唯一无法隔离的界面，因为设置页面是一�
 > [!WARNING]
 > **这会故意破坏隔离。** 卡片是一个全局页面；挂载 host 行会让 Raven 在*每一个*模式的 Settings 中可见，包括那些永远不会提供 `raven_task` 的模式。仅当比起在 `code` 模式中出现 Raven 卡片你更讨厌编辑 YAML 时，才进行此操作。
 
-Raven 声明了 Profile Bundle，因此可以显式挂载 host 行：
+`dsh plugin add` **不会**替你完成这一步。Raven 不声明 `dsh.bundle`，安装时 CLI 会明确告知 —— *installed as a
+plain dependency, not a profile layer*。这个「缺席」正是隔离本身；挂载这一行是一个刻意的动作。
 
-```bash
-dsh plugin --profile <name> add dsh-raven-research
-```
+把这一行贴进你自己 profile 的覆盖层 `$DSH_HOME/profiles/<name>/cordis.patch.yml`，它在每个 bundle 层之后应用：
 
 ```yaml
-# 来自 cordis.patch.yml 的 host 行 —— 为选择性开启项，非正常安装的一部分
+# Raven 的选择性开启 host 行：为了设置卡片，且知道代价。
+# `role: host` 只注册 `raven-research` settings 命名空间与挂载期能力告警。
+# 不注册 `raven_task`、不注册提示词段、不注册每步 Task 上下文 —— 那些属于 `role: agent`，
+# 由 `raven` preset 挂载。其它模式得到的是一张卡片，不是一个工具。
+# 删掉这一条即可回到完全隔离。
 - insert:
     - id: raven-research
       name: dsh-raven-research
       config:
         role: host
 ```
+
+之后需要重启应用：组合只在启动时读取，浏览器半边也依据运行中的 loader entries 加载，
+所以在这一行存在之前启动的进程里，卡片不可能出现。
 
 挂载卡片后，preset 行的 `config:` 将成为*基础层*：用户 `settings.yaml` 中存储的值会在组合 provider 时覆盖它，如果它被移除，preset 值将再次成为权威配置。支持同时挂载两个角色 —— 双重挂载检查仅在同一个角色被挂载两次时发出警告。
 

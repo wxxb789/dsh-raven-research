@@ -181,20 +181,28 @@ file:
 > from *every* mode's Settings, including modes that will never offer `raven_task`. Do this only if editing YAML is
 > worse for you than a Raven card appearing in `code` mode.
 
-Raven declares a Profile Bundle, so the host row can be mounted explicitly:
+`dsh plugin add` will NOT do this for you. Raven declares no `dsh.bundle`, and the CLI says so when you install
+it — *installed as a plain dependency, not a profile layer*. That absence is the isolation; mounting the row is a
+deliberate act.
 
-```bash
-dsh plugin --profile <name> add dsh-raven-research
-```
+Paste the row into your profile's own overlay, `$DSH_HOME/profiles/<name>/cordis.patch.yml`, which is applied
+after every bundle layer:
 
 ```yaml
-# the host row, from cordis.patch.yml — an opt-in, not part of the normal install
+# Raven's opt-in host row: the settings card, deliberately.
+# `role: host` registers ONLY the `raven-research` settings namespace and the mount-time
+# capability warning. No `raven_task`, no prompt section, no per-step Task context — those
+# belong to `role: agent`, which the `raven` preset mounts. Other modes gain a card, not a tool.
+# Delete this entry to return to full isolation.
 - insert:
     - id: raven-research
       name: dsh-raven-research
       config:
         role: host
 ```
+
+Restart the app afterwards: the composition is read at boot, and the browser half is loaded from the live loader
+entries, so a card cannot appear in a process that started before the row existed.
 
 With the card mounted, the preset row's `config:` becomes the *base layer*: a value stored in the user's
 `settings.yaml` overrides it while the provider is composed, and the preset values become authoritative again if
