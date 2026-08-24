@@ -10,6 +10,115 @@ tested compatibility family.
 
 ## [Unreleased]
 
+### Raven is now a selectable mode
+
+`RavenConfig` gains `role: 'host' | 'agent' | 'both'`, and Raven ships as an agent
+preset so it can be chosen as a **mode** in the new-session UI. Raven is now
+ISOLATED to that mode: the package contributes nothing — no tool, no prompt
+section, no settings card — until a session is started in Raven mode. See
+[ADR 0006](./docs/adr/0006-raven-as-a-mode.md).
+
+#### Added
+
+- **The Raven mode, inheriting your deployment's own `code` preset LIVE.**
+  `presets/raven/preset.yml` ships the roster entry; the composition is GENERATED. A
+  preset's `agent.cordis.yml` is the whole agent — persona, tools, shell, compaction —
+  so a one-row preset would boot an agent with no persona or shell, and a shipped copy
+  of a Harness composition would drift silently inside this package. So the installed
+  composition is a ~2 KB file of TWO TOP-LEVEL SIBLING ROWS: one `cordis:include` row
+  whose `path` is the base composition, and Raven's own row beside it at the same
+  level. The include reads that file at MOUNT time, so **a Harness upgrade changes what
+  Raven mode inherits on the next session** — nothing to re-sync, no copy to go stale.
+- **`dsh-raven-install-preset`, a shipped bin.** Writes
+  `$DSH_HOME/.agent-presets/raven` (`$DSH_HOME` defaults to `~/.dsh`), the user preset
+  root `@deepseek-ai/dsh-agent-presets` already scans. It resolves a base preset
+  (`--base <id>`, default `code`) from `$DSH_HOME/.agent-presets`, each `--base-root`,
+  then `$DSH_CHECKOUT`'s shipped presets, and **fails naming every location it tried**
+  when it finds none. Idempotent in both modes, refuses to overwrite a differing copy
+  without `--force`, and supports `--dry-run`. It deliberately is not a bundle patch of
+  the `agent-presets` row: a patch replaces a row's whole config by id, so it would
+  restate that row's `default` and `roots` as a silently overriding copy.
+- **The installer never touches the Harness.** Raven is a plugin OF a deployment, not a
+  co-owner of it: every write lands inside `$DSH_HOME/.agent-presets/raven`, and no file
+  outside it is written, moved, renamed, or has an attribute changed — not one bit of a
+  file mode. The installer contains no permission change and offers no flag that performs
+  one. Its complete flag set is `--force`, `--dry-run`, `--snapshot`, `--base <id>` and
+  `--base-root <dir>`.
+- **The destructive-write hazard is REAL, and the sibling shape is the guard.**
+  `Include` rebases its child tree onto the directory of the file it included, so a row
+  inserted through the include's `patches` list resolves `dsh-raven-research` from inside
+  the Harness install, where it is not installed. The include fails to apply and the
+  failing tree is written back as `[]`. Nothing suppresses that write: a nested include is
+  instantiated from the plain `Include`, not the `PresetTree` subclass whose `write()` is
+  a no-op. **This truncated a real file** — a deployment's shipped `code` preset went from
+  13605 bytes to 3. A side-by-side run over a copy of that base reproduced it exactly: the
+  patched shape left a 3-byte base; the sibling shape mounted and left the base at 13605
+  bytes, with host-only tools `[]`, roster `["raven"]` and a 1981-byte installed file. The
+  guard is emitting a shape that RESOLVES, not a permission bit on a file this package does
+  not own.
+- **Detection as well, for a base something else wrote.** The generated
+  header records the base file's `sha256`, and every later run compares it. A base that
+  merely moved on is reported as **expected after a Harness upgrade, with nothing to do**
+  because live inheritance already picked it up — and the run still exits zero as up to
+  date, since the digest is detection state rather than installed identity. A base whose
+  content now contains Raven's own row is a **warning** naming the file and telling the
+  operator to restore it from their Harness install, because this installer cannot have
+  written it. Detection costs nothing and touches nothing.
+- **The include `path` is written as a `file://` URL.** The include resolves it with
+  `new URL(path, ctx.baseUrl)` then `fileURLToPath`, and a bare Windows absolute path is
+  not relative-resolved at all — in `Q:\…` the `Q:` parses as a URL *scheme*, so
+  `fileURLToPath` rejects it with `ERR_INVALID_URL_SCHEME`. Covered by tests on
+  Windows-shaped paths, including one containing spaces.
+- **`--snapshot`, the fallback for a deployment that would rather not depend on a file
+  outside this package.**
+  Composes a copy at install time: the base's own text, verbatim so its comments
+  survive, followed by exactly one `role: agent` row, under a generated header recording
+  the base id, its source path, and a `sha256` digest of its bytes. `--snapshot --force`
+  is its re-sync path. This is the previous default, demoted.
+- **`role` in `RavenConfig`,** defaulting to `both`, so an existing out-of-tree row that
+  names no role keeps working unchanged.
+- **Raven's configuration in the preset row.** The row the installer inserts carries its
+  own `config:` block — the same fields the settings card edited — so a deployment
+  configures Raven where the mode is defined, in a file scoped to exactly the mode that
+  mounts it. The shipped fragment lists every field at its default and commented out, so
+  an operator can see what is configurable without reading the README first. With the
+  card opted into, those values become the base layer `settings.yaml` overrides, exactly
+  as before.
+
+#### Changed
+
+- **The bundled `cordis.patch.yml` host row now carries `role: host`,** registering only
+  the settings namespace and the mount-time capability warning. The namespace is the one
+  thing that genuinely needs a process-wide mount: served only inside a preset, its card
+  would appear and vanish with a session using that preset.
+- **`examples/agent-row.cordis.yml` now carries `role: agent`.** With the roles split,
+  mounting both planes no longer registers `raven_task` twice.
+
+#### Behaviour to know about
+
+- **`raven_task` now exists only in Raven mode.** Other modes no longer see it; that is
+  the point of the change, but it is a behaviour change for anyone relying on the tool
+  being globally present.
+- **There is no settings card by default, and that is the isolation trade.** A settings
+  page is a GLOBAL surface: a card served from the host plane is visible from every mode,
+  which is exactly what isolation forbids, and a card served from inside the preset would
+  appear and vanish with a session. The two cannot both be had, so isolation was chosen
+  and Raven's settings are edited in the preset row instead of in the UI. A deployment
+  that would rather have the card mounts the host row itself as an explicit opt-in and
+  accepts that Raven becomes visible from every mode's Settings. The mount-time
+  capability warning rode that row and is gone by default with it.
+- **An Agent Team no longer shares one in-memory Task book.** An agent-role mount gives
+  each agent scope its own plugin instance, so each member falls back to what its own
+  durable session log carries. The durable path is unchanged and still rebuilds a Task
+  on replay.
+- **The mode now depends on a file OUTSIDE this package.** The installed composition
+  names an absolute path into your `config/agent-presets`, so moving or deleting that
+  base preset breaks the mode at mount time, where a copy would merely have gone stale.
+  Nothing about that file is modified to make this work — it is read, never written.
+- **Only `--snapshot` installs can go stale.** A Harness upgrade does not reach a
+  snapshot copy, so `dsh-raven-install-preset --snapshot --force` remains its re-sync
+  path. A default (live) install needs no re-sync at all.
+
 ### Evidence-integrity and durability hardening
 
 This entry **does** change model-facing behaviour. Every item was reproduced before it

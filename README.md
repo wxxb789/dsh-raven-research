@@ -134,46 +134,181 @@ pnpm add /path/to/dsh-raven-research-0.1.0.tgz
 The tarball installs with no runtime dependency of its own; the deployment supplies the peers. They are peers rather than dependencies on purpose: a profile installs plugins with `autoInstallPeers: false` so they fall through to the running installation and every plugin shares one cordis instance. Once the package
 is published, the equivalent dependency is `dsh-raven-research@0.1.0`.
 
-### 3. Enable it
+### 3. Raven is isolated to its own mode
 
-Raven declares a Profile Bundle (`dsh.bundle.patch` in `package.json`), so the Harness CLI can mount it for you:
+**Raven contributes nothing until a session is started in Raven mode.** In `code` mode, in any other mode, and on
+every settings page, this package is invisible: no `raven_task` in the tool catalog, no system-prompt section, no
+pre-step Task context, and no settings card. Choosing the mode is the act of asking for Raven, and it is the only
+way to get it.
+
+That is why installing Raven is **one** step — step 4, the mode — and not two. Raven splits by `role`:
+
+| Role | Mounted by | Registers | Isolated? |
+| --- | --- | --- | --- |
+| `role: agent` | the `raven` agent preset, step 4 | `raven_task`, its system-prompt section, the pre-step Task context, and the `tools/code-dispatch-log` waterfall | yes — scoped to the mode |
+| `role: host` | nothing, by default | the `raven-research` settings namespace (the Settings → Plugins card) and the mount-time capability warning | **no** — a settings page is global |
+
+The `tools/code-dispatch-log` waterfall does **not** need the host plane: event admission extends up the scope
+chain and that event is scoped to `dispatch.agent`, so an agent-scoped listener still receives its own agent's Code
+Mode sub-dispatches. Nothing the agent half needs is process-wide.
+
+The settings namespace is the one surface that cannot be isolated, because a settings page is a *global* surface: a
+card served from the host plane is visible from every mode, and a card served from inside the preset would appear
+and vanish with a session using that preset. Isolation and the card cannot both be had — so isolation wins, and
+**Raven is configured in the preset row instead**, in the `config:` block of the row the installer inserts. Every
+field is listed there at its default and commented out, so you can see what is configurable without leaving the
+file:
+
+```yaml
+- id: raven-research
+  name: dsh-raven-research
+  config:
+    role: agent
+    # sourceVerification: remote
+    # sourceCheckTimeoutMs: 20000
+    # searchMaxQueries: 4
+    # proseLayout: sentence-per-line
+    # …
+```
+
+<details>
+<summary><b>Opt-in: the settings card, and the isolation it costs</b></summary>
+
+<br>
+
+> [!WARNING]
+> **This breaks isolation, deliberately.** The card is a global page; mounting the host row makes Raven visible
+> from *every* mode's Settings, including modes that will never offer `raven_task`. Do this only if editing YAML is
+> worse for you than a Raven card appearing in `code` mode.
+
+Raven declares a Profile Bundle, so the host row can be mounted explicitly:
 
 ```bash
 dsh plugin --profile <name> add dsh-raven-research
 ```
 
-That appends the package to the profile's `dsh.profile.bundles`, and the bundled
-[`cordis.patch.yml`](./cordis.patch.yml) inserts one row on the **host plane**:
-
 ```yaml
+# the host row, from cordis.patch.yml — an opt-in, not part of the normal install
 - insert:
     - id: raven-research
       name: dsh-raven-research
+      config:
+        role: host
 ```
 
-Host plane is deliberate. Raven publishes no Service, so the usual host-plane criterion does not apply; what does
-apply is that two of the things it registers are process-wide. Its settings namespace can only be offered while
-something serves it — mounted only inside a preset, `raven-research` would appear in the settings UI exactly while
-a session using that preset happened to be alive, and vanish between sessions. The `tools/code-dispatch-log`
-waterfall, which carries the durable record of a Task step taken from inside `run_code`, is process-wide for the
-same reason. Because `tools` and `system-prompt` are layered registries, a host row lands in the global layer and
-every agent sees `raven_task` without opting in.
+With the card mounted, the preset row's `config:` becomes the *base layer*: a value stored in the user's
+`settings.yaml` overrides it while the provider is composed, and the preset values become authoritative again if
+it goes away. Mounting both roles is supported — the double-mount check only warns when the same role is mounted
+twice.
+
+</details>
+
+### 4. Install the Raven mode
+
+The agent half reaches a session as an agent preset — which is what a **mode** in the new-session UI is. Install it
+with the bin this package provides:
+
+```bash
+npx dsh-raven-install-preset
+```
+
+That writes `$DSH_HOME/.agent-presets/raven` (`$DSH_HOME` defaults to `~/.dsh`), the user preset root
+`@deepseek-ai/dsh-agent-presets` already scans.
+
+**The mode INHERITS your deployment's own `code` preset, live.** A preset's `agent.cordis.yml` is the *whole*
+agent composition — persona, tools, shell, compaction — not an overlay on a default, so a preset containing only
+Raven's row would boot an agent with no persona, no tools and no shell. The installer therefore:
+
+1. resolves a base preset — `--base <id>`, defaulting to `code` — by looking in `$DSH_HOME/.agent-presets`, then
+   each `--base-root <dir>` you pass, then `$DSH_CHECKOUT/apps/cli/config/agent-presets` when `DSH_CHECKOUT` is
+   set. If none of them carries it, the installer **fails naming every location it tried** and tells you to pass
+   `--base-root` pointing at your deployment's `config/agent-presets`, rather than inventing a composition;
+2. writes `raven/agent.cordis.yml` as a ~2 KB composition of **two top-level sibling rows**: one
+   `cordis:include` row whose `path` is that base composition, and beside it, at the same level of the same
+   document, one `dsh-raven-research` row with `config: { role: agent }`. That second row is the whole
+   difference from the base;
+3. puts a generated header on top naming the base preset id, the path it is read from, and the fact that this is
+   **not** a snapshot.
+
+```yaml
+# $DSH_HOME/.agent-presets/raven/agent.cordis.yml — the whole file, minus its header
+- id: inherited-code
+  name: cordis:include
+  config:
+    # a file:// URL: the include resolves this with new URL(path, baseUrl) then
+    # fileURLToPath, and a bare Windows path like Q:\… parses as a URL *scheme*
+    path: file:///path/to/your/config/agent-presets/code/agent.cordis.yml
+
+# Raven's row is a SIBLING of the include above — never inside its `patches` list.
+- id: raven-research
+  name: dsh-raven-research
+  config:
+    role: agent
+```
+
+> [!IMPORTANT]
+> **This is live inheritance, not a copy.** `cordis:include` reads that file at *mount* time, so upgrading the
+> Harness changes what Raven mode inherits on the very next session — there is nothing to re-sync and no copy to go
+> stale.
+
+> [!IMPORTANT]
+> **The installer never touches your Harness.** Raven is a plugin *of* a deployment, not a co-owner of it. Every
+> write it makes lands inside `$DSH_HOME/.agent-presets/raven`. Your preset files are read and never written,
+> moved, renamed — not even a permission bit is changed.
+
+> [!WARNING]
+> **Why the row is a sibling, and must never move into `patches`.** `Include` rebases its child tree onto the
+> directory of the file it included. A row inserted through the include's `patches` list therefore resolves
+> `dsh-raven-research` from inside your **Harness install**, where it is not installed; the include fails to
+> apply; and the failing tree is written back as `[]`. Nothing suppresses that write — a nested include is
+> instantiated from the plain `Include`, not the `PresetTree` subclass whose `write()` is a no-op.
+> **This truncated a real file:** a deployment's shipped `code` preset was found at 3 bytes, down from 13605.
+
+A side-by-side run over a copy of that same base reproduced it exactly. The patched shape failed to mount and left
+a 3-byte base. The sibling shape this installer writes mounted cleanly and left the base untouched:
+
+```text
+HOST-ONLY tools: []
+roster:            ["raven"]
+installed file:    1981 bytes
+base after mount:  13605 bytes (unchanged)
+```
+
+Both rows resolve from the installed preset directory, the base is read live and never written, and `raven_task`
+appears only in the preset's scope. Your base file stays writable and is left exactly as it was — the guard is
+emitting a shape that **resolves**, not a permission bit on a file this package does not own. Separately, in case
+something *else* writes your base, the installer **detects** it, which costs nothing and touches nothing:
+
+| what a re-run finds | what it says |
+| --- | --- |
+| base digest unchanged | nothing; the mode is up to date |
+| base changed | that this is expected after a Harness upgrade, and **nothing needs doing** — live inheritance already picked it up. Still exits zero |
+| base now contains Raven's own row | a **warning** naming the file, saying this installer never writes it, and telling you to restore it from your Harness install |
+
+`--snapshot` remains for a deployment that would rather not depend on a file outside this package. It composes a
+**copy** — the base's comments preserved by concatenating *text* rather than re-emitting YAML — and that copy goes
+stale on a Harness upgrade; `--snapshot --force` re-syncs it.
+
+The installer is idempotent in both modes: a re-run that would change nothing says so, and a live install whose base
+moved on is *still* up to date, because it never copied it. It refuses to overwrite a differing copy without
+`--force`. Use `--dry-run` to see what it would do without touching anything.
 
 <details>
-<summary><b>Alternative: scope Raven to one agent preset</b></summary>
+<summary><b>Alternative: add Raven to a preset you already maintain</b></summary>
 
 <br>
 
-To give Raven to a single preset instead, skip the bundle and append the row from
-[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) to that preset's `cordis.yml`:
+To put Raven inside an existing preset rather than give it its own mode, skip the installer and append the row from
+[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) to that preset's `agent.cordis.yml`:
 
 ```yaml
 - id: raven-research
   name: dsh-raven-research
-  # Optional base layer for the raven-research settings namespace:
-  # config:
-  #   sourceVerification: remote
-  #   sourceCheckTimeoutMs: 30000
+  config:
+    role: agent
+    # Optional base layer for the raven-research settings namespace:
+    # sourceVerification: remote
+    # sourceCheckTimeoutMs: 30000
 ```
 
 > [!WARNING]
@@ -183,14 +318,22 @@ To give Raven to a single preset instead, skip the bundle and append the row fro
 
 </details>
 
-> [!WARNING]
-> **Do not do both.** The same package mounted on the host plane and inside a preset registers `raven_task` twice,
-> into two different layers.
+> [!NOTE]
+> The mode is the whole install. The host row is an opt-in that trades isolation for the settings card — see
+> [step 3](#3-raven-is-isolated-to-its-own-mode). With the roles split they do not overlap, so mounting both does
+> not register `raven_task` twice.
 
-### 4. Verify
+> [!IMPORTANT]
+> Because the agent half is mounted per agent scope, each scope gets its own plugin instance and therefore its own
+> **in-memory** Task book. An Agent Team no longer shares one in-memory book; each member falls back to what its own
+> durable session log carries. Task state still survives replay — see
+> [One Task book, two durability paths](#one-task-book-two-durability-paths).
 
-Start the Harness and ask the agent for something substantive (see [Usage](#usage)). Raven is live when a
-`raven_task` call appears in the transcript and a Checkpoint arrives before the final answer.
+### 5. Verify
+
+Start the Harness, pick **Raven** as the mode for a new session, and ask the agent for something substantive (see
+[Usage](#usage)). Raven is live when a `raven_task` call appears in the transcript and a Checkpoint arrives before
+the final answer.
 
 ## Upgrade
 
@@ -211,10 +354,20 @@ pnpm add /path/to/dsh-raven-research-<version>.tgz
 pnpm keys a local tarball by its integrity hash, so new bytes are picked up even when the version string is
 unchanged; if a deployment still serves the old build, run `pnpm install --force`.
 
+A default (live) install needs **no** re-sync after a Harness upgrade — that is the point of it. Re-run the
+installer only if you installed with `--snapshot`:
+
+```bash
+npx dsh-raven-install-preset --snapshot --force
+```
+
 Two things to check before upgrading:
 
 - **Harness pin.** Compare `dshRaven.harnessVersion` in `package.json` with the Harness you actually run. Raven is
   pinned to one RC and does not claim compatibility with untested versions.
+- **Base.** A live install tracks the upgraded base automatically. A `--snapshot` install does not: upgrading the
+  *Harness* is exactly the case that leaves the copy inlined into `raven/agent.cordis.yml` stale, and running the
+  installer without `--force` reports that before changing anything.
 - **Settings.** `raven-research` values stored in the user's `settings.yaml` survive the reinstall; the preset
   `config:` block is only the base layer.
 
@@ -223,13 +376,15 @@ Two things to check before upgrading:
 
 ## Uninstall
 
-1. Remove Raven from the profile bundle:
+1. Remove the Raven mode. It is a directory, so deleting it is the whole step:
 
    ```bash
-   dsh plugin --profile <name> remove dsh-raven-research
+   rm -rf "${DSH_HOME:-$HOME/.dsh}/.agent-presets/raven"
    ```
 
-   If you mounted the preset row instead, delete the `- id: raven-research` row from that preset's `cordis.yml`.
+   If you mounted the row into a preset you maintain instead, delete the `- id: raven-research` row from that
+   preset's `agent.cordis.yml`. If you opted into the settings card, also remove the host row from the profile
+   bundle with `dsh plugin --profile <name> remove dsh-raven-research`.
 
 2. Remove the package from the deployment:
 
@@ -237,7 +392,7 @@ Two things to check before upgrading:
    pnpm remove dsh-raven-research
    ```
 
-3. Optional: drop the `raven-research` section from the user's `settings.yaml`.
+3. Optional: drop the `raven-research` section from the user's `settings.yaml`, if you ever opted into the card.
 
 Every Raven registration — the `raven_task` tool, the prompt section, the `agent/pre-step` listener, the
 `tools/code-dispatch-log` listener, the settings section, and the browser card — is disposer-backed and owned by its
@@ -245,13 +400,17 @@ Cordis fiber, so unloading removes all of it and leaves no orphaned tool or prom
 exactly that disposal path against a real Harness Loader). Restart the Harness if your deployment does not reload
 the composition on change.
 
-Nothing else is left behind: Raven owns no database, no cache, and no files. Task state lives in the Harness session
+Nothing else is left behind: Raven owns no database and no cache, and writes no files at runtime (the preset
+directory the installer writes is what step 2 removes). Task state lives in the Harness session
 log, and anything you exported is a plain llm-wiki repository you already own.
 
 ## Usage
 
-There is no launch phrase and no separate Raven UI — users talk to the Harness agent normally, and the model drives
-the Task lifecycle.
+`raven_task` is registered by the `raven` agent preset, so it exists **only in Raven mode**. Pick that mode when
+starting the session; in any other mode the agent has no Raven tool and will answer without a Task.
+
+Within Raven mode there is no launch phrase and no separate Raven UI — users talk to the Harness agent normally,
+and the model drives the Task lifecycle.
 
 ```text
 Research the strongest primary-source evidence for and against this policy. Show me

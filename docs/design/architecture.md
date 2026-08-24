@@ -542,13 +542,87 @@ card.
 
 ### Composition surfaces
 
-The package declares `dsh.bundle.patch`, so `dsh plugin add` appends it to a profile's
-bundle list and `cordis.patch.yml` inserts one host-plane row. Host plane rather than
-an Agent Preset, deliberately: Raven publishes no Service, but its settings namespace
-and its `tools/code-dispatch-log` waterfall are both process-wide, and a namespace
-served only while a session using one preset happens to be alive would appear and
-vanish in the settings UI. `examples/agent-row.cordis.yml` remains the preset-scoped
-alternative; mounting both registers `raven_task` twice into two different layers.
+Raven composes in two halves, split by the `role` setting (`host` | `agent` | `both`,
+defaulting to `both` so a row naming no role keeps today's behaviour).
+
+The package declares NO `dsh.bundle.patch`, and that absence is the isolation
+guarantee. Declaring it is exactly what makes `dsh plugin add` append a package to a
+profile's bundle list, and the row that follows would register the `raven-research`
+settings namespace — which is served process-wide, on a settings page that is global,
+so a user sitting in any other mode would see a Raven card. The same row decides the
+browser half: `dsh web` loads a package's client bundle only for a package the
+composition names in a row, so no row means no card, no slot registration, and no
+Raven surface anywhere outside its own mode. Installing the package therefore
+contributes nothing until a session is started in Raven mode.
+
+`cordis.patch.yml` still ships, demoted from a bundle to an OPT-IN overlay: a
+deployment that wants the settings card pastes its row into the profile's own patch
+or boots with `--patch`, and accepts that the card is visible in every mode. Raven's
+own settings otherwise live on the agent row inside the preset, next to the mode they
+configure.
+
+The agent half — `raven_task`, the system-prompt section, the pre-step Task context,
+and the `tools/code-dispatch-log` waterfall — reaches a session as the `raven` AGENT
+PRESET, which is what makes Raven a selectable mode. `dsh-raven-install-preset` writes
+it into `$DSH_HOME/.agent-presets`, the root `@deepseek-ai/dsh-agent-presets`
+already scans via its own `includeUserRoot`; the bundle deliberately does not patch
+that plugin's row, because a patch replaces a row's whole config by id and would
+restate its `default` and `roots` as a silently overriding second copy.
+
+That preset is composed at install time and INHERITS its base rather than copying it.
+A preset's `agent.cordis.yml` is the whole agent — persona, tools, shell, compaction —
+so a package-shipped one-row preset would boot an agent with no persona or shell, and a
+package-shipped copy of a Harness composition would drift silently from the original.
+What the installer writes is two sibling rows: a `cordis:include` naming the
+deployment's own base preset, and Raven's row after it.
+
+Three facts about that shape were established by executing it against the real Harness,
+because each is the kind of thing a comment can assert and be wrong about.
+
+Raven's row must be a SIBLING of the include, never inserted through the include's own
+`patches` list. `Include` rebases its child tree onto the directory of the file it
+included, so a patched-in row resolves its bare package name from the Harness's own
+preset directory and fails with `Cannot find package`. A sibling row stays in the
+preset's tree, where `PresetTree.import()` resolves bare specifiers from the host
+composition's base — the profile that installed the package.
+
+The include is genuinely live. Changing the base file and mounting again in a fresh
+process changes what the mode composes, with no reinstall and nothing to re-sync. The
+unit of freshness is a process: a Harness upgrade reaches the mode at the next `dsh`
+start, not inside a running one.
+
+Including a WRITABLE base can destroy it, and this was observed rather than reasoned
+about. During development of this feature the deployment's own
+`apps/cli/config/agent-presets/code/agent.cordis.yml` was found truncated to `[]` —
+3 bytes, where 13605 belong — after an experiment mounted an include pointing at it and
+the mount failed. That is exactly the inherited write `PresetTree.write()` suppresses and
+a nested plain `Include` does not: the one that "in practice means truncating a shipped
+composition to `[]`". The file was restored from git and the incident is recorded here
+because it is the whole reason for the shape below.
+
+An earlier experiment appeared to show the opposite, and it was wrong in a way worth
+naming: the base it mounted was itself `[]`, so a truncating write produced a file
+identical to the one it started with. "Unchanged" could not distinguish no write from
+the write. A negative result about destruction needs a base whose content a write would
+visibly replace.
+
+So the installer REFUSES by default to point a live include at a writable base, names
+the file, and states both ways forward. It also records the base's `sha256`, which
+separates an ordinary upgrade — already picked up, since the include reads at mount —
+from a base that now contains Raven's own row, which would mean something wrote into it.
+
+A `--snapshot` mode remains for a deployment that would rather not depend on a file
+outside the package: it inlines the base's text, keeps its comments, records the same
+digest, and is re-synced with `--force`.
+
+The waterfall does not hold the tool on the host plane: event admission extends UP the
+scope chain and `tools/code-dispatch-log` is scoped to `dispatch.agent`, so an
+agent-scoped listener still receives its own agent's Code Mode sub-dispatches. The cost
+is that each agent scope gets its own plugin instance and therefore its own IN-MEMORY
+Task book, so an Agent Team falls back to what each member's durable session log
+carries. `examples/agent-row.cordis.yml` remains the hand-mounted preset-scoped
+alternative. With the roles split, mounting both planes no longer registers
+`raven_task` twice. See `docs/adr/0006-raven-as-a-mode.md`.
 
 ## Agreed test Seams
 

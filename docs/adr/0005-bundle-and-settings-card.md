@@ -1,6 +1,14 @@
 ---
 status: accepted
+superseded-in-part-by: 0006-raven-as-a-mode.md
 ---
+
+> [!NOTE]
+> The host-plane placement decided below is SUPERSEDED by
+> `0006-raven-as-a-mode.md`, which splits Raven by `role`: only the settings
+> namespace stays on the host plane, and the tool ships as a selectable mode.
+> Everything else here — the Profile Bundle contract and the browser settings
+> card, including its two accepted costs — still stands.
 
 # Ship Raven as a Profile Bundle on the Host plane, with a browser settings card
 

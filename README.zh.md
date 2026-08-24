@@ -36,8 +36,8 @@
 - **怎么实现：** 一个挂在 host plane 的 [Cordis](https://github.com/cordiverse/cordis) 插件、一个面向模型的
   `raven_task` 工具、一段紧凑的 prompt，以及 Web GUI 里的一张 settings 卡片。不引入第二个 agent runtime，
   不自带模型、向量库或数据库；研究与写作仍由现有 Harness agent 用自己的工具完成。
-- **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再执行
-  `dsh plugin --profile <name> add dsh-raven-research`。见[安装](#安装)。
+- **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再运行
+  `npx dsh-raven-install-preset`。见[安装](#安装)。
 - **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语，也没有独立的 Task UI。见[使用](#使用)。
 ## 为什么需要 Raven
 
@@ -123,44 +123,153 @@ pnpm add /path/to/dsh-raven-research-0.1.0.tgz
 
 tarball 自身没有任何运行时依赖，peer 由部署提供。声明为 peer 而非 dependency 是刻意的：profile 以 `autoInstallPeers: false` 安装插件，peer 因此穿透到运行中的 installation，所有插件共享同一个 cordis 实例。发布之后，等价依赖是 `dsh-raven-research@0.1.0`。
 
-### 3. 启用
+### 3. Raven 隔离在自己的模式中
 
-Raven 声明了 Profile Bundle（`package.json` 里的 `dsh.bundle.patch`），因此可以由 Harness CLI 直接挂载：
+**在未开启 Raven 模式的会话里，Raven 不提供任何功能。** 在 `code` 模式、在其他任何模式下，以及在所有设置页面上，本包都是不可见的：没有工具目录里的 `raven_task`，没有 system-prompt 段落，没有 pre-step Task 上下文，也没有 settings 卡片。选择该模式就是请求使用 Raven 的动作，也是获取它的唯一方式。
+
+这就是为什么安装 Raven 只有 **一个** 步骤 —— 第 4 步，安装模式 —— 而不是两个步骤。Raven 按 `role` 拆分：
+
+| 角色 (Role) | 由谁挂载 | 注册内容 | 是否隔离？ |
+| --- | --- | --- | --- |
+| `role: agent` | 第 4 步的 `raven` agent preset | `raven_task`、系统提示词段落、pre-step Task 上下文以及 `tools/code-dispatch-log` waterfall | **是** —— 作用域限定在模式内 |
+| `role: host` | 默认不挂载 | `raven-research` settings 命名空间（Settings → Plugins 卡片）与挂载时的能力告警 | **否** —— 设置页面是全局的 |
+
+`tools/code-dispatch-log` waterfall **并不**需要 host plane：事件准入沿作用域链向上扩散，且该事件的作用域为 `dispatch.agent`，因此限定在 agent 作用域的监听器依然能收到本 agent 自己的 Code Mode 子 dispatch。
+
+settings 命名空间是唯一无法隔离的界面，因为设置页面是一个*全局*界面：由 host plane 提供的卡片在任何模式下都可见，而如果从 preset 内部提供卡片，它会随使用该 preset 的会话出现和消失。隔离与卡片不可兼得 —— 因此隔离优先，**Raven 改为在 preset 行中进行配置**，即在安装器插入行中的 `config:` 块中配置。每个字段都在那里列出并带注释的默认值，因此无需离开文件即可查看可配置项：
+
+```yaml
+- id: raven-research
+  name: dsh-raven-research
+  config:
+    role: agent
+    # sourceVerification: remote
+    # sourceCheckTimeoutMs: 20000
+    # searchMaxQueries: 4
+    # proseLayout: sentence-per-line
+    # …
+```
+
+<details>
+<summary><b>选择性开启：settings 卡片及其破坏隔离的代价</b></summary>
+
+<br>
+
+> [!WARNING]
+> **这会故意破坏隔离。** 卡片是一个全局页面；挂载 host 行会让 Raven 在*每一个*模式的 Settings 中可见，包括那些永远不会提供 `raven_task` 的模式。仅当比起在 `code` 模式中出现 Raven 卡片你更讨厌编辑 YAML 时，才进行此操作。
+
+Raven 声明了 Profile Bundle，因此可以显式挂载 host 行：
 
 ```bash
 dsh plugin --profile <name> add dsh-raven-research
 ```
 
-该命令把这个包追加进 profile 的 `dsh.profile.bundles`，随包分发的
-[`cordis.patch.yml`](./cordis.patch.yml) 则在 **host plane** 插入一行：
-
 ```yaml
+# 来自 cordis.patch.yml 的 host 行 —— 为选择性开启项，非正常安装的一部分
 - insert:
     - id: raven-research
       name: dsh-raven-research
+      config:
+        role: host
 ```
 
-选择 host plane 是有意的。Raven 不发布 Service，所以通常那条 host-plane 判据并不适用；真正适用的是它注册的东西里
-有两样是进程级的。其一是 settings namespace —— 只有当有东西在提供它时配置界面才能呈现它；若只挂在某个 preset 内，
-`raven-research` 就只在恰好有会话使用该 preset 时出现在 settings UI 里，会话之间则消失。其二是
-`tools/code-dispatch-log` waterfall，它承载着在 `run_code` 内部推进 Task step 的持久记录，同理也是进程级的。
-又因为 `tools` 与 `system-prompt` 是分层注册表，host 行会落在全局层，每个 agent 无需选择加入即可看到 `raven_task`。
+挂载卡片后，preset 行的 `config:` 将成为*基础层*：用户 `settings.yaml` 中存储的值会在组合 provider 时覆盖它，如果它被移除，preset 值将再次成为权威配置。支持同时挂载两个角色 —— 双重挂载检查仅在同一个角色被挂载两次时发出警告。
+
+</details>
+
+### 4. 安装 Raven 模式
+
+agent 那一半以 agent preset 的形式进入会话 —— 而新建会话界面里的**模式（mode）**正是 agent preset。用本包提供的
+bin 安装：
+
+```bash
+npx dsh-raven-install-preset
+```
+
+它会写出 `$DSH_HOME/.agent-presets/raven`（`$DSH_HOME` 默认为 `~/.dsh`），也就是
+`@deepseek-ai/dsh-agent-presets` 本来就会扫描的用户 preset 根目录。
+
+**该模式实时继承（LIVE）部署本身的 `code` preset。** preset 的 `agent.cordis.yml` 是**完整的**
+agent composition —— persona、工具、shell、compaction —— 而不是叠加在某个默认值之上的覆盖层；因此一个只含 Raven
+这一行的 preset，启动出来会是没有 persona、没有工具、没有 shell 的 agent。所以安装器会：
+
+1. 寻找基础 preset（`--base <id>`，默认 `code`）：依次查找 `$DSH_HOME/.agent-presets`、你传入的每个
+   `--base-root <dir>`，以及设置了 `DSH_CHECKOUT` 时的 `$DSH_CHECKOUT/apps/cli/config/agent-presets`。若都没有，
+   安装器会**列出它尝试过的每一个位置**并报错退出，提示你用 `--base-root` 指向部署的 `config/agent-presets`，
+   而不是凭空编造一份 composition；
+2. 把 `raven/agent.cordis.yml` 写成约 2 KB 的 composition，内容是**两个顶层平级行（sibling rows）**：一个
+   `cordis:include` 行，其 `path` 为该基础 composition；以及在同一份文档的同一层级、与它并列的一个
+   `dsh-raven-research` 行（`config: { role: agent }`）。后面这一行就是它与基础 preset 的全部差异；
+3. 在文件顶部加一段生成的头部，记录基础 preset id、读取来源路径，以及该文件**不是**快照的事实。
+
+```yaml
+# $DSH_HOME/.agent-presets/raven/agent.cordis.yml — 完整文件（不含头部）
+- id: inherited-code
+  name: cordis:include
+  config:
+    # file:// URL：include 会先用 new URL(path, baseUrl) 再用
+    # fileURLToPath 来解析它；像 Q:\… 这样的纯 Windows 路径会被解析为 URL scheme 并引发 ERR_INVALID_URL_SCHEME 报错
+    path: file:///path/to/your/config/agent-presets/code/agent.cordis.yml
+
+# Raven 的行是上面这个 include 的**平级兄弟行**，绝不能放进它的 `patches` 列表。
+- id: raven-research
+  name: dsh-raven-research
+  config:
+    role: agent
+```
+
+> [!IMPORTANT]
+> **这是实时继承，而不是拷贝。** `cordis:include` 会在**挂载时**读取该文件，因此升级 Harness 就会在下一次会话中
+> 自动更新 Raven 模式继承的内容 —— 没有任何需要重新同步的东西，也没有会过期的拷贝。
+
+> [!IMPORTANT]
+> **安装器绝不会触碰你的 Harness。** Raven 是部署的插件（plugin *of* a deployment），而不是其共同所有者。它的每一次写入都落在 `$DSH_HOME/.agent-presets/raven` 内部。你的 preset 文件只会被读取，绝不会被写入、移动、重命名 —— 甚至连权限位（permission bit）都不会改变。
+
+> [!WARNING]
+> **为什么这一行必须是平级兄弟行，绝不能移入 `patches`。** `Include` 会把它的子树 rebase 到被包含文件所在的
+> 目录上。因此通过 include 的 `patches` 列表插入的行，会从你的 **Harness 安装目录**内部去解析
+> `dsh-raven-research` —— 而它并未安装在那里；于是 include 应用失败，失败后的树被写回为 `[]`。
+> 没有任何东西会抑制这次写入：嵌套 include 是由朴素的 `Include` 实例化的，而不是 `write()` 为空操作的
+> `PresetTree` 子类。**这已经真实地截断过文件：** 某个部署出厂的 `code` preset 被发现只剩 3 字节，原本是 13605 字节。
+
+在同一个基础文件的副本上做的对照运行精确复现了这一点：patch 形态挂载失败，并留下一个 3 字节的基础文件；而本安装器写出的平级兄弟形态挂载成功，基础文件毫发无损：
+
+```text
+HOST-ONLY tools: []
+roster:            ["raven"]
+installed file:    1981 bytes
+base after mount:  13605 bytes (unchanged)
+```
+
+两个行都从已安装的 preset 目录解析，基础文件被实时读取且从不写入，`raven_task` 仅出现在该 preset 的作用域内。你的基础文件保持可写，并保持完全原样 —— 真正的防护是输出一个**能够解析成功**的形态，而不是给一个本包并不拥有的文件加上权限位。另外，万一有**别的**东西写了你的基础文件，安装器会进行检测（detect）—— 这既无需任何成本，也不会触碰任何文件：
+
+| 重新运行时的检测结果 | 输出说明 |
+| --- | --- |
+| base digest 未变 | 无输出，模式已是最新 |
+| base 已改变 | 说明这是 Harness 升级后的预期情况，**无需任何操作**，因为 live inheritance 已经继承了变更。该次运行仍以 exit 0 视为最新 |
+| base 现在包含 Raven 自己的行 | **警告**，指名该文件，说明本安装器从不写入该文件，并要求操作者从其 Harness 安装中恢复它 |
+
+`--snapshot` 为不希望依赖本包之外文件的部署保留。它合成一份**拷贝** —— 通过拼接**文本**而不是重新序列化 YAML 来保留基础文件中的注释 —— 并且该拷贝会在 Harness 升级后过期；`--snapshot --force` 可对其重新同步。
+
+安装器在两种模式下均满足幂等性：如果重新运行不会改变任何内容，它会做出提示；在实时安装模式下，即使基础文件的内容发生了变化，重新运行**依然**是最新的，因为它从未拷贝过这些内容。没有 `--force` 时，它拒绝覆盖有差异的拷贝。使用 `--dry-run` 可以预览它将要执行的操作，而不会修改任何内容。
 
 <details>
-<summary><b>备选：把 Raven 限定在单个 agent preset</b></summary>
+<summary><b>备选：把 Raven 加进你已经维护的 preset</b></summary>
 
 <br>
 
-若只想给某一个 preset 使用，则跳过 bundle，把
-[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) 中的这一行追加到该 preset 的 `cordis.yml`：
+若想把 Raven 放进某个既有 preset 而不是让它独占一个模式，则跳过安装器，把
+[`examples/agent-row.cordis.yml`](./examples/agent-row.cordis.yml) 中的这一行追加到该 preset 的
+`agent.cordis.yml`：
 
 ```yaml
 - id: raven-research
   name: dsh-raven-research
-  # 可选：raven-research settings namespace 的 base 层
-  # config:
-  #   sourceVerification: remote
-  #   sourceCheckTimeoutMs: 30000
+  config:
+    role: agent
+    # 可选：raven-research settings namespace 的 base 层
+    # sourceVerification: remote
+    # sourceCheckTimeoutMs: 30000
 ```
 
 > [!WARNING]
@@ -169,13 +278,20 @@ dsh plugin --profile <name> add dsh-raven-research
 
 </details>
 
-> [!WARNING]
-> **两种方式不要同时使用。** 同一个包同时挂在 host plane 和 preset 内，会把 `raven_task` 注册两次、落进两个不同的层。
+> [!NOTE]
+> 模式即为完整的安装。host 行是一个选择性开启项，它用隔离换取了 settings 卡片 —— 见
+> [第 3 步](#3-raven-隔离在自己的模式中)。角色拆开后它们不再重叠，因此同时挂载两个角色不会将
+> `raven_task` 注册两次。
 
-### 4. 验证
+> [!IMPORTANT]
+> 由于 agent 那一半是按 agent scope 挂载的，每个 scope 会拿到自己的插件实例，因而拥有各自的**内存中** Task book。
+> Agent Team 不再共享同一份内存 book，每个成员回退到自己那份持久会话日志所承载的内容。Task 状态在 replay 时依然
+> 存活 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
 
-启动 Harness，向 agent 提一个有分量的请求（见[使用](#使用)）。当对话里出现 `raven_task` 调用、并且在最终答案之前
-先收到 Checkpoint，就说明 Raven 已经生效。
+### 5. 验证
+
+启动 Harness，为新会话选择 **Raven** 模式，向 agent 提一个有分量的请求（见[使用](#使用)）。当对话里出现
+`raven_task` 调用、并且在最终答案之前先收到 Checkpoint，就说明 Raven 已经生效。
 
 ## 升级
 
@@ -196,44 +312,56 @@ pnpm add /path/to/dsh-raven-research-<version>.tgz
 pnpm 以完整性哈希标识本地 tarball，因此即便版本号没变也会识别到新字节；若部署仍在用旧构建，执行
 `pnpm install --force`。
 
-升级前请确认两件事：
+默认（实时）安装在 Harness 升级后**无需**重新同步 —— 这正是实时继承的意义所在。仅当你是使用 `--snapshot` 安装时才需要重新运行安装器：
+
+```bash
+npx dsh-raven-install-preset --snapshot --force
+```
+
+升级前请确认三件事：
 
 - **Harness 锚定版本。** 比对 `package.json` 里的 `dshRaven.harnessVersion` 与你实际运行的 Harness。Raven 只锚定
   一个 RC，不宣称兼容未经测试的版本。
+- **Base 基础。** 实时安装会自动跟踪升级后的基础。`--snapshot` 安装则不会：升级 **Harness** 正是导致内联进
+  `raven/agent.cordis.yml` 的拷贝过期的原因，不加 `--force` 运行安装器会在修改任何东西之前进行报告。
 - **配置。** 存在用户 `settings.yaml` 里的 `raven-research` 取值会在重装后保留；preset 的 `config:` 块只是 base 层。
 
 > [!WARNING]
 > 进行中的 Task 存在会话里而不是磁盘上。换构建之前，先把它完成或 `export` 出来。
 
+
 ## 卸载
 
-1. 从 profile bundle 中移除 Raven：
+1. 删除 Raven 模式。它是一个目录，删除目录即完成了卸载：
 
    ```bash
-   dsh plugin --profile <name> remove dsh-raven-research
+   rm -rf "${DSH_HOME:-$HOME/.dsh}/.agent-presets/raven"
    ```
 
-   如果你当初用的是 preset 行，则从该 preset 的 `cordis.yml` 中删掉 `- id: raven-research` 这一行。
+   如果你是将该行追加到了自己维护的 preset 中，请从该 preset 的 `agent.cordis.yml` 中删除 `- id: raven-research` 行。如果你之前选择性开启了 settings 卡片，还需要从 profile bundle 中移除 host 行：`dsh plugin --profile <name> remove dsh-raven-research`。
 
-2. 从部署中移除依赖：
+2. 从部署中移除包：
 
    ```bash
    pnpm remove dsh-raven-research
    ```
 
-3. 可选：删掉用户 `settings.yaml` 中的 `raven-research` 段。
+3. 可选：如果你之前开启过 settings 卡片，从用户的 `settings.yaml` 中删除 `raven-research` 部分。
 
 Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pre-step` 监听器、`tools/code-dispatch-log`
 监听器、settings section 以及浏览器卡片 —— 都由 Cordis fiber 持有 disposer，卸载会把它们一并撤销，不会留下孤儿工具
 或残留 prompt 文本（`pnpm test:dsh` 正是针对真实 Harness Loader 验证这条释放路径）。如果你的部署不会在 composition
 变更时重载，请重启 Harness。
 
-除此之外没有任何残留：Raven 没有数据库、没有缓存、不写文件。Task 状态存在 Harness session log 中，导出的内容则是
-一个本来就属于你的普通 llm-wiki 仓库。
+除此之外没有任何残留：Raven 没有数据库、没有缓存；运行期不写任何文件（安装器写出的那个 preset 目录，正是上面第 2
+步删掉的东西）。Task 状态存在 Harness session log 中，导出的内容则是一个本来就属于你的普通 llm-wiki 仓库。
 
 ## 使用
 
-没有启动咒语，也没有独立的 Raven UI —— 用户照常和 Harness agent 对话，Task 生命周期由模型驱动。
+`raven_task` 由 `raven` agent preset 注册，因此它**只在 Raven 模式下存在**。请在新建会话时选择该模式；在其他任何
+模式下，agent 都没有 Raven 工具，会直接作答而不开 Task。
+
+在 Raven 模式内部，没有启动咒语，也没有独立的 Raven UI —— 用户照常和 Harness agent 对话，Task 生命周期由模型驱动。
 
 ```text
 研究支持与反对这项政策的最强一手证据。先给我一份早期发现提纲，继续推进，
