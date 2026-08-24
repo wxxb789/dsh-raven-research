@@ -1,28 +1,40 @@
-# Profile Bundle: mount Raven on the Host plane.
+# OPT-IN overlay: give Raven a host-plane row. Not applied by installing.
 #
-# `dsh plugin add dsh-raven-research` appends this package to the profile's
-# `dsh.profile.bundles` list because the manifest declares `dsh.bundle.patch`,
-# and this file is the whole of what that adds to the composition.
+# This file is shipped, and nothing applies it for you. The manifest deliberately
+# does NOT declare `dsh.bundle.patch`, so `dsh plugin --profile <name> add
+# dsh-raven-research` installs the package and contributes NOTHING to the
+# composition. That is the point: Raven is isolated to its own mode, and a mode
+# is chosen when a session starts.
 #
-# Host plane rather than an Agent Preset, deliberately. Raven publishes no
-# Service, so the usual host-plane criterion does not apply; what does apply is
-# that two of the things it registers are process-wide:
+# Why isolation costs this row. A settings namespace is served process-wide or
+# not at all, and the Settings page is global — so a host row means a Raven card
+# visible to a user sitting in any other mode. The browser half follows the same
+# rule: `dsh web` loads a package's client bundle only when the composition
+# carries a ROW naming that package, so with no row there is no card, no slot
+# registration, and no Raven surface anywhere outside its mode.
 #
-#   - its settings namespace, which a configuration surface can only offer while
-#     something is serving it. Mounted only inside a preset, `raven-research`
-#     would appear in the settings UI exactly while a session using that preset
-#     happened to be alive, and vanish between sessions.
-#   - the `tools/code-dispatch-log` waterfall, which carries the durable record
-#     of a Task step taken from inside `run_code`.
+# Raven's own settings therefore live on the agent row inside the `raven` preset,
+# next to the mode they configure, and `dsh-raven-install-preset` writes that row.
 #
-# `tools` and `system-prompt` are layered registries, so a host row lands in the
-# global layer and every agent sees `raven_task` without opting in. That is the
-# intended meaning of installing Raven: one row, available everywhere.
+# APPLY THIS ONLY IF you want the settings card and accept that it is visible in
+# every mode. Two supported ways:
 #
-# A deployment that wants Raven for ONE preset instead should skip this bundle
-# and add the row from `examples/agent-row.cordis.yml` to that preset's
-# `agent.cordis.yml`. Do not do both: the same package mounted in both planes
-# registers `raven_task` twice, into two different layers.
+#   - paste the row below into your profile's own `cordis.patch.yml`
+#     (`$DSH_HOME/profiles/<name>/cordis.patch.yml`), which is the profile's
+#     documented overlay; or
+#   - boot with it as an explicit overlay:
+#     `dsh --profile <name> --patch ./node_modules/dsh-raven-research/cordis.patch.yml`
+#
+# The row registers ONLY the `raven-research` settings namespace and the
+# mount-time capability warning: no tool, no system-prompt section, no pre-step
+# Task context, no code-dispatch-log listener. Those belong to `role: agent`,
+# which the preset mounts, and mounting BOTH is supported — the double-mount
+# check only warns when the same role is mounted twice.
+#
+# The decision that demoted this file from an auto-applied bundle to an opt-in
+# overlay is recorded with the mode decision in docs/adr/0006-raven-as-a-mode.md.
 - insert:
     - id: raven-research
       name: dsh-raven-research
+      config:
+        role: host

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -516,22 +516,34 @@ try {
   assert.equal(ctx.get('web'), undefined, 'removing the composition must dispose the web verification seam')
   assert.equal(ctx.get('settings'), undefined, 'removing the composition must dispose the settings provider and Raven registration')
 
-  // The Profile Bundle, through the Harness's own composer rather than a text
-  // assertion: `dsh plugin add` appends this package to a profile's bundle list
-  // and `loadProfile` feeds exactly this file to `loadOverlayPatches`, so a patch
-  // that parses here is a patch the deployment will accept.
+  // The OPT-IN overlay, through the Harness's own composer rather than a text
+  // assertion. Two things are checked, and the first one is an ABSENCE.
+  //
+  // Raven declares NO `dsh.bundle.patch`, and that is the isolation guarantee:
+  // declaring it is what makes `dsh plugin add` append this package to a
+  // profile's bundle list, which would apply the overlay and give Raven a
+  // host-plane row — a settings namespace on a global settings page, and the
+  // client bundle the web app loads for any package a composition names. An
+  // install must contribute nothing until a session picks the Raven mode.
+  //
+  // The overlay still ships, for a deployment that wants the settings card and
+  // accepts losing isolation, so it must still compose to exactly one host row
+  // when someone applies it deliberately.
   const { composeEntries, loadOverlayPatches } = await import(source('packages/boot/app-boot/src/index.ts')) as {
-    composeEntries(layers: readonly unknown[][]): Array<{ id?: string; name?: string }>
+    composeEntries(layers: readonly unknown[][]): Array<{ id?: string; name?: string; config?: { role?: string } }>
     loadOverlayPatches(binName: string, file: string): unknown[]
   }
-  const declared = ravenManifest.dsh?.bundle?.patch
-  assert.equal(declared, './cordis.patch.yml', 'the bundle manifest field the profile composer reads')
-  const patchPath = new URL(`../${declared.replace('./', '')}`, import.meta.url)
+  assert.equal(
+    ravenManifest.dsh?.bundle,
+    undefined,
+    'the manifest declares a bundle again; `dsh plugin add` would auto-apply the host row and break mode isolation',
+  )
+  const patchPath = new URL('../cordis.patch.yml', import.meta.url)
   const entries = composeEntries([loadOverlayPatches('dsh', patchPath.pathname.replace(/^\/([A-Za-z]:)/, '$1')) as unknown[]])
   assert.deepEqual(
-    entries.map(entry => ({ id: entry.id, name: entry.name })),
-    [{ id: Raven.name, name: ravenManifest.name }],
-    'the bundle patch must compose to exactly one row naming this package',
+    entries.map(entry => ({ id: entry.id, name: entry.name, role: entry.config?.role })),
+    [{ id: Raven.name, name: ravenManifest.name, role: 'host' }],
+    'the opt-in overlay must compose to exactly one row naming this package, in the host role only',
   )
 
   // The browser half's slot contract, checked against the Harness under test.
@@ -640,7 +652,102 @@ try {
     'a union field no longer round-trips its const members; the card derives its choices from them',
   )
 
-  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability through the real run_code bridge, official Code Mode contract inheritance, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot, chrome, and locale contracts, and disposal passed`)
+  // ── Raven is opt-in by MODE ────────────────────────────────────────────────
+  //
+  // The role split is only worth anything if it holds through the real preset
+  // machinery, so this composes a second Harness: the tools registry, the
+  // agent-presets plugin pointed at a preset root written here, and Raven's HOST
+  // row. Then it asks the preset package for that preset's STANDING scope key —
+  // which composes the preset's plugins without starting an agent, a session or a
+  // turn — and reads the tool registry through that scope and through none.
+  //
+  // The preset is written here rather than read from `presets/` on purpose: what
+  // is under test is the ROLE SPLIT reaching a real agent scope, and coupling this
+  // assertion to the shipped file layout would make it fail for reasons that have
+  // nothing to do with it. `tests/unit/bundle.test.ts` owns the shipped files.
+  const PresetsModule = await import(source('packages/preset/agent-presets/src/index.ts')) as { default: unknown }
+  const presetRoot = join(compositionRoot, 'preset-root')
+  await mkdir(join(presetRoot, 'raven'), { recursive: true })
+  await writeFile(join(presetRoot, 'raven', 'preset.yml'), 'name: Raven\ndescription: mode probe\n')
+  await writeFile(join(presetRoot, 'raven', 'agent.cordis.yml'), [
+    '- id: raven-research',
+    "  name: 'test-raven'",
+    '  config:',
+    "    role: 'agent'",
+    '',
+  ].join('\n'))
+  const modeRoot = await mkdtemp(join(tmpdir(), 'dsh-raven-mode-'))
+  const modeConfigPath = join(modeRoot, 'cordis.yml')
+  await writeFile(modeConfigPath, [
+    '- id: tools',
+    "  name: 'test-tools'",
+    '- id: system-prompt',
+    "  name: 'test-system-prompt'",
+    '- id: presets',
+    "  name: 'test-presets'",
+    '  config:',
+    "    default: 'raven'",
+    '    includeUserRoot: false',
+    '    roots:',
+    `      - path: ${JSON.stringify(presetRoot)}`,
+    "        trust: 'user'",
+    '- id: settings',
+    "  name: 'test-settings-file'",
+    '  config:',
+    `    path: ${JSON.stringify(join(modeRoot, 'settings.yaml'))}`,
+    '    watch: false',
+    '',
+  ].join('\n'))
+  const modeCtx = new Context()
+  try {
+    modeCtx.baseUrl = pathToFileURL(modeRoot).href + '/'
+    await modeCtx.plugin(LoaderModule.default)
+    modeCtx.loader.builtins.include = IncludeModule.default
+    const modeModules = new Map<string, unknown>([
+      ['test-tools', ToolsModule.default],
+      ['test-system-prompt', SystemPromptModule.default],
+      ['test-presets', PresetsModule.default],
+      ['test-settings-file', SettingsFileModule.default],
+      ['test-raven', Raven],
+    ])
+    modeCtx.loader.internal = {
+      version: 'v2',
+      async import(specifier: string) {
+        if (!modeModules.has(specifier)) throw new Error(`unexpected Loader import: ${specifier}`)
+        return modeModules.get(specifier)
+      },
+    }
+    await modeCtx.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(modeConfigPath).href } })
+    await modeCtx.loader.await()
+
+    const toolNames = (scope?: object): string[] =>
+      modeCtx.tools.schemas(scope).map((schema: { name: string }) => schema.name)
+    assert.equal(
+      toolNames().includes('raven_task'),
+      false,
+      'raven_task is registered outside the Raven preset; every other mode would carry a research tool it never asked for',
+    )
+    // Isolation is not only about the tool. A settings namespace is served
+    // process-wide and the settings page is global, so a namespace registered by
+    // a default install would show a Raven card to a user sitting in any other
+    // mode. This composition is the DEFAULT install — package present, no row —
+    // and it must therefore serve no Raven namespace at all.
+    assert.equal(
+      modeCtx.settings.describe().some((entry: { ns: string }) => entry.ns === 'raven-research'),
+      false,
+      'the raven-research settings namespace is served without a Raven row; a card would be visible in every mode',
+    )
+    const presetScope = await modeCtx.agentPresets.standingKeyFor('raven')
+    assert.ok(
+      toolNames(presetScope).includes('raven_task'),
+      'the Raven preset composed no raven_task; selecting the mode would give an agent without the tool the mode exists for',
+    )
+  } finally {
+    await modeCtx.fiber.dispose()
+    await rm(modeRoot, { recursive: true, force: true })
+  }
+
+  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability through the real run_code bridge, official Code Mode contract inheritance, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot, chrome, and locale contracts, mode-scoped tool registration, and disposal passed`)
 } finally {
   await ctx.fiber.dispose()
   await rm(compositionRoot, { recursive: true, force: true })

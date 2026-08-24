@@ -18,7 +18,7 @@ import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { WebFetchResult, WebRuntime, WebSearchResult } from '@deepseek-ai/dsh-web'
 
 import { decodeRavenTaskState } from './codec.js'
-import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig } from './config.js'
+import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig, type RavenRole } from './config.js'
 import {
   ACTION_FIELDS,
   createRavenEngine,
@@ -1695,17 +1695,23 @@ function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike
 }
 
 /**
- * Process-wide count of live Raven mounts.
+ * Process-wide count of live Raven mounts, PER ROLE.
  *
  * `cordis.patch.yml` documents the double-mount hazard and cannot prevent it:
- * mounting the host bundle AND the preset row registers `raven_task` into two
+ * mounting the host bundle AND the preset row with the SAME role registers the same
+ * surface twice. Two 'agent' (or 'both') mounts register `raven_task` into two
  * different layers with two independent Task books, so an agent's Checkpoint lands
  * in whichever copy the layered registry resolved and `action=status` may then
- * answer from the other one. That reads as a Task that lost its own Checkpoint.
+ * answer from the other one. That reads as a Task that lost its own Checkpoint. Two
+ * 'host' (or 'both') mounts register the settings namespace twice, so which layer
+ * answers a configuration read is equally arbitrary.
+ *
+ * A 'host' row PLUS an 'agent' row is the intended split shape and is not a
+ * collision: they register disjoint surfaces, so only a repeated role is counted.
  * Nothing here can decide which mount is the intended one, so it warns rather than
  * throws — refusing the second mount would break a deployment merely reloading.
  */
-let liveMounts = 0
+const liveMounts: Record<RavenRole, number> = { host: 0, agent: 0, both: 0 }
 
 /**
  * Log a deployment problem where an operator will see it, and never fail because of
@@ -1729,25 +1735,44 @@ export const inject = ['tools', 'systemPrompt'] as const
 
 export function apply(ctx: Context, config: RavenConfig = {}): void {
   const now = () => new Date().toISOString()
+  // Per-mount state, and deliberately so: `books` and `pendingLogState` below are
+  // closed over by THIS mount's tool, listeners, and pre-step hook only, and are
+  // keyed by session/sub-call rather than by anything global. Several agent-role
+  // instances alive at once therefore coexist without interference — each simply
+  // owns the Task book for the agent scope it was mounted into. The cost is stated
+  // rather than hidden: with agent-role mounts an Agent Team no longer shares ONE
+  // in-memory book across its members, so cross-member continuity falls back to
+  // what each member's durable session log carries (see the replay path).
   const books = new Map<string, SessionTaskBook>()
+  // The role is a MOUNT-TIME decision, so it is read from the composition entry and
+  // never from `settings()`: a settings surface that could flip a mount's role at
+  // runtime would register or unregister a tool underneath a running agent.
+  const role: RavenRole = config.role ?? 'both'
+  const isHost = role === 'host' || role === 'both'
+  const isAgent = role === 'agent' || role === 'both'
   // The composition entry stays authoritative until a settings service attaches;
   // the wiring then points this thunk at the resolved scope, and points it back at
   // the entry if that service goes away. A Harness that serves no settings at all
   // never runs any of it.
   let settings: () => RavenConfig = () => config
-  installSettingsSection(
-    ctx,
-    RAVEN_SETTINGS_NAMESPACE,
-    Config,
-    config,
-    {
-      setSource: (current) => { settings = current },
-      // Nothing is derived from the section: every Source check, discovery batch,
-      // draft round, and Artifact layout reads the thunk, so a committed change
-      // takes effect on the next call with nothing to re-judge.
-      onChange: () => undefined,
-    },
-  )
+  // Only the host plane registers the namespace. Mounted inside a preset instead, it
+  // would be served exactly while a session using that preset is alive and vanish
+  // between sessions, which is not a configuration surface an operator can edit.
+  if (isHost) {
+    installSettingsSection(
+      ctx,
+      RAVEN_SETTINGS_NAMESPACE,
+      Config,
+      config,
+      {
+        setSource: (current) => { settings = current },
+        // Nothing is derived from the section: every Source check, discovery batch,
+        // draft round, and Artifact layout reads the thunk, so a committed change
+        // takes effect on the next call with nothing to re-judge.
+        onChange: () => undefined,
+      },
+    )
+  }
   const searchLimits = (): RavenSearchLimits => {
     const config = settings()
     return {
@@ -1830,7 +1855,11 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
   // dependency for the first time as one unavailable Source per Checkpoint, after
   // the research had already been paid for. An operator reading the log at startup
   // can compose the provider before anyone spends a Task on it.
-  const fetchAdvice = webCapabilityAdvice(webCapabilityState(ctx, 'fetch'), 'fetch')
+  //
+  // Host-plane only. These are DEPLOYMENT warnings about a missing service, so they
+  // belong once beside the configuration surface: emitted per agent-role mount they
+  // would repeat the same operator advice for every agent scope composed.
+  const fetchAdvice = isHost ? webCapabilityAdvice(webCapabilityState(ctx, 'fetch'), 'fetch') : undefined
   if (fetchAdvice !== undefined) {
     warnOperator(
       ctx,
@@ -1840,7 +1869,7 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
       + ' refuse to start one.',
     )
   }
-  const searchAdvice = webCapabilityAdvice(webCapabilityState(ctx, 'search'), 'search')
+  const searchAdvice = isHost ? webCapabilityAdvice(webCapabilityState(ctx, 'search'), 'search') : undefined
   if (searchAdvice !== undefined) {
     // Discovery is optional by design, so this is information rather than a blocker.
     warnOperator(ctx, 'Raven Lead discovery is unavailable: ' + searchAdvice
@@ -1848,14 +1877,24 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
       + ' can still inspect Sources with its own tools.')
   }
   // See {@link liveMounts}: the documented double-mount hazard is otherwise silent.
-  liveMounts += 1
-  if (liveMounts > 1) {
+  // Only a REPEATED role collides; a host row plus an agent row is the intended split.
+  liveMounts[role] += 1
+  if (liveMounts[role] > 1) {
     warnOperator(
       ctx,
-      'Raven is mounted ' + liveMounts + ' times in this process. The raven_task tool is registered'
-      + ' once per mount, into a different registry layer each time, and each mount keeps its OWN'
-      + ' Task book -- a Checkpoint recorded through one mount is invisible to the other. Mount the'
-      + ' host bundle (cordis.patch.yml) OR the preset row (examples/agent-row.cordis.yml), never both.',
+      'Raven is mounted ' + liveMounts[role] + ' times with role "' + role + '" in this process.'
+      + (isAgent
+        ? ' The raven_task tool is registered once per agent-role mount, into a different registry'
+        + ' layer each time, and each mount keeps its OWN Task book -- a Checkpoint recorded through'
+        + ' one mount is invisible to the other.'
+        : '')
+      + (isHost
+        ? ' The raven-research settings namespace is registered once per host-role mount, so which'
+        + ' registry layer answers a configuration read is arbitrary.'
+        : '')
+      + ' Mount the host bundle (cordis.patch.yml) OR the preset row'
+      + ' (examples/agent-row.cordis.yml) for this role, never both. A "host" row and an "agent"'
+      + ' row together are the intended split and do not collide.',
     )
   }
   // Released when the fiber unloads, so a reload does not accumulate a phantom
@@ -1865,12 +1904,17 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
   try {
     const effect = asRecord(ctx)?.effect
     if (typeof effect === 'function') {
-      (effect as (callback: () => () => void) => unknown).call(ctx, () => () => { liveMounts -= 1 })
+      (effect as (callback: () => () => void) => unknown).call(ctx, () => () => { liveMounts[role] -= 1 })
     }
   } catch {
     // A host without this primitive keeps the warning conservative, nothing more.
   }
 
+  // Everything below is the AGENT half: the tool, the prompt that describes it, the
+  // per-step Task context, and the Code Mode durability seam. A host-role mount
+  // registers none of it, so a reduced host serves configuration without ever
+  // putting raven_task in front of an agent.
+  if (!isAgent) return
   ctx.systemPrompt.section({ name: 'tool:raven-task', order: 116, text: RAVEN_PROMPT })
   ctx.tools.register(toolDefinition(ctx, engine, books, pendingLogState))
   // The durable half of the Code Mode path: attach the Task record to the logged

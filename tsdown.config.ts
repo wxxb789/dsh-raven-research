@@ -52,6 +52,23 @@ export default defineConfig([
     deps: { neverBundle: [/^@deepseek-ai\//] },
   },
   {
+    // The preset installer, shipped as the `dsh-raven-install-preset` bin. Built
+    // rather than run through tsx because a bin has to work from a plain install,
+    // where no TypeScript loader is present. It imports only Node builtins, so
+    // there is nothing to externalize.
+    name: 'raven-research/install-preset',
+    entry: { 'install-preset': 'scripts/install-preset.ts' },
+    outDir: 'lib',
+    format: 'esm',
+    fixedExtension: false,
+    platform: 'node',
+    target: 'node22',
+    dts: false,
+    clean: false,
+    sourcemap: false,
+    minify: false,
+  },
+  {
     name: 'raven-research/client',
     entry: { client: 'src/client/index.ts' },
     outDir: 'lib',

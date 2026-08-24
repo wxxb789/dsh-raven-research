@@ -36,6 +36,9 @@
   "sideEffects": false,
   "type": "module",
   "main": "lib/index.js",
+  "bin": {
+    "dsh-raven-install-preset": "lib/install-preset.js"
+  },
   "types": "lib/index.d.ts",
   "exports": {
     ".": {
@@ -46,18 +49,29 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
+  "dshComment": [
+    "No 'bundle' key on purpose, and its absence is the isolation guarantee.",
+    "Declaring 'dsh.bundle.patch' is what makes 'dsh plugin add' append this package to a",
+    "profile's 'dsh.profile.bundles', which would apply cordis.patch.yml and give Raven a",
+    "host-plane row. That row registers the settings namespace, and a settings page is",
+    "global: a user in any other mode would see a Raven card. It also decides the browser",
+    "half, because the web app loads a package's client bundle only when the composition",
+    "carries a row naming that package.",
+    "So installing this package contributes nothing until a session is started in Raven",
+    "mode. cordis.patch.yml is still shipped, as an opt-in overlay for a deployment that",
+    "wants the card and accepts losing isolation; see the comments in that file."
+  ],
   "dsh": {
     "client": {
       "platform": "web"
-    },
-    "bundle": {
-      "patch": "./cordis.patch.yml"
     }
   },
   "files": [
     "lib",
     "cordis.patch.yml",
     "examples/*.yml",
+    "presets/raven/preset.yml",
+    "presets/raven/agent.cordis.yml",
     "README.md",
     "README.zh.md",
     "LICENSE"

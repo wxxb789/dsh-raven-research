@@ -58,7 +58,16 @@ export interface RavenSchemaNode {
   readonly dict?: Readonly<Record<string, RavenSchemaNode>>
   /** The accepted value of a `const` node. */
   readonly value?: unknown
-  readonly meta?: { readonly default?: unknown }
+  readonly meta?: {
+    readonly default?: unknown
+    /**
+     * Set by `Schema#hidden()`. A form renderer is expected to skip the node
+     * rather than render it read-only: a hidden field is one the Host does not
+     * accept edits for at all, which is a different statement from a disabled
+     * control the user can see.
+     */
+    readonly hidden?: boolean
+  }
 }
 
 /**

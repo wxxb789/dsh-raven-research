@@ -1,0 +1,80 @@
+# Raven's own row, contributed to a base composition at install time.
+#
+# This file is not a whole agent composition and must not be mounted alone. A
+# preset's `agent.cordis.yml` is the WHOLE agent — persona, tools, shell,
+# compaction — so a mode consisting of this row and nothing else is an agent
+# with one tool, no persona, and no shell.
+#
+# By DEFAULT `dsh-raven-install-preset` writes an installed composition of TWO
+# TOP-LEVEL SIBLING ROWS: one `cordis:include` row mounting the base (`--base`,
+# default `code`), and this row beside it at the same level. The base is
+# inherited LIVE, so a Harness upgrade updates the mode with nothing to re-sync.
+#
+# This row must stay a SIBLING of the include and must never be inserted through
+# that include's `patches` list. `Include` rebases its child tree onto the
+# directory of the included file, so a patched-in row resolves
+# `dsh-raven-research` from inside the Harness install, where it is not
+# installed; the include then fails to apply and the failing tree is written back
+# as `[]`, truncating the deployment's own shipped base. That is not theoretical:
+# a real 13605-byte `code` preset was found reduced to 3 bytes. As siblings, both
+# rows resolve from the installed preset directory, the mount succeeds, and the
+# base file is only ever read.
+# `--snapshot` is the fallback for a deployment that would rather not depend on a
+# file outside the package: it appends this row to a COPY of the base text, which
+# is what goes stale on a Harness upgrade.
+#
+# The installer NEVER modifies the Harness. Raven is a plugin of a deployment, so
+# every write it makes lands inside `$DSH_HOME/.agent-presets/raven`, and not even
+# a permission bit is changed outside it.
+#
+# The base defaults to `code` because Raven's prompt section and its Code Mode
+# durability seam both assume `run_code` exists: the `tools/code-dispatch-log`
+# waterfall is what keeps a Task step taken from inside a `run_code` program
+# durable, and it has nothing to record under a base that presents no Code Mode.
+#
+# `role: agent` registers `raven_task`, the system-prompt section, the pre-step
+# Task context, and that waterfall — and deliberately NOT the settings
+# namespace. That is what makes Raven ISOLATED to this mode: nothing this
+# package contributes exists in a session that did not choose Raven. A settings
+# namespace could not be, because a settings page is a global surface — served
+# from the host plane its card is visible in every mode, and served from here it
+# would appear and vanish with a session. So Raven is configured HERE, in this
+# row's `config:` block, which is scoped to exactly the mode that mounts it.
+#
+# The trade is deliberate: no settings CARD by default. A deployment that wants
+# the card back mounts the host row from `cordis.patch.yml` as an explicit
+# opt-in, and accepts that it is visible from every mode. See the READMEs.
+#
+# No `isolate` realm and no group: `dsh-agent-presets` rejects a preset row that
+# publishes into the root service realm, and Raven publishes no Service, so an
+# agent-plane row is legal as it stands. An `isolate` here would claim a seam
+# this package does not own.
+- id: raven-research
+  name: dsh-raven-research
+  config:
+    role: agent
+    # Raven's configuration lives here, and by default this is the ONLY place it
+    # lives. Every field below is shown at its default and commented out, so an
+    # operator can see what is configurable without leaving the file. Uncomment
+    # what you want to change.
+    #
+    # If the settings card is mounted as an opt-in (the host row), these become
+    # the base layer instead: a value stored in the user's settings.yaml then
+    # overrides them while that provider is composed, and they become
+    # authoritative again if it goes away.
+    #
+    # Sources: how hard a Source is checked before it may support a Claim.
+    # sourceVerification: remote
+    # sourceCheckTimeoutMs: 20000
+    # sourceDiscovery: seam
+    # # Discovery: the bound on one discover batch.
+    # searchMaxQueries: 4
+    # searchMaxResults: 8
+    # searchTimeoutMs: 30000
+    # # Writing: one sentence per line makes a LINE the smallest edit unit.
+    # proseLayout: sentence-per-line
+    # proseFormat: markdown
+    # # Draft Variants stay off until a deployment names the routes they may spend.
+    # draftRoutes: []
+    # draftMaxTokens: 4000
+    # draftTimeoutMs: 120000

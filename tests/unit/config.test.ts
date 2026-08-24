@@ -14,6 +14,9 @@ describe('Raven deployment settings', () => {
     expect(SOURCE_VERIFICATION_MODES).toEqual(['remote', 'structural-only'])
     expect(SOURCE_DISCOVERY_MODES).toEqual(['seam', 'disabled'])
     expect(Config({})).toEqual({
+      // A mount-time decision, defaulted so an entry that names no role keeps
+      // registering both halves exactly as it did before the split existed.
+      role: 'both',
       sourceVerification: 'remote',
       sourceCheckTimeoutMs: 20_000,
       sourceDiscovery: 'seam',

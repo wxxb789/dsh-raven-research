@@ -1,0 +1,19 @@
+# Roster metadata for the Raven mode, read by `@deepseek-ai/dsh-agent-presets`.
+#
+# `name` and `description` are what a person sees when picking a mode in the
+# new-session UI, so write them for that person and not for this repository.
+#
+# No `order` key on purpose: declared order is how the SHIPPED preset set reads
+# by capability, and an authored preset that claimed a slot in it would sort
+# itself among presets it did not ship with. Authored presets stay alphabetical.
+#
+# The mode's COMPOSITION is not shipped beside this file. `dsh-raven-install-preset`
+# builds it at install time from a base preset the deployment already has, because
+# a preset's `agent.cordis.yml` is the WHOLE agent composition — persona, tools,
+# shell, compaction — not an overlay on a default. Shipping a copy of one inside
+# this npm package would mean shipping someone else's 13 KB composition and
+# letting it drift silently. By default the generated composition INCLUDES the
+# base rather than copying it, so the mode tracks the deployment's own preset
+# live; the generated header records which base, and where it was read from.
+name: Raven 研究模式
+description: 渐进式深度研究、写作与学习：先给出可用的阶段性成果，再逐步补全；引用必须在重新抓取的原文中逐字命中才能发布。

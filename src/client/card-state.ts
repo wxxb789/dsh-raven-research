@@ -84,13 +84,21 @@ export interface RavenFieldSpec {
  *
  * Declaration order is the schema's own: a Schemastery `object` node keeps its
  * properties in a plain record, and string keys iterate in insertion order.
+ *
+ * A node the schema marked hidden is skipped rather than rendered, because the
+ * schema is where "this is not editable" belongs. `role` is the field that
+ * forced the rule: it selects which half of Raven a mount registers, so it is
+ * decided by the composition entry at mount time, and a card that offered it as
+ * a control would invite registering or unregistering a tool underneath a
+ * running agent. Reading the marker instead of naming the field keeps this
+ * correct for the next mount-time field somebody adds.
  * @param root - the namespace's rehydrated root node.
- * @returns one spec per property, or nothing when the node is not an object.
+ * @returns one spec per editable property, or nothing when the node is not an object.
  */
 export function describeFields(root: RavenSchemaNode | undefined): readonly RavenFieldSpec[] {
   const dict = root?.type === 'object' ? root.dict : undefined
   if (dict === undefined) return []
-  return Object.entries(dict).map(([name, node]): RavenFieldSpec => {
+  return Object.entries(dict).filter(([, node]) => node.meta?.hidden !== true).map(([name, node]): RavenFieldSpec => {
     const consts = node.type === 'union' ? (node.list ?? []).filter(member => member.type === 'const') : []
     const choice = consts.length > 0 && consts.length === (node.list ?? []).length
     return {

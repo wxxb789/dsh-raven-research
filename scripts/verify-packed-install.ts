@@ -21,7 +21,20 @@ const expectedFiles = [
   'lib/client.js.map',
   'lib/index.d.ts',
   'lib/index.js',
+  // The `dsh-raven-install-preset` bin, and the preset it installs. The bin is
+  // built rather than run through tsx: an installed consumer has no TypeScript
+  // loader. The two preset files ARE the mode, so a tarball missing them ships
+  // an installer with nothing to install.
+  'lib/install-preset.js',
   'LICENSE',
+  // The roster entry, and Raven's row as a FRAGMENT the installer appends to a
+  // base preset's own text. Not a whole composition: a preset's
+  // `agent.cordis.yml` is the entire agent — persona, tools, shell — so shipping
+  // one would either boot an agent with no persona or carry a copy of someone
+  // else's composition that drifts silently. Both files are needed at install
+  // time, so a tarball missing either ships an installer that cannot run.
+  'presets/raven/agent.cordis.yml',
+  'presets/raven/preset.yml',
   'package.json',
   'README.md',
   'README.zh.md',
@@ -37,12 +50,48 @@ function isolatedPnpmEnv(): NodeJS.ProcessEnv {
     npm_config_cache: join(temporary, 'npm-cache'),
     npm_config_store_dir: isolatedStore,
     pnpm_config_store_dir: isolatedStore,
+    // Never let the isolated run self-provision a package manager. `packageManager`
+    // pins pnpm, the isolated HOME has no previously downloaded copy, and pnpm
+    // therefore fetches `pnpm` from whatever registry the injected user config
+    // names — which on a mirrored network answers 401 for it and fails a gate that
+    // has nothing to do with package management. The repository .npmrc and the
+    // `--config` flag both say the same thing, but only this env var survives
+    // RAVEN_PACK_USERCONFIG replacing the user layer, which is the whole point of
+    // that hook: the gate must not depend on what the injected config happens to say.
+    npm_config_manage_package_manager_versions: 'false',
+    NPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+    // And never let it check whether a newer pnpm exists. The update notifier
+    // keeps its "last checked" stamp in the user's home, so an isolated HOME is
+    // always overdue and every run asks the registry for the `pnpm` package —
+    // which on a mirror that does not serve it answers 401 and fails the gate
+    // before a single byte of Raven is packed. The gate tests a tarball, not the
+    // freshness of the tool that builds it.
+    npm_config_update_notifier: 'false',
+    NPM_CONFIG_UPDATE_NOTIFIER: 'false',
   }
   for (const key of inherited) {
     if (process.env[key] !== undefined) env[key] = process.env[key]
   }
   return env
 }
+
+/*
+ * Residual barrier, recorded because it costs an hour to rediscover.
+ *
+ * With an isolated HOME pnpm may still PROVISION the package manager named by
+ * `packageManager` and fetch `@pnpm/exe`. The repository .npmrc, the
+ * `--config.manage-package-manager-versions=false` flag passed to the pack
+ * command, and the env vars above all say not to, and pnpm 11.22 does it anyway.
+ * On the public registry that fetch succeeds and nobody notices; on a mirror
+ * that does not serve `@pnpm/exe` it answers 401 and this gate dies before
+ * packing anything — with an error that reads as authentication rather than as
+ * package-manager provisioning.
+ *
+ * That is an environment limitation and not a defect in the tarball: CI resolves
+ * from the public registry and runs this gate on every push. To check the packed
+ * contents from a mirrored network, run `pnpm pack` in the repository itself and
+ * compare its printed file list against {@link expectedFiles}.
+ */
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -95,6 +144,8 @@ try {
   }
   await cp(join(root, 'src'), join(staging, 'src'), { recursive: true })
   await cp(join(root, 'examples'), join(staging, 'examples'), { recursive: true })
+  await cp(join(root, 'presets'), join(staging, 'presets'), { recursive: true })
+  await cp(join(root, 'scripts'), join(staging, 'scripts'), { recursive: true })
   await symlink(join(root, 'node_modules'), join(staging, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
 
   const packedResult = await runProcess('pnpm', [
@@ -108,6 +159,24 @@ try {
     timeoutMs: 120_000,
     capture: true,
     env: isolatedPnpmEnv(),
+  }).catch((error: unknown) => {
+    // Name this failure, because its own error message points somewhere else.
+    // pnpm provisions the package manager pinned by `packageManager` into the
+    // isolated HOME and asks the registry for `@pnpm/exe` (or, for the update
+    // check, for `pnpm`). A registry that does not serve those answers 401, and
+    // the gate then reports an authorization failure for a step that has nothing
+    // to do with Raven, packaging, or credentials for Raven's own dependencies.
+    const detail = error instanceof Error ? error.message : String(error)
+    if (!/@pnpm(%2F|\/)exe|registry\/pnpm: Unauthorized|Unauthorized - 401/.test(detail)) throw error
+    throw new Error(
+      'pnpm could not provision its own package manager inside the isolated HOME this gate uses,'
+      + ' so packing never started. This is an environment limitation, not a defect in the tarball:'
+      + ' the registry in use does not serve the package manager pinned by "packageManager".'
+      + ' CI resolves from the public registry and runs this gate on every push. To check the packed'
+      + ' contents from here, run `pnpm pack` in the repository and compare the printed file list'
+      + ' against expectedFiles in this script. Underlying error: ' + detail,
+      { cause: error },
+    )
   })
   const start = packedResult.stdout.indexOf('{')
   const end = packedResult.stdout.lastIndexOf('}')
@@ -198,12 +267,24 @@ import * as Raven from 'dsh-raven-research'
 assert.equal('default' in Raven, false)
 assert.equal(Raven.name, 'raven-research')
 
-// The Profile Bundle survives packing: the manifest field the composer reads,
-// and the file it points at, both arrive in an installed consumer.
+// Isolation survives packing, and its guarantee is an ABSENCE, so the packed
+// manifest is asserted NOT to declare a bundle. Declaring one is what makes
+// 'dsh plugin add' append this package to a profile's bundles, which would apply
+// the overlay below and give Raven a host-plane row: a settings namespace on a
+// global settings page, plus the client bundle the web app loads for any package
+// the composition names in a row. An installed consumer must contribute nothing
+// until a session picks the Raven mode.
 const require_ = createRequire(import.meta.url)
 const installed = require_.resolve('dsh-raven-research/package.json')
 const manifest = JSON.parse(readFileSync(installed, 'utf8'))
-assert.equal(manifest.dsh?.bundle?.patch, './cordis.patch.yml')
+assert.equal(
+  manifest.dsh?.bundle,
+  undefined,
+  'the packed manifest declares a bundle, which auto-applies the host row and breaks mode isolation',
+)
+// The overlay itself still ships: it is how a deployment that WANTS the settings
+// card opts in, by pasting its row into the profile's own patch or booting with
+// an explicit --patch. Unreachable-from-an-install is the failure this guards.
 const patch = readFileSync(new URL('./cordis.patch.yml', new URL('file://' + installed.replaceAll('\\\\', '/'))), 'utf8')
 assert.match(patch, /- insert:/)
 assert.match(patch, /name: dsh-raven-research/)

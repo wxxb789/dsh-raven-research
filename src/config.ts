@@ -5,6 +5,12 @@ import { RAVEN_LIMITS } from './domain.js'
 import type { ProseFormat, ProseLayout } from './prose.js'
 import type { SourceDiscoveryMode, SourceVerificationMode } from './route.js'
 
+/** The mount roles a Raven row may take. See {@link RavenConfig.role}. */
+export const RAVEN_ROLES = ['host', 'agent', 'both'] as const
+
+/** Which half of Raven a single mount registers. See {@link RavenConfig.role}. */
+export type RavenRole = (typeof RAVEN_ROLES)[number]
+
 /**
  * The settings namespace Raven owns. Registering it is what exposes it: a Harness
  * that serves settings answers this namespace for every configuration surface,
@@ -52,6 +58,11 @@ export const RAVEN_SETTINGS_CEILINGS = {
  * refuses the Checkpoint, which is the honest degradation, not a weaker standard.
  */
 export interface RavenConfig {
+  /**
+   * Which half of Raven this mount registers. Read from the COMPOSITION ENTRY only —
+   * never from the live settings thunk. See the schema description below.
+   */
+  role?: RavenRole
   sourceVerification?: SourceVerificationMode
   sourceCheckTimeoutMs?: number
   sourceDiscovery?: SourceDiscoveryMode
@@ -66,6 +77,34 @@ export interface RavenConfig {
 }
 
 export const Config: z<RavenConfig> = z.object({
+  role: z
+    .union([z.const('host'), z.const('agent'), z.const('both')])
+    .default('both')
+    .description(
+      'Which half of Raven this mount registers. "host" registers ONLY the settings namespace and the '
+      + 'mount-time capability warnings, so the configuration surface is served by the long-lived host '
+      + 'plane and survives between sessions rather than existing only while one session is alive. '
+      + '"agent" registers ONLY raven_task, the system-prompt section, the per-step Task context, and '
+      + 'the tools/code-dispatch-log durability listener, so the tool exists exactly inside the agent '
+      + 'scopes a preset row composes. "both" is the single-row deployment, today\'s behaviour, and the '
+      + 'default, so a composition entry that names no role keeps working unchanged. Get it wrong and '
+      + 'the failure is silent rather than loud: with no host row nothing serves the settings namespace, '
+      + 'so the browser settings card has nothing to edit and every field falls back to its default; '
+      + 'with no agent row no raven_task is registered, so the agent carries the prompt for a tool that '
+      + 'does not exist. Splitting the roles also splits the in-memory Task book — each agent-role mount '
+      + 'is its own plugin instance with its own book, so an Agent Team no longer shares one in-memory '
+      + 'book and falls back to what each member\'s durable session log carries. '
+      + 'This is a MOUNT-TIME decision and is therefore read from the composition entry alone, unlike '
+      + 'every other field here: a settings surface that could flip a mount\'s role at runtime would '
+      + 'register or unregister a tool underneath a running agent.',
+    )
+    // Hidden because it is mount-time, and the card is generic. The browser card
+    // derives its rows from THIS schema on purpose (ADR 0005: it states no rules
+    // of its own), so a field that must never be edited at runtime has to say so
+    // where the schema is, not where the card is. Marking it here keeps the rule
+    // with the decision instead of hard-coding one field name into the renderer,
+    // which would silently stop covering the next mount-time field somebody adds.
+    .hidden(),
   sourceVerification: z
     .union([z.const('remote'), z.const('structural-only')])
     .default('remote')

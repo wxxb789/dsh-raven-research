@@ -1,30 +1,51 @@
-# Scope Raven to ONE agent preset. Append this row to a copied, user-authored preset.
-# Do not edit a shipped DeepSeek Harness preset.
+# Mount Raven's AGENT half in ONE agent preset, by hand.
 #
-# This is the alternative to installing Raven as a Profile Bundle
-# (`dsh plugin add dsh-raven-research`), which mounts it on the Host plane for every
-# agent. Choose one. Mounting both registers `raven_task` twice, into two different
-# layers, because `tools` is host+per-scope layered.
+# This row is for a deployment that wants Raven inside a preset it already
+# maintains, rather than as its own selectable mode. Append it to a copied,
+# user-authored preset; do not edit a shipped DeepSeek Harness preset.
 #
-# A preset-scoped mount also serves the `raven-research` settings namespace only while
-# a session using this preset is alive, so the Settings > Plugins card appears and
-# disappears with such a session. Prefer the Bundle where that card matters.
+# For the ordinary case — Raven as its own mode — run `dsh-raven-install-preset`
+# instead. That builds `$DSH_HOME/.agent-presets/raven` from your deployment's
+# own base preset and appends exactly this row. It is also why this package
+# ships no composition of its own: a preset's `agent.cordis.yml` is the WHOLE
+# agent — persona, tools, shell — so a copy of one inside an npm package would
+# drift silently from the original.
+#
+# `role: agent` registers `raven_task`, the system-prompt section, the pre-step
+# Task context, and the `tools/code-dispatch-log` waterfall — and deliberately
+# NOT the settings namespace.
+#
+# That omission IS the isolation, not an oversight. A settings namespace is
+# served process-wide and the settings page is global, so registering it would
+# put a Raven card in front of a user working in any other mode. Configure Raven
+# here instead, in the `config:` block below, next to the mount it configures.
+#
+# The settings card remains available to a deployment that wants it and accepts
+# losing that isolation: apply this package's shipped `cordis.patch.yml` as an
+# overlay. `dsh plugin add` no longer does it for you, because the manifest
+# declares no bundle.
+#
+# Cost of a per-preset mount: each agent scope gets its own plugin instance and
+# therefore its own in-memory Task book, so an Agent Team falls back to what
+# each member's durable session log carries.
 - id: raven-research
   name: dsh-raven-research
-  # Optional. This entry is the base layer of the `raven-research` settings namespace;
-  # a value stored in the user's settings.yaml overrides it while a settings provider
-  # is composed, and the entry becomes authoritative again if that provider goes away.
-  # config:
-  #   sourceVerification: remote
-  #   sourceCheckTimeoutMs: 30000
-  #   sourceDiscovery: seam
-  #   searchMaxQueries: 4
-  #   searchMaxResults: 8
-  #   searchTimeoutMs: 30000
-  #   # Writing: one sentence per line makes a LINE the smallest edit unit.
-  #   proseLayout: sentence-per-line
-  #   proseFormat: markdown
-  #   # Draft Variants stay off until a deployment names the routes they may spend.
-  #   draftRoutes: []
-  #   draftMaxTokens: 4000
-  #   draftTimeoutMs: 120000
+  config:
+    role: agent
+    # Optional. These entries are the base layer of the `raven-research` settings
+    # namespace for this scope; a value stored in the user's settings.yaml overrides
+    # them while a settings provider is composed, and they become authoritative
+    # again if that provider goes away.
+    # sourceVerification: remote
+    # sourceCheckTimeoutMs: 30000
+    # sourceDiscovery: seam
+    # searchMaxQueries: 4
+    # searchMaxResults: 8
+    # searchTimeoutMs: 30000
+    # # Writing: one sentence per line makes a LINE the smallest edit unit.
+    # proseLayout: sentence-per-line
+    # proseFormat: markdown
+    # # Draft Variants stay off until a deployment names the routes they may spend.
+    # draftRoutes: []
+    # draftMaxTokens: 4000
+    # draftTimeoutMs: 120000
