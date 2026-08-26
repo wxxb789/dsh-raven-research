@@ -21,6 +21,12 @@ updates:
     ignore:
       # The Harness seam and the cordis instance it shares. Bump these by hand.
       - dependency-name: '@deepseek-ai/*'
+      # Keep typings aligned with the lowest supported Node runtime and keep
+      # TypeScript on the latest compatible 6.x release.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
     groups:
       dev-toolchain:
         patterns: ['*']
