@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   Config,
+  RAVEN_GUIDANCE_POLICIES,
   RAVEN_SETTINGS_CEILINGS,
   RAVEN_SETTINGS_NAMESPACE,
   SOURCE_DISCOVERY_MODES,
@@ -17,8 +18,10 @@ describe('Raven deployment settings', () => {
       // A mount-time decision, defaulted so an entry that names no role keeps
       // registering both halves exactly as it did before the split existed.
       role: 'both',
+      guidance: 'auto',
       sourceVerification: 'remote',
-      sourceCheckTimeoutMs: 20_000,
+      sourceNetworkPolicy: 'unrestricted',
+      sourceCheckTimeoutMs: 0,
       sourceDiscovery: 'seam',
       searchMaxQueries: 4,
       searchMaxResults: 8,
@@ -29,6 +32,13 @@ describe('Raven deployment settings', () => {
       draftMaxTokens: 4_000,
       draftTimeoutMs: 120_000,
     })
+  })
+
+  it('defaults contextual guidance to auto and accepts only auto or off', () => {
+    expect(RAVEN_GUIDANCE_POLICIES).toEqual(['auto', 'off'])
+    expect(Config({}).guidance).toBe('auto')
+    expect(Config({ guidance: 'off' }).guidance).toBe('off')
+    expect(() => Config({ guidance: 'verbose' } as never)).toThrow()
   })
 
   it('defaults writing to sentence-per-line Markdown and to no configured model route', () => {
@@ -54,9 +64,11 @@ describe('Raven deployment settings', () => {
     expect(() => Config({ searchTimeoutMs: 1.5 })).toThrow()
   })
 
-  it('accepts the declared verification modes and refuses anything else', () => {
+  it('accepts the declared verification and Source-network policies and refuses anything else', () => {
     expect(Config({ sourceVerification: 'structural-only' }).sourceVerification).toBe('structural-only')
     expect(() => Config({ sourceVerification: 'trust-me' } as never)).toThrow()
+    expect(Config({ sourceNetworkPolicy: 'unrestricted' }).sourceNetworkPolicy).toBe('unrestricted')
+    expect(() => Config({ sourceNetworkPolicy: 'private-ok' } as never)).toThrow()
   })
 
   it('refuses a deadline that is not a natural number of milliseconds', () => {
@@ -65,12 +77,11 @@ describe('Raven deployment settings', () => {
     expect(() => Config({ sourceCheckTimeoutMs: 1.5 })).toThrow()
   })
 
-  it('gives the Source deadline a real default while keeping 0 available', () => {
-    // 0 meant "no deadline" over a SEQUENTIAL loop that both Checkpoint and
-    // Completion re-run, so one hung origin held a Task step open indefinitely.
-    expect(Config({}).sourceCheckTimeoutMs).toBe(20_000)
-    // ...and a deployment that deliberately waits out a slow archive still can.
-    expect(Config({ sourceCheckTimeoutMs: 0 }).sourceCheckTimeoutMs).toBe(0)
+  it('preserves omitted Source policy and deadline behavior while honoring explicit values', () => {
+    expect(Config({}).sourceNetworkPolicy).toBe('unrestricted')
+    expect(Config({}).sourceCheckTimeoutMs).toBe(0)
+    expect(Config({ sourceNetworkPolicy: 'public-only' }).sourceNetworkPolicy).toBe('public-only')
+    expect(Config({ sourceCheckTimeoutMs: 20_000 }).sourceCheckTimeoutMs).toBe(20_000)
   })
 
   it('caps every settings-reachable numeric so the card cannot ask for a self-DoS', () => {

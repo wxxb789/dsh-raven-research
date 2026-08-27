@@ -2,7 +2,7 @@
 
 ## Raven Task
 
-The single user-visible unit of work. A Raven Task has one continuing identity from the initial request through research, drafting, steering, verification, and completion, regardless of how many agents or tools contribute internally.
+The single user-visible unit of work. A Raven Task has one continuing identity from the initial request through research, drafting, steering, verification, and completion, regardless of how many agents or tools contribute internally. Each owning Agent or detected Task Team has at most one active Task at a time; stopped and completed Task histories may remain addressable.
 
 ## Outcome
 
@@ -54,7 +54,11 @@ A visible gap caused by unavailable evidence, failed tools, incomplete coverage,
 
 ## Task Team
 
-The set of Agents that share one Raven Task when the deployment composes Agent Teams. A Task Team has one Task identity, one evidence set, and one Artifact regardless of how many members contribute; a member never owns a Task of its own. Team membership changes who may contribute, never what the Task owes the user.
+The set of Agents that share one Raven Task when the deployment composes Agent Teams and Raven successfully detects membership. A detected Task Team has one Task identity, one evidence set, and one Artifact regardless of how many members contribute; a member never owns a competing Task of its own. If membership is absent or cannot be detected, each Agent owns an independent Task book. Team membership changes who may contribute, never what the Task owes the user.
+
+## Contextual Guidance
+
+A brief, user-facing hint about a Raven capability that is directly relevant to the current conversation, such as redirecting the work, changing source constraints, pausing and resuming, or preserving a result. In **auto** policy Raven may offer at most one useful hint and avoids capabilities the user already understands; **off** suppresses these optional hints without changing Task behavior. Tool actions and lifecycle vocabulary remain internal to the main agent in both policies.
 
 ## Completion
 

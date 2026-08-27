@@ -33,13 +33,12 @@ English · [中文](README.zh.md)
   deep research, general writing, academic writing, and learning.
 - **Why it matters:** you get a useful Checkpoint early, you steer it mid-run instead of restarting, and every
   citation is checked against the bytes actually retrieved — not against what the model remembers.
-- **How it is built:** one [Cordis](https://github.com/cordiverse/cordis) plugin on the host plane, one
-  model-facing `raven_task` tool, one compact prompt section, and one settings card in the Web GUI. No second
-  agent runtime, no model host, no vector store, no database. The Harness agent keeps researching and writing
-  with its normal tools.
-- **Install:** `pnpm build && pnpm pack`, add the tarball to your Harness deployment, then
-  `dsh plugin --profile <name> add dsh-raven-research`. See [Install](#install).
-- **Use:** talk to the Harness agent normally — no launch phrase, no separate Task UI. See [Usage](#usage).
+- **How it is built:** one [Cordis](https://github.com/cordiverse/cordis) plugin split into an agent-role mode
+  (`raven_task`, prompt, and Task context) and an optional host-role settings card. No second agent runtime,
+  model host, vector store, or database. The Harness agent keeps researching and writing with its normal tools.
+- **Install:** `pnpm build && pnpm pack`, add the tarball from the deployment root, then run
+  `npx dsh-raven-install-preset` and choose Raven as the session mode. See [Install](#install).
+- **Use:** talk to the Harness agent normally — no launch phrase, no separate Task UI, and no lifecycle commands to learn. Contextual guidance defaults to `auto` and can be set to `off`. See [Usage](#usage).
 ## Why Raven
 
 A substantial research or writing request usually disappears into a long batch pipeline: you wait, you get one wall
@@ -52,7 +51,7 @@ of text, and the citations are whatever the model remembered. Raven changes the 
 | Citations are remembered strings | Citations resolve to **inspected Sources**; excerpts are matched against retrieved bodies |
 | Three reprints of one wire story read as three confirmations | Claims sharing a declared `sourceFamily` are marked as **not independent corroboration** |
 | One dead link fails the whole run | Failed dependencies **defer only the affected Claims**; independently verified work still completes honestly |
-| State dies with the tool call | The Task book is **rebuilt from the session log** and survives stop/resume |
+| State dies with the tool call | The latest successfully persisted Task snapshot is **rebuilt from the session log** and supports stop/resume |
 
 Normal `discover → read → analyze → draft → verify → refine` movement stays autonomous. Raven asks only when an
 unresolved choice changes the public outcome, evidence floor, audience, deliverable, significant cost, or an
@@ -64,11 +63,13 @@ external/destructive/sensitive side effect.
   step through the Harness `web` search capability, folds one URL returned by several queries into one Lead, and
   keeps every sibling's results when a query fails — the failure is recorded as a Limitation, not an aborted batch.
   What comes back are **Leads**, never Sources: nothing can be cited until it has been opened and excerpted.
-- **Agent Teams reuse.** Where the deployment composes the Harness Agent Teams capability, the Raven Task belongs to
-  the Team: every member reads and extends the same Task, a teammate cannot start a competing one, and each member's
-  own durable records merge into one Task book. Where no Team is composed, nothing changes.
-- **Progressive delivery.** A Checkpoint is useful on its own and is published while the Task is still running, so
-  you can redirect the work before the expensive part.
+- **Agent Teams reuse.** Where the deployment composes the Harness Agent Teams capability and Raven detects membership,
+  the Raven Task belongs to the Team: every observed member reads and extends the same Task, and a teammate cannot start
+  a competing one. Without a detected membership — including a missing or failing experimental capability — each Agent
+  keeps an independent Task book.
+- **Progressive delivery.** The Raven prompt directs the main agent to publish an independently useful Checkpoint early
+  while the Task remains active. Checkpoint validation is runtime-enforced; when the Harness displays it and continues
+  later model/tool steps is owned by the Harness agent loop.
 - **Steering instead of restarts.** `steer` applies a user correction to the live Task and preserves prior evidence.
 - **Citations checked against retrieved bytes.** Artifacts cite stable Source IDs with `[@source-id]`. Raven matches
   bounded excerpts against retrieved bodies, renders recorded URLs mechanically, and rejects unknown citations,
@@ -80,8 +81,11 @@ external/destructive/sensitive side effect.
 - **Honest partial results.** Withdrawn Claims force the asserting prose to be edited in the same Checkpoint; a
   dropped citation may not leave a bare assertion standing. Unverifiable evidence refuses publication rather than
   silently downgrading to "unchecked".
-- **Session-durable Task book.** Works from a direct tool call and from inside a Code Mode `run_code` program, and
-  survives stop/resume — see [One Task book, two durability paths](#one-task-book-two-durability-paths).
+- **Contextual guidance.** `guidance: auto` lets the main agent briefly surface one useful Raven option only when the
+  current context calls for it — redirecting the work, changing source constraints, pausing/resuming, or preserving a
+  result — without tutorials or approval gates. `guidance: off` suppresses those hints; Task behavior is unchanged.
+- **Session-replayable Task book.** Direct calls and Code Mode `run_code` calls persist snapshots through Harness-owned
+  session records, subject to the documented nested-log spill limit — see [One Task book, two durability paths](#one-task-book-two-durability-paths).
 - **One sentence per line.** Every stored Artifact is normalized so each sentence occupies its own line, making a
   **line** the smallest edit unit: a revision diffs as the sentences that actually changed instead of as whole
   rewritten paragraphs. The transform is Markdown-structure-aware and idempotent — fenced code, tables, headings,
@@ -156,16 +160,18 @@ The settings namespace is the one surface that cannot be isolated, because a set
 card served from the host plane is visible from every mode, and a card served from inside the preset would appear
 and vanish with a session using that preset. Isolation and the card cannot both be had — so isolation wins, and
 **Raven is configured in the preset row instead**, in the `config:` block of the row the installer inserts. Every
-field is listed there at its default and commented out, so you can see what is configurable without leaving the
-file:
+field is listed there. Compatibility-sensitive network fields are explicit at safer new-install values; remaining
+schema defaults stay commented until you change them:
 
 ```yaml
 - id: raven-research
   name: dsh-raven-research
   config:
     role: agent
+    # guidance: auto
     # sourceVerification: remote
-    # sourceCheckTimeoutMs: 20000
+    sourceNetworkPolicy: public-only
+    sourceCheckTimeoutMs: 20000
     # searchMaxQueries: 4
     # proseLayout: sentence-per-line
     # …
@@ -332,9 +338,9 @@ To put Raven inside an existing preset rather than give it its own mode, skip th
 > not register `raven_task` twice.
 
 > [!IMPORTANT]
-> Because the agent half is mounted per agent scope, each scope gets its own plugin instance and therefore its own
-> **in-memory** Task book. An Agent Team no longer shares one in-memory book; each member falls back to what its own
-> durable session log carries. Task state still survives replay — see
+> The Harness mounts the Raven preset once under a standing scope and every Raven session joins that scope. Raven
+> keys its shared plugin instance by Agent identity or successfully detected Team identity, so unrelated owners stay
+> isolated while observed Team members share one in-memory Task book. Persisted snapshots are replayable — see
 > [One Task book, two durability paths](#one-task-book-two-durability-paths).
 
 ### 5. Verify
@@ -418,7 +424,10 @@ log, and anything you exported is a plain llm-wiki repository you already own.
 starting the session; in any other mode the agent has no Raven tool and will answer without a Task.
 
 Within Raven mode there is no launch phrase and no separate Raven UI — users talk to the Harness agent normally,
-and the model drives the Task lifecycle.
+and the model drives the Task lifecycle. Say “focus on primary sources”, “pause here”, “continue”, or “keep this result”
+in ordinary language; the agent translates that intent into Raven's internal protocol. In `guidance: auto` it may offer
+one brief capability hint when useful. Set `guidance: off` in the Raven preset row (or the opt-in settings card) to
+suppress those hints without changing the workflow.
 
 ```text
 Research the strongest primary-source evidence for and against this policy. Show me
@@ -442,10 +451,11 @@ Teach me closures with one mental model, two worked examples, and a self-check.
 Steering is just the next message — "focus on cost, not adoption", "make it more sceptical", "cite only primary
 sources" — and it lands on the same Task instead of starting a new one.
 
-### The `raven_task` actions
+### Internal protocol reference (integrators)
 
-`raven_task` is model-facing. These are internal lifecycle operations on one user Task, not workflows a user has to
-manage:
+`raven_task` is model-facing, not a user-operated workflow language. Users should never need action names, Task ids,
+phases, or revisions; the main agent translates ordinary requests. The operations are documented here only for
+integrators and tests:
 
 | Action | What it does |
 | --- | --- |
@@ -456,7 +466,7 @@ manage:
 | `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. |
 | `complete` | Validates citation identity, material Claim links, matched excerpts, Source reachability, and the exact Artifact fingerprint against the latest post-steer Checkpoint. |
 | `status` | Reports the current Task book. |
-| `stop` | Ends the Task with a recorded reason; explicitly not Completion. |
+| `stop` | Marks the Task stopped; explicitly not Completion. It prevents later Task mutation after processing but does not cancel Harness work already in flight. |
 | `resume` | Reopens a stopped Task — including an older one — without losing evidence or Artifact. |
 | `export` | Returns llm-wiki page bytes for the agent to write with ordinary file tools. |
 
@@ -538,8 +548,8 @@ disposer owned by the calling fiber, which is what makes [uninstall](#uninstall)
 
 ### One Task book, two durability paths
 
-Raven keeps one Task book per session — or per Agent Team — and rebuilds it from the session log rather than from
-storage of its own:
+Raven keeps one Task book per owning Agent identity — or per successfully detected Agent Team identity — and rebuilds
+it from the durable records carried by the owning Harness sessions rather than from storage of its own:
 
 - A **direct tool call** carries the Task record as durable result metadata (`tool/result.meta`, kind
   `dsh-raven-research/task-state`).
@@ -556,7 +566,8 @@ storage of its own:
 > loadable by construction. If a deployment's spill policy replaces an oversized log copy, that one step is simply
 > not restored; the session still loads, and the next direct call republishes the whole record.
 
-Either path restores the book when a session resumes, so a Task advanced from inside a program is not silently lost.
+The latest successfully persisted snapshot restores the book when a session resumes. A spilled nested Code Mode log
+can omit that one step; the session still loads, and a later direct state-changing call republishes a full snapshot.
 
 Code Mode is the Harness feature whose preset alias in the UI is **PTC mode**, so a deployment running that preset is
 exactly the one this path serves. Raven does not restate that contract locally: `src/plugin.ts` imports
@@ -567,14 +578,15 @@ in-process code runtime and runs a real program that calls `raven_task`, so the 
 and appends the real `tool/code-dispatch` event — and it asserts the upstream declarations themselves, naming what to
 restate if they ever move.
 
-### One Task per Agent Team
+### One Task per detected Agent Team
 
-Where the deployment composes the Harness Agent Teams capability, Raven keys the Task book by the Team id rather
-than by the Agent id, so the Lead and every teammate share one Task identity, one evidence set, and one Artifact.
-A teammate's `start` is refused while the Team's Task is active, its Checkpoints land on that Task, and each
-member's own durable records merge into the shared book as that member is first seen. Raven reads the capability
-structurally through `ctx.get('agentTeams')` and contains every call: the Team packages are private, unpublished,
-and carry no stability promise upstream, so the absence — or a throwing probe — must never fail a Task step.
+When Raven successfully detects membership through the optional Harness Agent Teams capability, it keys the Task book
+by Team id rather than Agent id. Observed members then share one active Task identity, evidence set, and Artifact, and a
+teammate's competing `start` is refused. After a process restart, each member's durable records fold into the shared
+book as that member is observed; until then the rebuilt view may contain only the calling member's persisted history.
+Raven reads the capability structurally through `ctx.get('agentTeams')` and contains every call because the Team
+packages are private and unpublished. No capability, no membership, or a throwing probe degrades to an independent
+single-Agent book rather than pretending Team ownership was established.
 
 ### The failure path carries the Task too
 
@@ -637,8 +649,10 @@ settings provider serves the namespace to every configuration surface.
 
 | Field | Default | Effect |
 | --- | --- | --- |
+| `guidance` | `auto` | `auto` lets the main agent offer at most one brief, relevant Raven capability hint and avoids repetition, tutorials, protocol details, and approval gates. `off` suppresses optional hints without changing Task behavior. |
 | `sourceVerification` | `remote` | `structural-only` withholds every remote check. No Source can then be confirmed, so a Checkpoint that records Sources is refused with the policy named. Set it only where the network is genuinely out of reach. |
-| `sourceCheckTimeoutMs` | `0` | Deadline for one remote Source check, in milliseconds. `0` means no deadline. An exceeded deadline reports that one Source as unverifiable instead of holding the Checkpoint open. |
+| `sourceNetworkPolicy` | `unrestricted` (schema compatibility); Raven preset: `public-only` | `public-only` refuses local/private destinations before calling the fetch provider. This reduces SSRF exposure but cannot prevent DNS rebinding inside the provider. Omitted legacy configuration remains `unrestricted`; newly installed Raven mode sets `public-only` explicitly. |
+| `sourceCheckTimeoutMs` | `0` (schema compatibility); Raven preset: `20000` | Deadline for one remote Source check, in milliseconds. `0` means no per-Source deadline. Newly installed Raven mode explicitly uses 20 seconds; an exceeded deadline reports that Source as unverifiable instead of holding the Checkpoint open. |
 | `sourceDiscovery` | `seam` | `disabled` withholds `action=discover` entirely: the call reports discovery as unavailable and records a Limitation rather than returning an empty result the agent could mistake for "nothing exists". The agent keeps its own Harness tools. |
 | `searchMaxQueries` | `4` | Upper bound on queries in one `discover` batch, mirroring the Harness `web_search` batch bound. The bound is applied **before** deduplication, so repeating a query spends its slot. |
 | `searchMaxResults` | `8` | Upper bound on candidates requested per query, mirroring the Harness `web_search` source bound. The merged Lead list is bounded separately. |
@@ -653,13 +667,14 @@ settings provider serves the namespace to every configuration surface.
 > No setting can lower a Task's evidence floor. Withholding checks makes evidence unverifiable, which refuses
 > publication; it never turns unchecked Sources into confirmed ones.
 
-The composition entry in `cordis.yml` is the `base` layer. A value stored in the user's `settings.yaml` overrides it
-and takes effect on the next Source check, with no restart; if the settings service goes away, the composition entry
-becomes authoritative again.
+The composition entry in `cordis.yml` is the `base` layer. When a deployment explicitly opts into the global host
+settings card, a value stored in the user's `settings.yaml` overrides that base on the next Raven step; if the settings
+service goes away, the mode's composition entry becomes authoritative again. The override is process-global, which is
+part of the isolation trade-off accepted by mounting the host row.
 
 A browser card for this namespace is registered under **Settings › Plugins** by Raven's browser half, so the fields
 above are editable without hand-writing `settings.yaml`. It is a disclosure card grouped into evidence, discovery,
-prose, and drafting, drawn to the same geometry and design tokens as the cards the Harness ships for its own
+prose, drafting, and other user preferences such as guidance, drawn to the same geometry and design tokens as the cards the Harness ships for its own
 plugins — they share one list, and a card that measured itself differently would read as a different kind of object.
 Every edit is staged and written only on Save, including a Reset, because a settings write is a durable
 revision-fenced document mutation rather than something a control should commit as it settles; the card marks which
@@ -718,6 +733,14 @@ so no externally grounded Checkpoint can be published and Completion cannot succ
 grounding-required Task with zero verified Claims stays `active` rather than being
 labelled complete. That is deliberate: the alternative is a "completed" research
 document whose citations were never checked.
+
+The stock Harness profile deliberately leaves HTTP fetch disabled because its current local
+provider does not implement complete SSRF/private-network confinement. The shipped Raven preset explicitly sets
+`sourceNetworkPolicy: public-only`, which refuses local hostnames, private/special IP literals,
+and DNS names with any non-public answer before delegating. This is a **pre-flight filter, not
+an SSRF sandbox**: the provider resolves the name again when it connects, so DNS rebinding
+remains possible. A deployment that can reach sensitive internal targets must confine the
+fetch provider at the network layer; do not use `unrestricted` as a substitute for confinement.
 
 You will see the refusal as a Source check reporting:
 
@@ -828,14 +851,14 @@ unbounded state would eventually make a session unloadable.
 | --- | --- | --- |
 | Sources | **256** | Further Source registrations in the submitted batch are rejected; the Checkpoint is refused with the cap named, leaving prior state intact. |
 | Claims | **512** | Same — the batch is refused rather than silently truncated, so provenance is never partially recorded. |
-| Checkpoints | **128** | `checkpoint` is refused. The Task stays active and completable against its latest existing Checkpoint. |
+| Checkpoints | **128 descriptors** | Older descriptors are trimmed while the first is preserved, and one slot is reserved for Completion. The original Artifact remains in its historical tool result. |
 | Limitations | **256** | Recorded failures stop accumulating. The Task keeps working; the cap is reported so a Limitation is never dropped silently. |
 | Artifact | **100,000 characters** | The submitted Artifact is rejected before it is laid out or hashed. Split the work or export and continue. |
 | Steering Revisions | **128** | `steer` is refused; existing Checkpoints and evidence are untouched. |
+| Durable Task snapshot | **1,000,000 UTF-8 JSON bytes** | Non-final mutations leave 64,000 bytes reserved for Completion. A mutation whose combined Sources, Claims, excerpts, corrections, Limitations, and Artifact exceed its aggregate budget is refused without replacing accepted state. |
 
-Two rules make these survivable rather than terminal: a refused contribution **never
-mutates state** — resubmit a smaller batch — and a Task that has hit a cap can always
-still `complete` and `export`. Individual field ceilings (a request or correction at
+Capacity refusals leave the previously accepted state untouched, and a Task that has hit
+a cap can still `complete` and `export`. Individual field ceilings (a request or correction at
 20,000 characters, a summary at 2,000, an excerpt at 20,000, a Source title at 1,000, a
 locator at 4,000) are reported the same way.
 
@@ -955,8 +978,9 @@ pnpm check:release
 - lays every stored Artifact out one sentence per line, idempotently, without reflowing Markdown structure;
 - returns Draft Variants as candidates only, and reports an unconfigured or unknown route instead of substituting one;
 - inserts exactly one host-plane row from the bundle patch, and registers the settings card under its namespace key;
-- shares one Task across an Agent Team and refuses a teammate's competing Task;
-- keeps a Code Mode Task step durable without writing any plugin-owned session event type;
+- shares one active Task across a detected Agent Team and refuses a teammate's competing Task;
+- restores persisted Code Mode Task snapshots without writing a plugin-owned session event type, while keeping the documented spill limit explicit;
+- injects contextual guidance in `auto`, suppresses it completely in `off`, and preserves the same progressive workflow;
 - exposes a useful intermediate research Artifact before final verification;
 - refines the same Task after a mid-run user correction;
 - proceeds through normal stages without a confirmation action;
@@ -970,9 +994,11 @@ pnpm check:release
 </details>
 
 `pnpm test:pack` creates an isolated staging project with no `lib/`, links only the pinned development toolchain,
-exercises the real `prepack` lifecycle without mutating the repository build, checks the exact nine-file allowlist,
-and installs the tarball with an isolated pnpm home/store in a second external consumer before import, apply, and
-model-tool execution.
+exercises the real `prepack` lifecycle without mutating the repository build, checks the exact 13-file allowlist,
+and installs the tarball in a clean external consumer before import, apply, and model-tool execution. CI uses a fresh
+pnpm store and registry; an offline workstation may set `RAVEN_PACK_STORE_DIR`, `RAVEN_PACK_CACHE_DIR`, and
+`RAVEN_PACK_OFFLINE=1` to reuse a pre-populated content-addressable store and metadata cache without linking the
+consumer to this repository.
 
 ## FAQ
 
@@ -991,8 +1017,9 @@ of disappearing into the transcript. The agent keeps its own retrieval tools for
 the agent that opens a Lead and records the excerpt — discovery never produces evidence.
 
 **Does it work inside an Agent Team?**
-Yes. The Raven Task belongs to the Team rather than to one member. Agent Teams is an experimental, unpublished
-Harness capability, so Raven consumes it optionally: without it, every Agent simply owns its own Task book.
+When membership is successfully detected, yes: the Raven Task belongs to that Team rather than one member. Agent
+Teams is an experimental, unpublished Harness capability, so Raven consumes it optionally; without a detected
+membership — including a failing probe — every Agent owns an independent Task book.
 
 **Does it work without web access?**
 Yes, for non-grounded writing and learning. Without a composed Harness `web` capability, external Claims are not
@@ -1029,9 +1056,10 @@ behind.
   supplies the deterministic same-Task `steer` transition; it does not guess corrections with a rule-based text
   classifier.
 - Without a composed Harness `web` capability, external Claims stay deferred.
-- State is durable within the owning Harness session, including multiple stopped or completed Task identities and
-  later resume of an older Task. Cross-session projects, reusable corpora, and spaced-repetition storage are out of
-  scope; `export` is the supported way to keep work.
+- The latest successfully persisted Task snapshot is replayable from the owning Harness session records, including
+  multiple stopped or completed Task identities and later resume of an older Task. An oversized nested Code Mode log
+  can omit that one step; a later direct mutation republishes a full snapshot. Cross-session projects, reusable corpora,
+  and spaced-repetition storage are out of scope; `export` is the supported way to keep work.
 - Raven renders Task progress through ordinary tool results and chat; its only browser surface is the settings card,
   and v1 has no custom UI for the Task itself.
 - Draft Variants are off until a deployment configures `draftRoutes`, and a variant is never evidence: it cannot be

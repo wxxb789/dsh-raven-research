@@ -2,12 +2,18 @@
 
 # Raven (dsh-raven-research) — Production Readiness Assessment
 
-## Verdict
+> [!IMPORTANT]
+> This is a historical audit record. Its opening verdict and findings describe the
+> pre-fix build assessed on 2026-08-23; they are not the current product state. Read
+> [Fix status](#fix-status) for the disposition of every finding, and re-run the release
+> gates for the current checkout before making a deployment decision.
 
-Raven is ready for **supervised use** as a research and writing discipline layer, and is **not ready for unattended production** as a source-grounded research system.
-The obstacle is not code quality: the gate is green, the architecture is unusually disciplined, and there is not a single TODO or stub in `src/`.
-The obstacle is that three load-bearing promises — that a Task survives, that a rejected Checkpoint costs nothing, and that a Source check means what it says — are each broken in reachable, ordinary use, and each was reproduced live rather than inferred.
-A second, blunter fact decides the answer for this deployment specifically: the profile the user is running registers no usable web provider at all, so no Source can be verified and no grounded Task can complete here today.
+## Historical verdict for the assessed pre-fix build
+
+At the time of this audit, Raven was ready for **supervised use** as a research and writing discipline layer and was **not ready for unattended production** as a source-grounded research system.
+The obstacle was not code quality: the gate was green, the architecture was unusually disciplined, and there was not a single TODO or stub in `src/`.
+The obstacle was that three load-bearing promises — Task replay, rejected-Checkpoint preservation, and truthful Source checks — were broken in reachable ordinary use and were reproduced live rather than inferred.
+The assessed deployment also registered no usable web provider, so no Source could be verified and no grounded Task could complete there at that time. The finding dispositions below, not this historical paragraph, describe the current repository.
 
 ## Evidence base
 
@@ -35,7 +41,7 @@ This is durable data loss from documented ordinary use, and the fix is small: al
 **B2.
 A failed Source check at Checkpoint discards the entire submitted contribution — reproduced on this Task.** The needs-revision path rebuilds from the *prior* state rather than from the parsed submission, so one unverifiable Source throws away every Source, Claim, Limitation, and Artifact byte in that call.
 Submitting the refined nine-kilobyte Artifact of this very assessment returned `needs-revision` and stored nothing: the Checkpoint count stayed at one and the Artifact was lost, purely because a single cited Source could not be re-fetched.
-The architecture document promises the opposite — rejection with no state loss, and independent verified work surviving — so this is a contract violation, not a missing feature.
+The pre-fix architecture document promised the opposite — accepted work would survive rejection — so this was a contract violation in the assessed build, not a missing feature.
 
 **B3.
 The 128-Checkpoint cap is a terminal deadlock.** Checkpoint throws at the cap and Completion appends a final Checkpoint of its own, so a Task that reaches the cap can neither checkpoint nor complete, with no trimming, compaction, or escape.
@@ -240,7 +246,7 @@ Every finding below was fixed in this repository unless the row says otherwise.
 | B2 | Fixed | A PDF, a script-only shell and a near-empty extraction report `unavailable` with extraction guidance; `failed` is reserved for prose that was actually read. |
 | B3 | Fixed | 404 and 410 stay evidence defects; 401/403/407 and 408/425/429/5xx report `unavailable`. |
 | B4 | Fixed | One bounded retry with backoff for transient conditions only, honouring the abort signal and the deadline. |
-| B5 | Fixed | `sourceCheckTimeoutMs` defaults to 20s, the whole pass carries a budget, and a per-host throttle applies. |
+| B5 | Fixed | Shipped Raven presets explicitly set `sourceCheckTimeoutMs` to 20s while omitted legacy configuration stays at 0; the whole pass carries a budget, and a per-host throttle applies. |
 | B6 | Fixed | Every settings-reachable numeric has a ceiling and discovery fan-out is bounded. |
 | B7 | Fixed | NFC, typographic folding and zero-width stripping on both sides; the entity table grew from six entries to about fifty; case, accents and letters are never folded. |
 | B8 | Fixed | The book write is a compare-and-set; the losing call fails with its recovery action. |
@@ -251,7 +257,7 @@ Every finding below was fixed in this repository unless the row says otherwise.
 | B13 | Fixed | Discovery concurrency is bounded. |
 | B14 | Fixed | A double mount is detected and warned. |
 | B15 | Fixed | Enum and lookup failures name what they received. |
-| B16 | Fixed | The Task-book map is an LRU capped at 64; the book the current call is about is exempt from eviction, and an evicted book re-folds from the session log. Verified by proving eviction actually happens, not merely that survivors survive. |
+| B16 | Fixed | Ordinary Agent books and terminal-only Team books use an LRU target of 64; the current book is exempt, and evicted Agent books re-fold from their session log. Continuing detected-Team books are also exempt because one-member-at-a-time reconstruction can fork an active or stopped Team Task, so the resident target becomes soft only when every excess candidate is a continuing Team book. Tests prove ordinary eviction/re-fold and >64-Team continuity separately. |
 | B17 | Fixed | The card controller sets a disposal fence before releasing its subscriptions, and a save settling after disposal no longer publishes. |
 | C1 | Fixed | The pin has one machine-readable source, the gate reads it, and the pin was retargeted to the checkout that exists. `pnpm run test:dsh` passes against it. |
 | C2 | Fixed | `test:pack` runs as its own CI job; `test:dsh` is documented as a local gate rather than faked in CI. |

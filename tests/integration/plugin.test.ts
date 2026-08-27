@@ -110,6 +110,16 @@ describe('Raven Cordis plugin', () => {
       artifact: 'A useful explanation that survives replay.',
     }, { agent: firstAgent, signal })
     const meta = JSON.parse(JSON.stringify(first.output.presentationMeta({}, checkpoint))) as unknown
+    const unchanged = await first.execute({
+      action: 'status',
+      taskId: started.state.taskId,
+    }, { agent: firstAgent, signal })
+    const unchangedMeta = first.output.presentationMeta({}, unchanged) as Record<string, unknown>
+    expect(unchangedMeta).not.toHaveProperty('state')
+    expect(unchangedMeta).toMatchObject({
+      kind: 'dsh-raven-research/task-state',
+      currentTaskId: started.state.taskId,
+    })
     const malformedMeta = {
       kind: 'dsh-raven-research/task-state',
       version: 1,

@@ -33,12 +33,12 @@
   Task 抽象。
 - **解决什么：** 早期就能拿到可用的 Checkpoint，中途纠偏而不是推倒重来，并且每条引用都对照真实抓取到的字节校验 ——
   而不是对照模型的记忆。
-- **怎么实现：** 一个挂在 host plane 的 [Cordis](https://github.com/cordiverse/cordis) 插件、一个面向模型的
-  `raven_task` 工具、一段紧凑的 prompt，以及 Web GUI 里的一张 settings 卡片。不引入第二个 agent runtime，
+- **怎么实现：** 一个 [Cordis](https://github.com/cordiverse/cordis) 插件，拆成 agent-role 模式（内部
+  `raven_task`、prompt 与 Task context）和可选的 host-role settings 卡片。不引入第二个 agent runtime，
   不自带模型、向量库或数据库；研究与写作仍由现有 Harness agent 用自己的工具完成。
 - **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再运行
   `npx dsh-raven-install-preset`。见[安装](#安装)。
-- **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语，也没有独立的 Task UI。见[使用](#使用)。
+- **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语、独立 Task UI，也不用学习生命周期命令。情境提示默认为 `auto`，也可设为 `off`。见[使用](#使用)。
 ## 为什么需要 Raven
 
 一个有分量的研究或写作请求，通常会掉进一条很长的批处理管线：你等很久，拿到一大块文字，而引用只是模型"记得"的字符串。
@@ -51,7 +51,7 @@ Raven 改变的是这项工作的形态。
 | 引用是"记住"的字符串 | 引用指向**真正打开过的 Source**，摘录会与抓取到的正文比对 |
 | 同一通稿的三次转载被当成三次印证 | 共享同一 `sourceFamily` 的 Claim 会被标记为**不构成独立佐证** |
 | 一个死链拖垮整轮 | 失败的依赖只会 **defer 受影响的 Claim**，其余已验证的工作照常诚实完成 |
-| 状态随工具调用消失 | Task book 由 session log 重建，stop / resume 之后依然存在 |
+| 状态随工具调用消失 | 最近一次成功持久化的 Task snapshot 由 session log 重建，并支持 stop / resume |
 
 `discover → read → analyze → draft → verify → refine` 这些常规推进都是自主的。只有当一个未决选择会影响公开结果、
 证据底线、受众、交付物、显著成本，或涉及外部/破坏性/敏感副作用时，Raven 才会来问。
@@ -61,9 +61,11 @@ Raven 改变的是这项工作的形态。
 - **基于官方搜索接缝的批量发现。** `discover` 在一个 Task step 内，通过 Harness `web` 搜索能力发出若干互补
   query，把多个 query 返回的同一 URL 合并为一条 Lead；某个 query 失败时，其余 query 的结果照常保留 —— 失败被记录为
   Limitation，而不是让整批作废。返回的是 **Lead**，绝不是 Source：没被打开并摘录之前，任何东西都不能被引用。
-- **复用 Agent Teams。** 部署组合了 Harness Agent Teams 能力时，Raven Task 归属于 Team：每个成员读取并推进同一个
-  Task，队友无法另起一个竞争的 Task，各成员自己的持久化记录会合并进同一本 Task book。没有组合 Team 时，一切照旧。
-- **渐进交付。** Checkpoint 本身就可用，且在 Task 仍在运行时发布，让你在昂贵的部分开始前就能改方向。
+- **复用 Agent Teams。** 部署组合了 Harness Agent Teams 能力且 Raven 成功检测到成员关系时，Task 归属于 Team：已观察
+  到的成员推进同一个 active Task，队友无法另起竞争 Task。未检测到成员关系（包括实验能力缺失或探测失败）时，每个 Agent
+  保持独立 Task book。
+- **渐进交付。** Raven prompt 指示主 Agent 在 Task 仍 active 时尽早发布一份可独立使用的 Checkpoint。Checkpoint 校验由
+  runtime 强制执行；何时向用户显示、何时继续后续 model/tool step，则由 Harness agent loop 决定。
 - **纠偏而不是重启。** `steer` 把用户的修正应用到运行中的 Task，并保留既有证据。
 - **引用要对得上抓取字节。** Artifact 用 `[@source-id]` 引用稳定的 Source ID；Raven 将有界摘录与抓取正文比对，
   机械渲染记录的 URL，并拒绝未知引用、未注册 URL、跨站重定向以及失效或不匹配的 Source。不匹配时会报告最接近的
@@ -73,8 +75,10 @@ Raven 改变的是这项工作的形态。
   contested，而不是被悄悄消解。
 - **诚实的部分结果。** Claim 被撤回时，断言它的正文必须在同一个 Checkpoint 内改写：不允许只删引用、留下裸断言。
   无法验证的证据会拒绝发布，而不是悄悄降级成"未检查"。
-- **会话内持久的 Task book。** 直接工具调用与 Code Mode `run_code` 内的调用都有效，并且能扛过 stop / resume ——
-  见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
+- **情境提示。** `guidance: auto` 只在相关时让主 Agent 简短提示一项有用能力，例如调整方向、增减来源、暂停/继续或保留
+  成果，不会变成教程或审批流程。`guidance: off` 会关闭这些可选提示，但不改变 Task 行为。
+- **可在会话内重放的 Task book。** 直接调用与 Code Mode `run_code` 调用通过 Harness 自有 session record 持久化
+  snapshot，并受下文的 nested-log spill 边界约束 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
 - **一句一行。** 每一份存下来的 Artifact 都会被规整成"每个句子独占一行"，让**行**成为最小编辑单元：一次修订
   diff 出来的是真正改动的那些句子，而不是整段重写。该变换是 Markdown 结构感知且幂等的 —— fenced code、表格、
   标题、分隔线、链接定义、数学块、YAML frontmatter、硬换行，以及列表项与引用块的续行前缀都原样保留。
@@ -136,15 +140,17 @@ tarball 自身没有任何运行时依赖，peer 由部署提供。声明为 pee
 
 `tools/code-dispatch-log` waterfall **并不**需要 host plane：事件准入沿作用域链向上扩散，且该事件的作用域为 `dispatch.agent`，因此限定在 agent 作用域的监听器依然能收到本 agent 自己的 Code Mode 子 dispatch。
 
-settings 命名空间是唯一无法隔离的界面，因为设置页面是一个*全局*界面：由 host plane 提供的卡片在任何模式下都可见，而如果从 preset 内部提供卡片，它会随使用该 preset 的会话出现和消失。隔离与卡片不可兼得 —— 因此隔离优先，**Raven 改为在 preset 行中进行配置**，即在安装器插入行中的 `config:` 块中配置。每个字段都在那里列出并带注释的默认值，因此无需离开文件即可查看可配置项：
+settings 命名空间是唯一无法隔离的界面，因为设置页面是一个*全局*界面：由 host plane 提供的卡片在任何模式下都可见，而如果从 preset 内部提供卡片，它会随使用该 preset 的会话出现和消失。隔离与卡片不可兼得 —— 因此隔离优先，**Raven 改为在 preset 行中进行配置**。每个字段都列在那里；对兼容性敏感的网络字段会显式采用更安全的新安装值，其余 schema 默认值则保持注释，直到操作者修改：
 
 ```yaml
 - id: raven-research
   name: dsh-raven-research
   config:
     role: agent
+    # guidance: auto
     # sourceVerification: remote
-    # sourceCheckTimeoutMs: 20000
+    sourceNetworkPolicy: public-only
+    sourceCheckTimeoutMs: 20000
     # searchMaxQueries: 4
     # proseLayout: sentence-per-line
     # …
@@ -290,9 +296,9 @@ base after mount:  13605 bytes (unchanged)
 > `raven_task` 注册两次。
 
 > [!IMPORTANT]
-> 由于 agent 那一半是按 agent scope 挂载的，每个 scope 会拿到自己的插件实例，因而拥有各自的**内存中** Task book。
-> Agent Team 不再共享同一份内存 book，每个成员回退到自己那份持久会话日志所承载的内容。Task 状态在 replay 时依然
-> 存活 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
+> Harness 会把 Raven preset 在 standing scope 下挂载一次，所有 Raven 会话再加入该 scope。Raven 在共享插件实例内按
+> Agent 身份或成功检测到的 Team 身份隔离状态；无关 owner 互不干扰，已观察到的 Team 成员共享一份内存 Task book。
+> 已持久化的 snapshot 可重放 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
 
 ### 5. 验证
 
@@ -367,7 +373,7 @@ Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pr
 `raven_task` 由 `raven` agent preset 注册，因此它**只在 Raven 模式下存在**。请在新建会话时选择该模式；在其他任何
 模式下，agent 都没有 Raven 工具，会直接作答而不开 Task。
 
-在 Raven 模式内部，没有启动咒语，也没有独立的 Raven UI —— 用户照常和 Harness agent 对话，Task 生命周期由模型驱动。
+在 Raven 模式内部，没有启动咒语，也没有独立 Raven UI —— 用户照常和 Harness agent 对话。直接说“只看一手来源”“先暂停”“继续”或“保留这份结果”即可，主 Agent 会把自然语言翻译成 Raven 的内部协议。`guidance: auto` 仅在有帮助时提示一项相关能力；在 Raven preset 行（或选择性开启的 settings 卡片）设 `guidance: off`，即可关闭提示而不改变工作流。
 
 ```text
 研究支持与反对这项政策的最强一手证据。先给我一份早期发现提纲，继续推进，
@@ -389,9 +395,9 @@ Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pr
 纠偏就是下一条消息 —— "重点讲成本，不要讲采用率""再挑剔一些""只引用一手资料" —— 它会落在同一个 Task 上，
 而不是开一个新的。
 
-### `raven_task` 的 action
+### 内部协议参考（供集成者）
 
-`raven_task` 面向模型。这些是同一个用户 Task 的内部生命周期操作，不是需要用户自己管理的多套流程：
+`raven_task` 面向模型，不是让用户操作的工作流语言。用户不应学习 action 名、Task id、phase 或 revision；主 Agent 会翻译普通请求。下表只供集成与测试参考：
 
 | Action | 作用 |
 | --- | --- |
@@ -402,7 +408,7 @@ Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pr
 | `steer` | 把用户纠偏应用到同一个 Task，保留既有证据与 Checkpoint。 |
 | `complete` | 校验引用身份、关键 Claim 链接、摘录匹配、Source 可达性，以及与最新一次 steer 之后 Checkpoint 完全一致的 Artifact 指纹。 |
 | `status` | 报告当前 Task book。 |
-| `stop` | 以记录在案的原因结束 Task；明确不等于 Completion。 |
+| `stop` | 把 Task 标记为 stopped；明确不等于 Completion。处理后会阻止后续 Task mutation，但不会取消已经在运行的 Harness 工作。 |
 | `resume` | 重新打开已停止的 Task（包括较早的那个），不丢失证据与 Artifact。 |
 | `export` | 返回 llm-wiki 页面字节，由 agent 用普通文件工具写盘。 |
 
@@ -476,7 +482,7 @@ namespace 意味着什么，就能把两个半边配到一起。浏览器半边�
 
 ### Task book 的两条持久化路径
 
-Raven 每个会话 —— 或者每个 Agent Team —— 维护一份 Task book，并且是从 session log 重建，而不是靠自己的存储：
+Raven 按所属 Agent 身份 —— 或成功检测到的 Agent Team 身份 —— 维护 Task book，并从这些身份所对应 Harness session 携带的持久记录重建，而不是靠自己的存储：
 
 - **直接工具调用**通过持久化的结果元数据携带 Task 记录（`tool/result.meta`，kind 为
   `dsh-raven-research/task-state`）。
@@ -491,7 +497,7 @@ Raven 每个会话 —— 或者每个 Agent Team —— 维护一份 Task book�
 > 可加载。若部署的 spill 策略替换掉了超大的日志副本，那一步只是无法恢复；会话照样能加载，下一次直接调用会把整份
 > 记录重新发布出来。
 
-两条路径都能在会话 resume 时恢复这本 book，所以在程序内推进的 Task 不会悄无声息地丢失。
+会话 resume 时会从最近一次成功持久化的 snapshot 恢复这本 book。若超大的 Code Mode nested log 被 spill 掉，那一步可能不在重放中；会话仍能加载，后续直接的状态 mutation 会重新发布完整 snapshot。
 
 Code Mode 就是 Harness 中在 UI 里以 **PTC mode** 为 preset 别名的那项能力，因此跑该 preset 的部署正是这条路径服务的
 对象。Raven 不在本地重述这份契约：`src/plugin.ts` 从 `@deepseek-ai/dsh-tools` 导入 `CodeDispatchEventData` 与
@@ -500,13 +506,13 @@ Code Mode 就是 Harness 中在 UI 里以 **PTC mode** 为 preset 别名的那�
 `run_code` 工具，并真的跑一段调用 `raven_task` 的程序，让真实的 bridge 跑真实的 waterfall、追加真实的
 `tool/code-dispatch` 事件；同时它还直接断言上游的那些声明，一旦它们移动就指名该重述什么。
 
-### 每个 Agent Team 一个 Task
+### 每个检测到的 Agent Team 一个 Task
 
-部署组合了 Harness Agent Teams 能力时，Raven 以 Team id 而不是 Agent id 作为 Task book 的键，因此 Lead 与每个队友
-共享同一个 Task 身份、同一份证据集与同一个 Artifact。Team 的 Task 处于 active 时，队友的 `start` 会被拒绝，它的
-Checkpoint 落在该 Task 上，各成员自己的持久化记录会在该成员首次出现时并入这本共享的 book。Raven 通过
-`ctx.get('agentTeams')` 结构化地读取该能力，并把每一次调用都包住：Team 相关的包在上游是私有、未发布、且不作任何
-稳定性承诺的，所以它的缺失 —— 或者一次抛错的探测 —— 绝不能让某个 Task step 失败。
+Raven 通过可选的 Harness Agent Teams 能力成功检测到成员关系时，以 Team id 而不是 Agent id 作为 Task book 的键。已观察
+到的成员于是共享一个 active Task 身份、同一份证据集与 Artifact，队友另起的竞争 `start` 会被拒绝。进程重启后，各成员
+自己的持久记录会在该成员被观察到时并入共享 book；在此之前，重建视图可能只含当前调用成员的历史。Raven 通过
+`ctx.get('agentTeams')` 结构化读取该能力并包住每次调用，因为 Team 包在上游是私有、未发布的。能力缺失、没有成员关系或
+探测抛错时，会退化成独立的单 Agent book，而不会假装已经建立 Team ownership。
 
 ### 失败路径同样带着 Task
 
@@ -564,8 +570,10 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 
 | 字段 | 默认值 | 作用 |
 | --- | --- | --- |
+| `guidance` | `auto` | `auto` 仅在相关时让主 Agent 提示至多一项 Raven 能力，并避免重复、教程、协议细节和审批门。`off` 关闭这些可选提示，不改变 Task 行为。 |
 | `sourceVerification` | `remote` | `structural-only` 会屏蔽所有远程检查。此时没有 Source 能被确认，因此记录了 Source 的 Checkpoint 会被拒绝并指明该策略。仅在网络确实不可达时使用。 |
-| `sourceCheckTimeoutMs` | `0` | 单个远程 Source 检查的期限（毫秒）。`0` 表示不设期限。超时会把该 Source 报告为不可验证，而不是让 Checkpoint 一直挂着。 |
+| `sourceNetworkPolicy` | `unrestricted`（schema 兼容默认）；Raven preset：`public-only` | `public-only` 会在调用 fetch provider 前拒绝本机、私有或特殊网络目标。省略该新字段的旧配置仍保持 `unrestricted`；新安装的 Raven 模式会显式设置 `public-only`。 |
+| `sourceCheckTimeoutMs` | `0`（schema 兼容默认）；Raven preset：`20000` | 单个远程 Source 检查的期限（毫秒）。`0` 表示不设单次期限。新安装的 Raven 模式会显式使用 20 秒；超时会把该 Source 报告为不可验证。 |
 | `sourceDiscovery` | `seam` | `disabled` 会完全屏蔽 `action=discover`：调用会报告发现能力不可用并记录一条 Limitation，而不是返回一个可能被 agent 误读成"什么都不存在"的空结果。agent 仍然保有自己的 Harness 工具。 |
 | `searchMaxQueries` | `4` | 单批 `discover` 中 query 数量的上限，与 Harness `web_search` 的批量上限一致。该上限在**去重之前**生效，因此重复的 query 会占掉自己的名额。 |
 | `searchMaxResults` | `8` | 每个 query 请求候选数的上限，与 Harness `web_search` 的 source 上限一致。合并后的 Lead 列表另有单独的上限。 |
@@ -580,14 +588,13 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 > 任何配置都不能降低 Task 的证据底线。屏蔽检查只会让证据变成"不可验证"从而拒绝发布，绝不会把未检查的 Source
 > 变成已确认。
 
-`cordis.yml` 中的组合条目是 `base` 层。用户 `settings.yaml` 中的值会覆盖它，并在下一次 Source 检查时生效、无需重启；
-若 settings 服务消失，组合条目重新成为权威。
+`cordis.yml` 中的组合条目是 `base` 层。仅当部署明确开启全局 host settings 卡片时，用户 `settings.yaml` 中的值才会在下一次 Raven step 覆盖该 base；settings 服务消失后，模式自己的组合条目重新成为权威。这份 override 是进程全局的，正是挂载 host 行时接受的隔离代价之一。
 
 ### settings 卡片
 
 Raven 的浏览器半边会在 **Settings › Plugins** 下为该命名空间注册一张卡片，因此上面这些字段无需手写
-`settings.yaml` 即可编辑。它是一张可折叠卡片，按证据核验、线索发现、Artifact 排版、Draft Variant 分组，几何尺寸与
-设计 token 都与 Harness 为自家插件提供的卡片一致 —— 它们共处同一个列表，一张自行其是的卡片会被读成另一类对象。
+`settings.yaml` 即可编辑。它是一张可折叠卡片，按证据核验、线索发现、Artifact 排版、Draft Variant 及 guidance 等其它
+用户偏好分组，几何尺寸与设计 token 都与 Harness 为自家插件提供的卡片一致。
 所有编辑（包括「重置」）都只在保存时写入：settings 写入是一次带 revision 栅栏的持久文档变更，而不是控件一落定就该
 提交的东西。卡片依据 key 在用户层的**存在性**（而非值比较）标出哪些字段被覆盖，任何一处暂存编辑无法解析时拒绝整次
 保存 —— 而不是只写入表单中正确的那一半 —— 并在写入后回读该 section，而不是把「没有抛异常」当成「已生效」。文案提供
@@ -636,6 +643,11 @@ Raven 会重新打开每个已记录的 URL，并要求记录的摘录出现在�
 **没有任何 Source 能被验证**，因此无法发布有据可依的 Checkpoint，Completion 也无法成功 —— 一个要求 grounding
 却没有任何已验证 Claim 的 Task 会保持 `active`，而不会被标记为完成。这是刻意的：另一种做法，是交出一份引用从未被
 检查过的"已完成"研究文档。
+
+Harness 的 stock profile 会刻意关闭 HTTP fetch，因为当前本地 provider 尚未实现完整的 SSRF／私网隔离。随附的 Raven preset 会显式设置
+`sourceNetworkPolicy: public-only`，会在委托抓取前拒绝本机名、私有／特殊 IP，以及含任何非公共 DNS 结果的域名。
+这只是**预检过滤器，不是 SSRF sandbox**：provider 建连时会再次解析 DNS，因此 DNS rebinding 风险仍然存在。能访问
+敏感内网的部署必须在网络层隔离 fetch provider，不能把 `unrestricted` 当作隔离手段。
 
 你会在 Source 检查中看到这样的拒绝：
 
@@ -725,12 +737,13 @@ wiki/index.md             仅在 init=true 时播种
 | --- | --- | --- |
 | Source | **256** | 本次提交批次中后续的 Source 登记被拒；该 Checkpoint 连同上限一并被拒绝，既有状态原封不动。 |
 | Claim | **512** | 同上 —— 整批被拒而不是静默截断，因此不会出现只记录了一半的 provenance。 |
-| Checkpoint | **128** | `checkpoint` 被拒。Task 保持 active，仍可基于最新的既有 Checkpoint 完成。 |
+| Checkpoint | **128 个描述符** | 触顶时裁剪较旧描述符但保留第一个，并为 Completion 预留位置；历史 Artifact 仍保留在原始 tool result 中。 |
 | Limitation | **256** | 记录的失败不再累积。Task 照常工作；上限会被报告，因此不会有 Limitation 被静默丢弃。 |
 | Artifact | **100,000 字符** | 提交的 Artifact 在排布与哈希之前即被拒绝。请拆分工作，或先 export 再继续。 |
 | Steering Revision | **128** | `steer` 被拒；既有 Checkpoint 与证据不受影响。 |
+| 持久 Task snapshot | **1,000,000 UTF-8 JSON bytes** | 非最终 mutation 会为 Completion 预留 64,000 bytes。Sources、Claims、摘录、纠偏、Limitations 与 Artifact 的组合状态超过当次聚合预算时，mutation 被拒，既有状态不被替换。 |
 
-有两条规则让触顶是可恢复的而非终局：被拒绝的提交**绝不改变状态**（重新提交一个更小的批次即可），且一个已经触顶的
+容量拒绝不会改变此前已经接受的状态，且一个已经触顶的
 Task 始终仍可 `complete` 与 `export`。单字段上限（request 与 correction 各 20,000 字符、summary 2,000、摘录 20,000、
 Source 标题 1,000、locator 4,000）的报告方式与此相同。
 
@@ -835,8 +848,9 @@ pnpm check:release
 - 把每一份存下来的 Artifact 幂等地排布为一句一行，且不重排 Markdown 结构；
 - 只把 Draft Variant 作为候选返回，并在 route 未配置或未知时如实报告，而不是替换成别的 route；
 - 从 bundle patch 恰好插入一行 host-plane 行，并按命名空间 key 注册 settings 卡片；
-- 在一个 Agent Team 内共享同一个 Task，并拒绝队友另起一个竞争的 Task；
-- 在不写任何插件自有 session event type 的前提下，让 Code Mode 中的 Task step 保持持久；
+- 在成功检测到的 Agent Team 内共享一个 active Task，并拒绝队友另起竞争 Task；
+- 在不写插件自有 session event type 的前提下恢复已持久化的 Code Mode Task snapshot，并明确 spill 边界；
+- 在 `auto` 注入情境提示、在 `off` 完全关闭提示，同时保持同一套渐进工作流；
 - 在最终校验前就暴露可用的中间研究 Artifact；
 - 在中途纠偏后继续精修同一个 Task；
 - 正常阶段推进无需确认动作；
@@ -850,8 +864,9 @@ pnpm check:release
 </details>
 
 `pnpm test:pack` 会创建一个不含 `lib/` 的隔离 staging 工程，只链接锚定的开发工具链，跑真实的 `prepack` 生命周期
-而不污染仓库构建，校验恰好九个文件的白名单，并在第二个外部消费者中用隔离的 pnpm home/store 安装 tarball，然后执行
-import、apply 与模型工具调用。
+而不污染仓库构建，校验恰好 13 个文件的白名单，并在干净的外部消费者中安装 tarball，然后执行 import、apply 与模型工具
+调用。CI 使用全新的 pnpm store 与 registry；离线工作站可设置 `RAVEN_PACK_STORE_DIR`、`RAVEN_PACK_CACHE_DIR` 和
+`RAVEN_PACK_OFFLINE=1`，复用预先填充的内容寻址 store 与 metadata cache，而不会把消费者链接回本仓库。
 
 ## FAQ
 
@@ -867,8 +882,8 @@ import、apply 与模型工具调用。
 记录摘录的依然是 agent —— 发现永远不产出证据。
 
 **在 Agent Team 里能用吗？**
-可以。Raven Task 属于整个 Team，而不属于某一个成员。Agent Teams 是实验性、未发布的 Harness 能力，因此 Raven 以
-可选方式消费它：没有它时，每个 Agent 各自拥有自己的 Task book。
+成功检测到成员关系时可以：Raven Task 属于该 Team，而不属于某一个成员。Agent Teams 是实验性、未发布的 Harness
+能力，因此 Raven 以可选方式消费它；没有检测到成员关系（包括探测失败）时，每个 Agent 各自拥有独立 Task book。
 
 **没有联网能用吗？**
 非取证类的写作与学习可以。没有组合 `web` 能力时，外部 Claim 不会被发布为"已支撑"：它们保持 deferred；一个要求
@@ -902,8 +917,9 @@ Claim 的判断仍由 agent 负责。
 - 自然语言纠偏的识别由 Harness 模型基于 Raven 的前置上下文完成。插件提供的是确定性的同 Task `steer` 迁移，
   而不是基于规则的文本分类器去猜测纠正意图。
 - 未组合 Harness `web` 能力时，外部 Claim 保持 deferred。
-- 状态在所属 Harness 会话内持久，包括多个已停止或已完成的 Task 身份以及稍后 resume 旧 Task。跨会话项目、可复用语料库
-  和间隔重复存储不在范围内；要留存成果请用 `export`。
+- 最近一次成功持久化的 Task snapshot 可从所属 Harness session record 重放，包括多个 stopped/completed Task 身份及稍后
+  resume 旧 Task。超大的 nested Code Mode log 可能漏掉那一步；后续直接 mutation 会重新发布完整 snapshot。跨会话项目、
+  可复用语料库和间隔重复存储不在范围内；要留存成果请用 `export`。
 - Raven 通过普通的工具结果与聊天呈现 Task 进度；它在浏览器里唯一的界面是 settings 卡片，v1 没有针对 Task 本身的
   自定义 UI。
 - 在部署配置 `draftRoutes` 之前 Draft Variants 处于关闭状态；变体本身永远不是证据：不可被引用，也不计入证据底线。

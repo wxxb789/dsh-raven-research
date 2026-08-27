@@ -297,6 +297,15 @@ describe('base-change detection', () => {
     expect(baseCarriesRavenRow('# see dsh-raven-research for details\n')).toBe(false)
   })
 
+  it('ships secure bounded Source defaults in every newly generated Raven row', () => {
+    expect(ravenRow()).toMatchObject({
+      config: {
+        sourceNetworkPolicy: 'public-only',
+        sourceCheckTimeoutMs: 20_000,
+      },
+    })
+  })
+
   it('reports an ordinary upgrade as expected and needing nothing, under live', () => {
     const report = baseChanged(file, '- id: persona\n- id: extra\n', true)
     expect(report.warning).toBe(false)

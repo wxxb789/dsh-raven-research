@@ -6,8 +6,9 @@ The requested public contract fixes five test seams:
 
 1. **Cordis load seam** — named exports, prompt/tool registration, real Loader
    unwrapping, execution through `ctx.tools`, and disposal.
-2. **Raven Task interface** — one Task across Outcomes, Checkpoints, Steering
-   Revisions, stop/resume, replay, and Completion.
+2. **Raven Task interface** — one active continuing Task per owning Agent or detected
+   Team book across Checkpoints, Steering Revisions, stop/resume, replay, and Completion;
+   stopped and completed Task history remains addressable.
 3. **SourceVerifier seam** — deterministic and Harness-web observations feeding the
    same source/claim/completion policy.
 4. **DraftGenerator seam** — a deterministic drafter and the real `ctx.llm` adapter
@@ -23,18 +24,19 @@ agent topology.
 
 | Criterion | Evidence |
 |---|---|
-| Clean install, load, and run against intended Harness | `pnpm test:pack` creates an external staging project with no `lib/`, links only the pinned toolchain, exercises real `prepack` without mutating the repository build, enforces the exact tarball allowlist, and installs it with an isolated pnpm home/store in a second external consumer before import/apply/execute; `pnpm test:dsh` requires the exact clean Harness commit, loads a real `cordis.yml` through Loader + Include, executes start/checkpoint/complete through the real tool registry and `ctx.web` seam, and removes the composition to verify disposal. |
-| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, the tsdown Host and browser builds, and 140 Vitest tests. The build runs before the tests because the browser half is a build artifact and one suite verifies that artifact rather than its source. |
+| Clean install, load, and run against intended Harness | `pnpm test:pack` creates an external staging project with no `lib/`, links only the pinned toolchain, exercises real `prepack` without mutating the repository build, enforces the exact tarball allowlist, and installs it with an isolated pnpm home plus a fresh store by default (or an explicit pre-populated offline store/cache) in a second external consumer before import/apply/execute; `pnpm test:dsh` requires the exact clean Harness commit, loads a real `cordis.yml` through Loader + Include, executes start/checkpoint/complete through the real tool registry and `ctx.web` seam, and removes the composition to verify disposal. |
+| Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, the tsdown Host and browser builds, and the full Vitest inventory below. The build runs before the tests because the browser half is a build artifact and one suite verifies that artifact rather than its source. |
 | Durable output as a valid llm-wiki | `tests/unit/wiki.test.ts` exports a completed Task as llm-wiki bytes: an artifact page with frontmatter, sources, and contested marking; one immutable `raw/` page per Source whose `sha256` covers exactly its own body; an appendable log entry; and SCHEMA/index/log seeds only under `init`. Raven emits bytes and never writes files, so the repository stays readable by the llm-wiki skill and Obsidian. |
 | Evidence-backed Keep / Change / Drop assessment | `docs/reverse-engineering/assessment.md` synthesizes the Hermes profile, nana-research, Harness, and skill-corpus reports — `hermes-research-skills.md` (all 258 files across 18 research skills), `hermes-r-round-references.md`, and `hermes-nana-wiki.md` — and maps preserved mechanisms to source files and line ranges. |
 | Four first-class Outcomes | `tests/acceptance/raven.acceptance.test.ts` has end-to-end scenarios for `research`, `general-writing`, `academic-writing`, and `learning` through the same tool and Task state. |
 | Progressive research and mid-run correction | The first acceptance scenario verifies one initial Source and publishes an active early Artifact before the second Source, broader collection, and final Completion verification; it then continues research, applies `steer`, emits a revised Checkpoint, and completes with the original Task ID. |
+| Natural main-agent use with contextual guidance | `tests/acceptance/raven.acceptance.test.ts` exercises `guidance: auto` before a Task and across active, stopped, and completed states, asserts the injected policy instructs the main agent to keep actions and identifiers internal, limits hints to one relevant capability, and forbids repetition/tutorial/approval behavior. The same scenario mounts `guidance: off`, proves no guidance block is injected before or during the Task, and still runs checkpoint → stop → resume → Completion on the same Task. `tests/unit/config.test.ts` proves the default and rejects values outside `auto | off`; `tests/unit/card-state.test.ts` proves the policy is editable through the schema-derived settings card. |
 | No mandatory normal-stage confirmation | At the executable Raven interface, the acceptance suite verifies there is no `confirm` or `approve` action and the real DSH composition advances start/checkpoint/complete without an approval call; the prompt explicitly forbids approval requests between normal stages. |
 | No fabricated citations or broken references | Unit/acceptance tests require registered Source IDs for material external Claims, mechanically render Source URLs plus a Claim↔Source trace, reject unknown raw URLs and cross-host resolved identities, and refuse grounded Checkpoints or Completion when a URL is broken or its recorded excerpt is absent. A loopback integration test retrieves real HTTP bytes, rejects invented support, accepts a matching HTML-normalized excerpt, and completes only the exact checkpointed Artifact. |
 | Partial failures degrade gracefully | The engine first observes a real verifier failure for one dependent Source, automatically defers Claims that lose all usable support, and records a Limitation; a revised Checkpoint preserves the independently verified Claim and can complete as `completed-with-limits`. A separate test ensures zero valid grounded work remains active rather than being mislabeled graceful Completion. |
-| Installable without editing a composition | `package.json` declares `dsh.bundle.patch`, so `dsh plugin add` appends the package to a profile's bundle list. `tests/unit/bundle.test.ts` asserts the manifest field, its presence in the published file set, the row identity, and that no Harness package is a runtime dependency. `pnpm test:dsh` then composes `cordis.patch.yml` through the Harness's OWN `loadOverlayPatches` and `composeEntries` and asserts the result is exactly one row naming this package. |
-| Configurable from the Web GUI | The browser half registers one card into the keyed `settings.plugin.item` slot under key `raven-research`, drawn as a disclosure card with the same geometry and design tokens as the cards the Harness ships, grouped into evidence, discovery, prose, and drafting, with bilingual copy. The card states no validation rules of its own: fields, control kinds, accepted values, and bounds come from the schema the Host registered, read off `settingsScope.describe()` and rehydrated through the Harness's own `settingsSchema` service, so a refused draft reports the schema's own words. `tests/unit/card-state.test.ts` drives the form model through the REAL `Config` schema and a stand-in mirroring the Harness service — field derivation and declaration order, choices derived from union consts, schema-owned refusal of negative/fractional/non-numeric drafts, the one route-shape rule the schema cannot express, override detection from key presence rather than value comparison, staged clears that only write when the user layer carries the key, drafts restating the stored value counting as no edit, all-or-nothing save planning, dictionary coverage for every schema field, and memory-mode read-only. `tests/integration/client-bundle.test.ts` evaluates the built `lib/client.js` in a VM with a fake shell and asserts it registers one entry under the package name, requires only shell-answerable specifiers, carries no Host-only code, binds its scope and the describe mirror, registers both shipped locales in one call, carries its own stylesheet, and materializes to a plugin registering under the namespace key with its locale namespace declared. `pnpm test:dsh` asserts the slot contract, the Harness card chrome, the locale registration signature, the four `settingsSchema` method signatures, the describe face, and the per-namespace schema envelope against the Harness checkout under test. The card renders into host chrome it cannot see, so two structural rules are asserted rather than eyeballed: `tests/unit/styles.test.ts` requires every selector in the shipped stylesheet to be scoped to the card and the card root to establish a containing block, because an escaped absolutely positioned descendant lands in the settings dialog instead and scrolls its header and navigation permanently out of view on the first click; `tests/unit/react-alignment.test.ts` requires the developed and typechecked React major to equal the one the official settings-UI packages declare as their `react` peer, because the shell supplies React through its module table and a drift installs silently, typechecks green, and fails only in the page. |
-| Writing edited a line at a time | `tests/unit/prose.test.ts` (22) covers sentence splitting for Latin and CJK, abbreviations, initials, decimals, inline code, link destinations, and every protected Markdown structure, plus idempotence. `tests/integration/drafting.test.ts` covers the stored bytes, the reflow report, Completion of either line shape, and the layout-change diagnosis. |
+| Installable as an isolated mode | `package.json` deliberately declares no `dsh.bundle`: installing the dependency activates no global row. The shipped `dsh-raven-install-preset` bin writes the user-owned Raven mode, inheriting a base preset live and adding exactly one `role: agent` row. `tests/unit/bundle.test.ts` asserts the manifest absence and shipped preset assets; `tests/unit/install-preset.test.ts` covers live/snapshot installation and non-destructive base handling. `pnpm test:dsh` proves the default install contributes no global tool/namespace, while the opt-in `cordis.patch.yml` composes to exactly one `role: host` row. |
+| Configurable from the Web GUI | The browser half registers one card into the keyed `settings.plugin.item` slot under key `raven-research`, drawn as a disclosure card with the same geometry and design tokens as the cards the Harness ships, grouped into evidence, discovery, prose, drafting, and other user preferences such as guidance, with bilingual copy. The card states no validation rules of its own: fields, control kinds, accepted values, and bounds come from the schema the Host registered, read off `settingsScope.describe()` and rehydrated through the Harness's own `settingsSchema` service, so a refused draft reports the schema's own words. `tests/unit/card-state.test.ts` drives the form model through the REAL `Config` schema and a stand-in mirroring the Harness service — field derivation and declaration order, choices derived from union consts, schema-owned refusal of negative/fractional/non-numeric drafts, the one route-shape rule the schema cannot express, override detection from key presence rather than value comparison, staged clears that only write when the user layer carries the key, drafts restating the stored value counting as no edit, all-or-nothing save planning, dictionary coverage for every schema field, and memory-mode read-only. `tests/integration/client-bundle.test.ts` evaluates the built `lib/client.js` in a VM with a fake shell and asserts it registers one entry under the package name, requires only shell-answerable specifiers, carries no Host-only code, binds its scope and the describe mirror, registers both shipped locales in one call, carries its own stylesheet, and materializes to a plugin registering under the namespace key with its locale namespace declared. `pnpm test:dsh` asserts the slot contract, the Harness card chrome, the locale registration signature, the four `settingsSchema` method signatures, the describe face, and the per-namespace schema envelope against the Harness checkout under test. The card renders into host chrome it cannot see, so two structural rules are asserted rather than eyeballed: `tests/unit/styles.test.ts` requires every selector in the shipped stylesheet to be scoped to the card and the card root to establish a containing block, because an escaped absolutely positioned descendant lands in the settings dialog instead and scrolls its header and navigation permanently out of view on the first click; `tests/unit/react-alignment.test.ts` requires the developed and typechecked React major to equal the one the official settings-UI packages declare as their `react` peer, because the shell supplies React through its module table and a drift installs silently, typechecks green, and fails only in the page. |
+| Writing edited a line at a time | `tests/unit/prose.test.ts` covers sentence splitting for Latin and CJK, abbreviations, initials, decimals, inline code, link destinations, and every protected Markdown structure, plus idempotence. `tests/integration/drafting.test.ts` covers the stored bytes, the reflow report, Completion of either line shape, and the layout-change diagnosis. |
 | Multi-model drafting that cannot become evidence | `tests/integration/drafting.test.ts` asserts a Draft Variant never reaches the evidence floor: adopting variant wording verbatim still leaves a grounding-required Completion refused until a recorded Source excerpt supports it. It also covers route-subset selection, refusal of an unconfigured route, survival of a failed route, and bounded provenance that retains no variant text. |
 
 ## Vitest inventory
@@ -76,7 +78,14 @@ agent topology.
   - list-item and blockquote continuation prefixes preserved;
   - authored hard line breaks preserved rather than reflowed across;
   - idempotence for both Markdown and plain formats;
+  - bounded abbreviation lookbehind on a long unbroken dot-dense token;
   - the layout report distinguishing a reflow from a no-op.
+- `tests/unit/url.test.ts`
+  - one-way HTTP→HTTPS identity upgrade, default-port equivalence, and downgrade/host/port rejection;
+  - Source credential rejection and Lead credential redaction.
+- `tests/unit/network-policy.test.ts`
+  - private, loopback, metadata, mapped IPv4/IPv6, NAT64, and 6to4 address refusal;
+  - all-DNS-answers-must-be-public behavior and DNS failure containment.
 - `tests/unit/card-state.test.ts`
   - the field set matching the Host schema exactly;
   - choice, natural, and route parsing, with naturals refusing everything `Number()` accepts;
@@ -88,10 +97,9 @@ agent topology.
   - read-only rendering in memory mode and where the Host refuses writes;
   - all-or-nothing save planning.
 - `tests/unit/bundle.test.ts`
-  - the one manifest field the profile composer reads;
-  - the patch shipped in the published file set and exported;
-  - one inserted row naming this package and this plugin id;
-  - no Harness package as a runtime dependency.
+  - the deliberate absence of `dsh.bundle`, which keeps installation inert outside Raven mode;
+  - the opt-in host patch plus both shipped preset assets in the published file set;
+  - exactly one agent-role row and no Harness package as a runtime dependency.
 - `tests/unit/process.test.ts`
   - bounded child-process deadline;
   - cancellation reason preservation while the process tree settles.
@@ -110,9 +118,10 @@ agent topology.
   - per-query deadlines, withheld discovery, an uncomposed search provider, and caller
     cancellation reported as cancellation rather than as a per-query failure.
 - `tests/integration/agent-team.test.ts`
-  - one Task shared across an Agent Team, and a teammate's competing `start` refused;
-  - each member's own durable records merged into the shared Task book;
+  - one active Task shared across a successfully detected Agent Team, and a teammate's competing `start` refused;
+  - each observed member's own durable records folded into the shared Task book, including the documented post-restart case where another member's history is not present until that member is observed;
   - the teammate-only pre-step instruction;
+  - a continuing Team book retained under pressure from more than 64 distinct Team books, while ordinary Agent eviction remains bounded elsewhere;
   - single-agent behaviour where no Team capability is composed or its probe throws.
 - `tests/integration/drafting.test.ts`
   - `provider/model` split on the FIRST slash so a namespaced model id survives;
@@ -148,6 +157,8 @@ agent topology.
   - Learning;
   - fabricated/unregistered URL rejection;
   - known-broken cited Source rejection;
+  - contextual guidance in `auto` before and during a Task;
+  - complete guidance suppression in `off` while checkpoint/stop/resume/Completion remain usable;
   - absence of normal-stage confirmation actions (discovery included).
 
 ## Release gate
@@ -165,7 +176,17 @@ real Harness compatibility smoke test.
 
 `pnpm test:pack` reaches a registry on purpose: Raven declares its Harness packages as
 peer dependencies, and the clean consumer proves a real deployment can resolve them.
-An unreachable registry therefore fails that gate rather than silently skipping it.
+An unreachable registry therefore fails that gate rather than silently skipping it. A workstation that already holds the exact pinned graph can exercise the same clean consumer without network access:
+
+```powershell
+$env:RAVEN_PACK_USERCONFIG = "$HOME\.npmrc"
+$env:RAVEN_PACK_STORE_DIR = "Q:\.pnpm-store\v11"
+$env:RAVEN_PACK_CACHE_DIR = "$HOME\AppData\Local\pnpm-cache"
+$env:RAVEN_PACK_OFFLINE = "1"
+pnpm test:pack
+```
+
+The store and metadata cache must already contain every pinned package. The consumer still uses its own directory and isolated HOME; no package is linked from this repository.
 
 Where the feed is an authenticated mirror whose token expires, refresh the credential
 before the gate rather than treating the fetch failure as a Raven defect. On a machine

@@ -17,6 +17,7 @@ import type {
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { WebFetchResult, WebRuntime, WebSearchResult } from '@deepseek-ai/dsh-web'
 
+import { settleWithAbort } from './abort.js'
 import { decodeRavenTaskState } from './codec.js'
 import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig, type RavenRole } from './config.js'
 import {
@@ -29,6 +30,7 @@ import {
   type RavenDraftLimits,
   type RavenSearchLimits,
 } from './engine.js'
+import { assertPublicDestination, SourceNetworkPolicyError } from './network-policy.js'
 import { RAVEN_PROMPT } from './prompt.js'
 import type { ProseLayoutOptions } from './prose.js'
 import { canonicalSourceUrl, redactedLeadUrl, sameSourceIdentity } from './url.js'
@@ -121,6 +123,8 @@ interface AgentTeamsLike {
 interface RavenToolValue extends RavenDispatchResult {
   readonly kind: 'raven-task-result'
   readonly currentTaskId: string
+  /** Whether this result advanced durable Task state and therefore needs a replay snapshot. */
+  readonly durableState: boolean
 }
 
 interface RavenTaskMeta {
@@ -254,10 +258,11 @@ function bookKeyFor(agent: Agent, membership: TeamMembershipLike | undefined): s
  * carry a 100k-character Artifact plus 256 Sources (~800 KB at the documented
  * ceilings, several Tasks per book).
  *
- * Eviction is safe precisely because {@link mergeSessionRecords} can rebuild a book
- * from the Agent's own durable log: an evicted book costs ONE re-fold on the next
- * call, never a Task. The cap is generous enough that an active multi-session host
- * never pays that re-fold on a session it is still using.
+ * Ordinary Agent books and terminal-only Team books remain capped because durable
+ * logs can rebuild them. Detected-Team books containing active or stopped Tasks are
+ * never evicted: rebuilding one member at a time could fork a continuing Team Task.
+ * The resident bound is therefore {@link TASK_BOOK_LIMIT} plus every continuing Team
+ * book for which no evictable candidate remains.
  */
 const TASK_BOOK_LIMIT = 64
 
@@ -279,25 +284,20 @@ const TASK_BOOK_LIMIT = 64
  * Two limits of that claim, stated because the earlier version of this comment
  * overstated it and a reader would have relied on it:
  *
- *   - A TEAM book folds several members' logs, but a re-fold seeds only the CALLING
- *     agent's log. So a rebuilt Team book carries that member's contributions and not
- *     yet its teammates'; each teammate's own next call folds its own log back in.
- *     Recency is also per book rather than per contributing session, so a Lead that is
- *     idle while teammates call elsewhere is not what keeps the Team book resident.
- *   - A step whose result was never durably appended cannot be re-folded at all. For a
- *     single agent that window belongs to a session actively making calls, which the
- *     LRU does keep resident; for a Team book that argument does not hold, for the
- *     recency reason above.
- *
- * Both are bounded by the cap being reached at all, which needs more than
- * {@link TASK_BOOK_LIMIT} live books in one host process.
+ * A TEAM book folds several members' logs, but a re-fold seeds only the CALLING
+ * agent's log. A rebuilt Team book therefore carries that member's contributions and
+ * not yet its teammates', and an undurable step cannot be re-folded at all. To avoid
+ * stale or forked continuing Tasks, Team books with an active or stopped Task are not
+ * eviction candidates. If all over-limit candidates are such books, correctness makes
+ * the resident cap soft by exactly the number of protected Team books above the limit.
  */
 function taskBookFor(
   ctx: Context,
   books: Map<string, SessionTaskBook>,
   agent: Agent,
+  membership: TeamMembershipLike | undefined = teamMembership(ctx, agent),
 ): SessionTaskBook {
-  const key = bookKeyFor(agent, teamMembership(ctx, agent))
+  const key = bookKeyFor(agent, membership)
   const existing = books.get(key)
   const book = existing ?? { tasks: new Map<string, RavenTaskState>(), seeded: new Set<string>() }
   // Re-insert to mark this book most-recently-used, and to make it ineligible for the
@@ -305,9 +305,13 @@ function taskBookFor(
   books.delete(key)
   books.set(key, book)
   while (books.size > TASK_BOOK_LIMIT) {
-    const oldest = books.keys().next()
-    if (oldest.done === true || oldest.value === key) break
-    books.delete(oldest.value)
+    const evictable = [...books].find(([candidateKey, candidate]) =>
+      candidateKey !== key
+      && (!candidateKey.startsWith('team:')
+        || [...candidate.tasks.values()].every(task => task.phase === 'completed' || task.phase === 'completed-with-limits')),
+    )
+    if (evictable === undefined) break
+    books.delete(evictable[0])
   }
   if (!book.seeded.has(agent.id)) {
     book.seeded.add(agent.id)
@@ -351,7 +355,14 @@ function webHalf<K extends 'fetch' | 'search'>(ctx: Context, method: K): Pick<We
 const WEB_FETCH_ABSENT_DETAIL = 'DeepSeek Harness web capability is not composed'
 
 /** What the retrieval capability can actually do right now. */
-type WebCapabilityState = 'usable' | 'no-provider' | 'absent' | 'unknown'
+type WebCapabilityState =
+  | 'usable'
+  | 'no-provider'
+  | 'ambiguous'
+  | 'configured-missing'
+  | 'configured-unavailable'
+  | 'absent'
+  | 'unknown'
 
 /**
  * What the retrieval capability can actually do RIGHT NOW, as opposed to whether
@@ -376,17 +387,28 @@ function webCapabilityState(ctx: Context, half: 'fetch' | 'search'): WebCapabili
   const service = webHalf(ctx, half)
   if (service === undefined) return 'absent'
   try {
-    const registry = asRecord(service)?.[half === 'fetch' ? 'fetchProviders' : 'searchProviders']
+    const runtime = asRecord(service)
+    const registry = runtime?.[half === 'fetch' ? 'fetchProviders' : 'searchProviders']
     if (!(registry instanceof Map)) return 'unknown'
-    for (const provider of registry.values()) {
-      const available = asRecord(provider)?.available
-      // A provider that does not answer the usability question is assumed usable:
-      // the seam would still select it, so refusing on Raven's behalf would be
-      // Raven inventing a failure the Harness does not have.
-      if (typeof available !== 'function') return 'usable'
-      if ((available as () => unknown).call(provider) !== false) return 'usable'
+    const available = (provider: unknown): boolean => {
+      const probe = asRecord(provider)?.available
+      // A provider without `available()` is still selectable by the runtime.
+      return typeof probe !== 'function' || (probe as () => unknown).call(provider) !== false
     }
-    return 'no-provider'
+    const configured = runtime?.[half === 'fetch' ? 'fetchProviderId' : 'searchProviderId']
+    if (configured !== undefined) {
+      if (typeof configured !== 'string') return 'unknown'
+      const provider = registry.get(configured)
+      if (provider === undefined) return 'configured-missing'
+      return available(provider) ? 'usable' : 'configured-unavailable'
+    }
+    let usable = 0
+    for (const provider of registry.values()) {
+      if (!available(provider)) continue
+      usable += 1
+      if (usable > 1) return 'ambiguous'
+    }
+    return usable === 1 ? 'usable' : 'no-provider'
   } catch {
     return 'unknown'
   }
@@ -403,6 +425,18 @@ function webCapabilityAdvice(state: WebCapabilityState, half: 'fetch' | 'search'
     return 'the DeepSeek Harness ' + capability + ' seam is composed but no usable provider is'
       + ' registered: compose a ' + half + ' provider plugin and give it the credentials it needs'
       + ' (a provider whose API key is missing reports itself unavailable)'
+  }
+  if (state === 'ambiguous') {
+    return 'the DeepSeek Harness ' + capability + ' seam has multiple usable providers and no selected one:'
+      + ' set the web service\'s ' + half + 'Provider field to exactly one registered provider id'
+  }
+  if (state === 'configured-missing') {
+    return 'the DeepSeek Harness ' + capability + ' seam selects a provider id that is not registered:'
+      + ' correct the web service\'s ' + half + 'Provider field or compose that provider plugin'
+  }
+  if (state === 'configured-unavailable') {
+    return 'the DeepSeek Harness ' + capability + ' seam selects a provider that reports unavailable:'
+      + ' fix its credentials or configuration, or select another registered provider'
   }
   return undefined
 }
@@ -926,31 +960,6 @@ function excerptMismatchDetail(body: string, excerpt: string, locator: string): 
     + ' without adding terminal punctuation the source does not contain'
 }
 
-function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) {
-    // The operation promise already exists; refusing it without a rejection sink
-    // would surface the provider's own abort as an unhandled rejection.
-    void operation.catch(() => undefined)
-    signal.throwIfAborted()
-  }
-  return new Promise<T>((resolve, reject) => {
-    let settled = false
-    const finish = (callback: () => void) => {
-      if (settled) return
-      settled = true
-      signal.removeEventListener('abort', aborted)
-      callback()
-    }
-    const aborted = () => finish(() => reject(signal.reason))
-    signal.addEventListener('abort', aborted, { once: true })
-    if (signal.aborted) aborted()
-    void operation.then(
-      value => finish(() => resolve(value)),
-      error => finish(() => reject(error)),
-    )
-  })
-}
-
 /**
  * Bound on the WHOLE verification pass, not merely on one Source.
  *
@@ -1068,6 +1077,7 @@ function httpStatusOutcome(statusCode: number): HttpStatusOutcome | undefined {
  * result the agent can act on.
  */
 function retryableFetchError(error: unknown): boolean {
+  if (error instanceof SourceNetworkPolicyError) return false
   const text = (error instanceof Error ? error.message : String(error)).toLowerCase()
   return /econnreset|etimedout|econnrefused|epipe|enetunreach|eai_again|socket hang up|network|temporarily|timed out/.test(text)
 }
@@ -1194,6 +1204,25 @@ function classifyFetched(
     ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
   }
 }
+async function fetchSource(
+  web: Pick<WebRuntime, 'fetch'>,
+  url: string,
+  signal: AbortSignal,
+  policy: RavenConfig['sourceNetworkPolicy'],
+): Promise<WebFetchResult> {
+  if ((policy ?? 'unrestricted') === 'public-only') {
+    await assertPublicDestination(url, { signal })
+  }
+  const fetched = await settleWithAbort(web.fetch({ url }, signal), signal)
+  if ((policy ?? 'unrestricted') === 'public-only' && fetched.url !== url) {
+    // The current Harness HTTP provider keeps redirects same-origin. Rechecking a
+    // changed final URL protects other providers and any future relaxation, while
+    // the documented DNS-rebinding window remains because the seam cannot pin an IP.
+    await assertPublicDestination(fetched.url, { signal })
+  }
+  return fetched
+}
+
 function sourceVerifier(
   ctx: Context,
   now: () => string,
@@ -1260,12 +1289,12 @@ function sourceVerifier(
           // retried: none of them can change on a second identical request, and a
           // retried mismatch is pure duplicated load on an origin that already
           // answered correctly.
-          let fetched = await settleWithAbort(web.fetch({ url: source.url }, attempt), attempt)
+          let fetched = await fetchSource(web, source.url, attempt, config.sourceNetworkPolicy)
           let retried = false
           if (httpStatusOutcome(fetched.statusCode)?.retryable === true
             && Date.now() + SOURCE_RETRY_BACKOFF_MS < passDeadline) {
             await sleep(SOURCE_RETRY_BACKOFF_MS, attempt)
-            fetched = await settleWithAbort(web.fetch({ url: source.url }, attempt), attempt)
+            fetched = await fetchSource(web, source.url, attempt, config.sourceNetworkPolicy)
             retried = true
           }
           results.push(classifyFetched(source, fetched, checkedAt, retried))
@@ -1285,7 +1314,7 @@ function sourceVerifier(
           const recovered = retryableFetchError(error)
             && Date.now() + SOURCE_RETRY_BACKOFF_MS < passDeadline
             ? await sleep(SOURCE_RETRY_BACKOFF_MS, attempt)
-              .then(async () => settleWithAbort(web.fetch({ url: source.url }, attempt), attempt))
+              .then(async () => fetchSource(web, source.url, attempt, config.sourceNetworkPolicy))
               .then(fetched => classifyFetched(source, fetched, checkedAt, true))
               .catch(() => undefined)
             : undefined
@@ -1509,7 +1538,7 @@ function toolDefinition(
         summary: { type: 'string', description: `Checkpoint summary, at most ${RAVEN_LIMITS.summaryChars} characters. Only with action=checkpoint; completion carries no summary of its own.` },
         artifact: { type: 'string', description: `Artifact bytes, at most ${RAVEN_LIMITS.artifactChars} characters. With action=checkpoint or action=complete; completion must carry the exact latest Checkpoint bytes.` },
         correction: { type: 'string', description: `Steering correction, at most ${RAVEN_LIMITS.correctionChars} characters. Only with action=steer.` },
-        reason: { type: 'string', description: `Stop reason, at most ${RAVEN_LIMITS.limitationDetailChars} characters. Only with action=stop.` },
+        reason: { type: 'string', description: `Optional note for the stop call, at most ${RAVEN_LIMITS.limitationDetailChars} characters. It is validated but not retained in Task state. Only with action=stop.` },
         sources: {
           type: 'array',
           items: SOURCE_SCHEMA,
@@ -1533,7 +1562,12 @@ function toolDefinition(
       // exactly what it is on the wire; only this tool knows the shape it wrote,
       // so the two casts are the boundary, not a shortcut around it.
       render: (_args, value) => [{ type: 'text', text: renderToolValue(value as unknown as RavenToolValue) }],
-      presentationMeta: (_args, value) => taskStateMeta(value as unknown as RavenToolValue) as unknown as JsonValue,
+      presentationMeta: (_args, value) => {
+        const raven = value as unknown as RavenToolValue
+        return (raven.durableState
+          ? taskStateMeta(raven)
+          : { kind: META_KIND, version: 2, currentTaskId: raven.currentTaskId }) as unknown as JsonValue
+      },
     },
     finalizeContent(exec, result) {
       // Total by contract: a throw here would replace a real outcome with a
@@ -1554,14 +1588,21 @@ function toolDefinition(
     },
     async execute(args, exec) {
       const agent = requireAgent(exec)
-      const book = taskBookFor(ctx, books, agent)
+      const membership = teamMembership(ctx, agent)
+      const book = taskBookFor(ctx, books, agent, membership)
+      const previousCurrentTaskId = book.currentTaskId
       const input = asRecord(args)
       const action = input?.action
       const requestedTaskId = typeof input?.taskId === 'string' ? input.taskId : undefined
       let previous: RavenTaskState | null
       if (action === 'start') {
-        const active = [...book.tasks.values()].find(state => state.phase === 'active')
-        previous = active ?? [...book.tasks.values()].sort((left, right) => right.ordinal - left.ordinal)[0] ?? null
+        let active: RavenTaskState | undefined
+        let latest: RavenTaskState | undefined
+        for (const state of book.tasks.values()) {
+          if (active === undefined && state.phase === 'active') active = state
+          if (latest === undefined || state.ordinal > latest.ordinal) latest = state
+        }
+        previous = active ?? latest ?? null
       } else if (requestedTaskId !== undefined) {
         previous = book.tasks.get(requestedTaskId) ?? null
       } else {
@@ -1586,7 +1627,10 @@ function toolDefinition(
         if (blocker !== undefined) throw new Error(blocker)
       }
       const result = await engine.dispatch(previous, args, {
-        sessionId: agent.id,
+        // A Team shares one book and therefore one Task identity. Using the
+        // calling member's Agent id here let two members racing `start` mint
+        // different Task ids and bypass the book's first-write CAS guard.
+        sessionId: membership?.id ?? agent.id,
         signal: exec.signal,
       })
       // Compare-and-set, not last-writer-wins. `previous` was read BEFORE an
@@ -1632,12 +1676,21 @@ function toolDefinition(
         && result.state.latestArtifact !== null
         ? { ...result, renderedArtifact: renderArtifact(result.state.latestArtifact, result.state.sources, result.state.claims) }
         : result
-      const value: RavenToolValue = { kind: 'raven-task-result', currentTaskId, ...withStatusArtifact }
+      const durableState = previous === null
+        || previous.taskId !== result.state.taskId
+        || previous.revision !== result.state.revision
+        || previousCurrentTaskId !== currentTaskId
+      const value: RavenToolValue = {
+        kind: 'raven-task-result',
+        currentTaskId,
+        durableState,
+        ...withStatusArtifact,
+      }
       // A direct call publishes its state through `presentationMeta` on the durable
       // tool result. A nested sub-call gets no result card, so its record is handed
       // to the durable-log waterfall keyed by this sub-call id; publishing on both
       // paths would store every Task twice.
-      if (exec.parent !== undefined && typeof exec.callId === 'string') {
+      if (durableState && exec.parent !== undefined && typeof exec.callId === 'string') {
         pendingLogState.set(exec.callId, taskStateMeta(value))
         // A dispatch that never reaches the waterfall (no agent, contained listener
         // failure, abandoned run) must not accumulate; the map is a handoff, not a store.
@@ -1668,6 +1721,25 @@ function taskRecoveryHint(state: RavenTaskState): string {
       : `Correct this call against Task ${state.taskId} instead of starting a replacement Task;`
         + ` re-read it with raven_task action=status taskId=${state.taskId}.`,
     '</raven_task_recovery>',
+  ].join('\n')
+}
+
+function guidanceContext(state: RavenTaskState | undefined): string {
+  let relevant = 'During active work, a relevant hint may cover redirecting emphasis, adding or restricting sources, pausing without losing useful work, or preserving the result later.'
+  if (state === undefined) {
+    relevant = 'For a substantive research, writing, or learning request, begin naturally. A useful first hint may say that the user can redirect the work as it develops.'
+  } else if (state.phase === 'stopped') {
+    relevant = 'The current work is paused and preserved. If the user asks to continue, resume it internally; mention preservation only when that reassurance is useful.'
+  } else if (state.phase === 'completed' || state.phase === 'completed-with-limits') {
+    relevant = 'The current result is complete. Mention preservation only if the user asks to keep, reuse, or move the result beyond this session.'
+  }
+  return [
+    '<raven_guidance>',
+    'Contextual Raven guidance is on. Keep tool names, actions, task identifiers, phases, revisions, and protocol details internal.',
+    'Offer at most one brief capability hint only when it directly helps with the current request; otherwise offer none.',
+    'Never turn normal work into a tutorial or approval workflow. Do not repeat a capability the user has already used or acknowledged.',
+    relevant,
+    '</raven_guidance>',
   ].join('\n')
 }
 
@@ -1735,14 +1807,10 @@ export const inject = ['tools', 'systemPrompt'] as const
 
 export function apply(ctx: Context, config: RavenConfig = {}): void {
   const now = () => new Date().toISOString()
-  // Per-mount state, and deliberately so: `books` and `pendingLogState` below are
-  // closed over by THIS mount's tool, listeners, and pre-step hook only, and are
-  // keyed by session/sub-call rather than by anything global. Several agent-role
-  // instances alive at once therefore coexist without interference — each simply
-  // owns the Task book for the agent scope it was mounted into. The cost is stated
-  // rather than hidden: with agent-role mounts an Agent Team no longer shares ONE
-  // in-memory book across its members, so cross-member continuity falls back to
-  // what each member's durable session log carries (see the replay path).
+  // Per-preset-mount state, and deliberately so: agent presets mount once under a
+  // standing scope, then every joined session shares this plugin instance. `books`
+  // therefore keys mutable state by Agent or Team identity, while pending Code Mode
+  // records key by sub-call. Separate presets still get separate mount instances.
   const books = new Map<string, SessionTaskBook>()
   // The role is a MOUNT-TIME decision, so it is read from the composition entry and
   // never from `settings()`: a settings surface that could flip a mount's role at
@@ -1772,6 +1840,34 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
         onChange: () => undefined,
       },
     )
+  } else if (isAgent) {
+    // A split host+agent deployment registers the namespace on the host mount but
+    // executes raven_task from this preset mount. Read the host registration's RAW
+    // user layer per call, then apply it over this mode's composition entry. Reading
+    // the host's resolved value would lose key presence and would also replace a
+    // mode-specific base with the host row's defaults.
+    const entry = config
+    settings = () => {
+      try {
+        const service = asRecord(ctx.get('settings'))
+        const describe = service?.describe
+        if (typeof describe !== 'function') return entry
+        const rows = (describe as () => unknown).call(service)
+        if (!Array.isArray(rows)) return entry
+        const descriptor = rows
+          .map(row => asRecord(row))
+          .find(row => row?.ns === RAVEN_SETTINGS_NAMESPACE)
+        const user = asRecord(descriptor?.user)
+        if (user === undefined) return entry
+        // `role` is mount-time and hidden from the card. A hand-written user value
+        // must not turn one live mount into another role underneath the agent.
+        return Config({ ...entry, ...user, role })
+      } catch {
+        // A missing, detaching, or structurally unfamiliar settings provider leaves
+        // the preset entry authoritative, exactly as an uncomposed provider does.
+        return entry
+      }
+    }
   }
   const searchLimits = (): RavenSearchLimits => {
     const config = settings()
@@ -1936,7 +2032,12 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
     if (decision.kind === 'reject') return decision
     const book = taskBookFor(ctx, books, agent)
     const state = book.currentTaskId === undefined ? undefined : book.tasks.get(book.currentTaskId)
-    if (state === undefined || (state.phase !== 'active' && state.phase !== 'stopped')) return decision
+    const taskContext = state !== undefined && (state.phase === 'active' || state.phase === 'stopped')
+      ? activeTaskContext(state, teamMembership(ctx, agent))
+      : undefined
+    const guidance = (settings().guidance ?? 'auto') === 'auto' ? guidanceContext(state) : undefined
+    const context = [taskContext, guidance].filter((value): value is string => value !== undefined).join('\n')
+    if (context.length === 0) return decision
     return {
       kind: 'enter',
       messages: [
@@ -1944,7 +2045,7 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
         // The factory mints the message identity the loop and the durable log
         // both key on; a hand-built literal silently omitted it.
         createUserMessage({
-          content: [{ type: 'text', text: activeTaskContext(state, teamMembership(ctx, agent)) }],
+          content: [{ type: 'text', text: context }],
           source: { kind: 'plugin', plugin: name, form: 'instructions' },
         }),
       ],

@@ -25,9 +25,9 @@
 # overlay. `dsh plugin add` no longer does it for you, because the manifest
 # declares no bundle.
 #
-# Cost of a per-preset mount: each agent scope gets its own plugin instance and
-# therefore its own in-memory Task book, so an Agent Team falls back to what
-# each member's durable session log carries.
+# The Harness mounts one standing plugin instance per preset and every session
+# using that preset joins its scope. Raven therefore keys all mutable state by
+# Agent or Team identity inside that shared instance.
 - id: raven-research
   name: dsh-raven-research
   config:
@@ -36,8 +36,11 @@
     # namespace for this scope; a value stored in the user's settings.yaml overrides
     # them while a settings provider is composed, and they become authoritative
     # again if that provider goes away.
+    # Contextual capability hints: auto | off.
+    # guidance: auto
     # sourceVerification: remote
-    # sourceCheckTimeoutMs: 30000
+    sourceNetworkPolicy: public-only
+    sourceCheckTimeoutMs: 20000
     # sourceDiscovery: seam
     # searchMaxQueries: 4
     # searchMaxResults: 8

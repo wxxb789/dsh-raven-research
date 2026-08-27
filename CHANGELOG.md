@@ -10,6 +10,35 @@ tested compatibility family.
 
 ## [Unreleased]
 
+### Progressive main-agent experience
+
+#### Added
+
+- `guidance: auto | off`, defaulting to `auto`. Auto gives the main agent one compact,
+  context-sensitive policy for useful capability hints while suppressing tutorials,
+  repetition, protocol details, and approval gates. Off removes optional hints without
+  changing Task continuity, steering, stop/resume, verification, Completion, or export.
+- Acceptance coverage for guidance before and during a Task, complete suppression in
+  `off`, and the same progressive workflow through checkpoint, stop, resume, and Completion.
+
+#### Changed
+
+- The system prompt now explicitly keeps `raven_task` actions, Task ids, phases, revisions,
+  and lifecycle vocabulary inside the main-agent protocol. Users interact in ordinary
+  language; the README action table is an integrator reference, not a user workflow.
+- Product and architecture docs now distinguish prompt-directed cadence from engine
+  guarantees, detected-Team ownership from fallback single-Agent books, persisted snapshots
+  from best-effort nested Code Mode logs, Task stopping from execution cancellation, and
+  default mode isolation from the explicit global host-settings opt-in.
+- Omitted legacy network-policy and Source-timeout settings retain their prior unrestricted/no-deadline
+  behavior, while newly generated Raven presets explicitly choose `public-only` and 20 seconds.
+- Continuing detected-Team books are no longer LRU eviction candidates; ordinary Agent and terminal-only
+  Team books remain bounded, and the resident target becomes soft only when every excess book carries a
+  continuing Team Task.
+- `test:pack` now invokes the already-running pnpm CLI with version switching disabled, pins the transitive
+  Harness peer graph to the same RC as the direct peers, and supports an explicit pre-populated store/cache
+  for offline clean-consumer verification.
+
 ### Raven is now a selectable mode
 
 `RavenConfig` gains `role: 'host' | 'agent' | 'both'`, and Raven ships as an agent
@@ -80,8 +109,9 @@ section, no settings card — until a session is started in Raven mode. See
 - **Raven's configuration in the preset row.** The row the installer inserts carries its
   own `config:` block — the same fields the settings card edited — so a deployment
   configures Raven where the mode is defined, in a file scoped to exactly the mode that
-  mounts it. The shipped fragment lists every field at its default and commented out, so
-  an operator can see what is configurable without reading the README first. With the
+  mounts it. The shipped fragment lists every field; compatibility-sensitive network
+  settings are explicit at safer new-install values, while legacy omission retains the
+  compatibility defaults and remaining fields stay commented. With the
   card opted into, those values become the base layer `settings.yaml` overrides, exactly
   as before.
 
@@ -107,10 +137,10 @@ section, no settings card — until a session is started in Raven mode. See
   that would rather have the card mounts the host row itself as an explicit opt-in and
   accepts that Raven becomes visible from every mode's Settings. The mount-time
   capability warning rode that row and is gone by default with it.
-- **An Agent Team no longer shares one in-memory Task book.** An agent-role mount gives
-  each agent scope its own plugin instance, so each member falls back to what its own
-  durable session log carries. The durable path is unchanged and still rebuilds a Task
-  on replay.
+- **A successfully detected Agent Team shares one in-memory Task book inside the Raven preset's standing mount.**
+  The Harness mounts a preset once and every session joins it; Raven keys that shared
+  instance by Agent or detected Team identity. Missing membership degrades to an independent
+  Agent book, and persisted member histories fold into a rebuilt Team book as members are observed.
 - **The mode now depends on a file OUTSIDE this package.** The installed composition
   names an absolute path into your `config/agent-presets`, so moving or deleting that
   base preset breaks the mode at mount time, where a copy would merely have gone stale.
@@ -148,6 +178,12 @@ live Raven Task in a running deployment.
 - **Concurrent Agent Team checkpoints lost a contribution and minted colliding Checkpoint
   ids.** Ids derive from the Task revision, and the book write is a compare-and-set: the
   losing call fails with its recovery action instead of overwriting a teammate's evidence.
+- **Concurrent Team starts now derive Task identity from the Team book key.** Two members
+  racing from an empty book mint the same Task id, so the existing first-write CAS admits
+  exactly one instead of leaving two active Tasks in one Team book.
+- **Durable Task snapshots have a 1,000,000-byte aggregate JSON budget.** Independent
+  field caps can no longer multiply into a multi-megabyte snapshot, and results that do
+  not advance Task revision persist only a compact pointer rather than the same state.
 - **Limitation identity no longer depends on array position**, which had made legally
   constructed orderings undecodable, and `propagateSourceChecks` no longer throws at the
   Limitation cap on the completion path.
@@ -161,6 +197,12 @@ live Raven Task in a running deployment.
   defects; 401, 403 and 407 report `unavailable`; 408, 425, 429 and 5xx report
   `unavailable` and retryable. One bounded retry with backoff covers transient conditions
   only, and a per-host throttle keeps Raven from earning the 429 it would then classify.
+- **Source identity now treats HTTP→HTTPS as a one-way upgrade.** Same-host default-port
+  upgrades pass, while HTTPS→HTTP downgrade, cross-host changes, and non-default port
+  drift are refused.
+- **Source fetches default to a public-network pre-flight filter.** Local/private targets
+  and DNS names with any non-public answer are reported unavailable before delegation;
+  the documented DNS-rebinding residual still requires provider-level network confinement.
 - **Excerpt comparison no longer rejects legitimate quotations.** Both sides normalize to
   NFC, typographic quotes and dashes fold to ASCII, zero-width characters and soft hyphens
   are dropped, and the HTML entity table grew from six entries to about fifty. Case,
@@ -178,10 +220,15 @@ live Raven Task in a running deployment.
   provider composed, `research` and `academic-writing` are refused with the missing
   capability named and both escapes offered, and the mount warns through the logger.
   `sourceVerification: structural-only` still refuses at the Checkpoint instead, because
-  that is a deployment's own documented choice rather than an absent capability.
+  that is a deployment's own documented choice rather than an absent capability. The
+  pre-flight now also matches the Harness's configured, missing, unavailable, and
+  ambiguous provider-selection rules.
+- **The split host settings card now configures the agent-role runtime.** The agent mount
+  reads the host namespace's raw user layer per call and applies it over its own preset
+  entry, preserving mode-specific base values and the mount-time role.
 - **Every settings-reachable number now has an upper bound**, discovery fan-out is
   bounded, the whole verification pass carries a budget, and `sourceCheckTimeoutMs`
-  defaults to 20 seconds instead of no deadline at all.
+  is explicitly 20 seconds in shipped Raven presets while omitted legacy configuration remains unbounded.
 - **A malformed `draftRoutes` entry is refused by the schema** and skipped entries are
   reported, so an all-typo list no longer reads as an empty one.
 - **Credential-bearing Lead URLs are redacted**, default ports no longer read as host
