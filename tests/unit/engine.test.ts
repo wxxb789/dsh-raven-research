@@ -1435,6 +1435,29 @@ describe('Raven task engine', () => {
     }, { sessionId: 'session-code-urls', signal })).rejects.toThrow('unregistered external URL')
   })
 
+  it('rejects unregistered raw links for every supported Source origin', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Validate raw links across supported Source origins.',
+    }, { sessionId: 'session-source-links', signal })
+
+    for (const rawUrl of [
+      'file:///workspace/docs/unregistered.md',
+      'llm-wiki://docs/unregistered',
+      'mcp://trusted/unregistered',
+    ]) {
+      await expect(engine.dispatch(started.state, {
+        action: 'checkpoint',
+        taskId: started.state.taskId,
+        stage: 'draft',
+        summary: 'A draft containing an unregistered raw Source link.',
+        artifact: `The claim rests on ${rawUrl} which was never registered.`,
+      }, { sessionId: 'session-source-links', signal })).rejects.toThrow('unregistered external URL')
+    }
+  })
+
   it('lets a registered Source authorize its own fragment and trailing slash', async () => {
     const engine = createRavenEngine({ now, sourceVerifier })
     const started = await engine.dispatch(null, {

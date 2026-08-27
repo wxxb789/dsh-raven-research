@@ -948,8 +948,8 @@ function validateArtifactCitations(
   for (const sourceId of cited) {
     if (!known.has(sourceId)) throw new RavenError('evidence-conflict', `artifact cites unknown source ${sourceId}`)
   }
-  const knownUrls = new Set(sources.filter(source => source.resource.origin === 'web').map(source => source.url))
-  for (const match of citationScannableText(artifact).matchAll(/https?:\/\/[^\s<>\]]+/g)) {
+  const knownUrls = new Set(sources.map(source => source.url))
+  for (const match of citationScannableText(artifact).matchAll(/(?:https?|file|llm-wiki|mcp):\/\/[^\s<>\]]+/g)) {
     const rawUrl = match[0].replace(/[),.;!?]+$/, '')
     let url: URL
     try {

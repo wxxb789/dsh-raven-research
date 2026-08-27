@@ -74,6 +74,26 @@ describe('Raven Task snapshot codec', () => {
     })).toBeUndefined()
   })
 
+  it('rejects a null Source check without throwing', async () => {
+    const state = await validState()
+    expect(decodeRavenTaskState({
+      ...state,
+      schemaVersion: 2,
+      sources: [{
+        sourceId: 'LOCAL',
+        url: 'file:///workspace/source.md',
+        resource: { origin: 'local', uri: 'file:///workspace/source.md' },
+        representation: null,
+        title: 'A Source',
+        locator: 'Section 1',
+        excerpt: 'an excerpt',
+        role: 'primary',
+        inspectedAt: now(),
+        check: null,
+      }],
+    })).toBeUndefined()
+  })
+
   /**
    * A1: the engine must never emit a state the codec rejects.
    *

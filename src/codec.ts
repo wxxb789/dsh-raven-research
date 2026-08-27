@@ -378,7 +378,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || (item.inspectionSha256 !== undefined && (!string(item.inspectionSha256) || !SHA256.test(item.inspectionSha256)))
       || ((item.resource as Record<string, unknown>).origin === 'web' && item.inspectionSha256 !== undefined)
       || ((item.resource as Record<string, unknown>).origin !== 'web'
-        && (item.check as Record<string, unknown>).status === 'reachable'
+        && record(item.check)?.status === 'reachable'
         && item.inspectionSha256 === undefined)
       || !string(item.title)
       || item.title.length > RAVEN_LIMITS.sourceTitleChars
