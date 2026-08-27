@@ -54,6 +54,38 @@ describe('raven_task action field contract', () => {
     expect(properties.action?.description ?? '').toContain('complete(taskId, artifact)')
   })
 
+  it('describes exactly four origins, Markdown provenance, and Task Source Policy', () => {
+    const properties = toolParameters().properties as unknown as Record<string, Record<string, unknown>>
+    const sources = properties.sources
+    const source = sources?.items as Record<string, unknown>
+    const sourceProperties = source.properties as Record<string, Record<string, unknown>>
+    const resource = sourceProperties.resource
+    const resourceProperties = resource?.properties as Record<string, Record<string, unknown>>
+    const representation = sourceProperties.representation
+    const alternatives = representation?.oneOf as Array<Record<string, unknown>>
+    const markdown = alternatives.find(item => item.type === 'object')
+    const markdownProperties = markdown?.properties as Record<string, Record<string, unknown>>
+    const sourcePolicy = properties.sourcePolicy
+    const policyProperties = sourcePolicy?.properties as Record<string, unknown>
+
+    expect(source.required).toEqual(['sourceId', 'title', 'locator', 'excerpt'])
+    expect(source.oneOf).toEqual([
+      { required: ['url'], not: { anyOf: [{ required: ['resource'] }, { required: ['representation'] }] } },
+      { required: ['resource', 'representation'] },
+    ])
+    expect(resource?.required).toEqual(['origin', 'uri'])
+    expect(resourceProperties.origin?.enum).toEqual(['web', 'local', 'llm-wiki', 'mcp'])
+    expect(markdown?.required).toEqual(['format', 'derivation', 'coverage', 'producedBy'])
+    expect(markdownProperties.format?.enum).toEqual(['markdown'])
+    expect(markdownProperties.derivation?.enum).toEqual(['original', 'converted'])
+    expect(markdownProperties.coverage?.enum).toEqual(['full', 'segment', 'unknown'])
+    expect(markdownProperties.inspectionCallId?.description).toContain('Prior successful ordinary Harness tool call')
+    expect(Object.keys(policyProperties)).toEqual([
+      'allowedWebHosts', 'blockedWebHosts', 'preferPrimary', 'localRoots', 'llmWikiRoots',
+      'includedMcpSources', 'excludedMcpSources',
+    ])
+  })
+
   it('names the accepted fields when it rejects one belonging to another action', async () => {
     const engine = createRavenEngine({ now, sourceVerifier })
     await expect(engine.dispatch(null, {

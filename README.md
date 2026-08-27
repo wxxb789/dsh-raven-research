@@ -48,7 +48,7 @@ of text, and the citations are whatever the model remembered. Raven changes the 
 | --- | --- |
 | Silence until a final dump | An early useful outline, draft, or findings set as a **Checkpoint**, then incremental refinement of the same Artifact |
 | A correction restarts the work | A correction becomes a **Steering Revision** on the same Task; prior evidence and Checkpoints survive |
-| Citations are remembered strings | Citations resolve to **inspected Sources**; excerpts are matched against retrieved bodies |
+| Citations are remembered strings | Citations resolve to **inspected Sources** from web, local files, llm-wiki, or MCP; excerpts are matched against canonical Markdown |
 | Three reprints of one wire story read as three confirmations | Claims sharing a declared `sourceFamily` are marked as **not independent corroboration** |
 | One dead link fails the whole run | Failed dependencies **defer only the affected Claims**; independently verified work still completes honestly |
 | State dies with the tool call | The latest successfully persisted Task snapshot is **rebuilt from the session log** and supports stop/resume |
@@ -71,10 +71,9 @@ external/destructive/sensitive side effect.
   while the Task remains active. Checkpoint validation is runtime-enforced; when the Harness displays it and continues
   later model/tool steps is owned by the Harness agent loop.
 - **Steering instead of restarts.** `steer` applies a user correction to the live Task and preserves prior evidence.
-- **Citations checked against retrieved bytes.** Artifacts cite stable Source IDs with `[@source-id]`. Raven matches
-  bounded excerpts against retrieved bodies, renders recorded URLs mechanically, and rejects unknown citations,
-  unregistered URLs, cross-host redirects, and broken or mismatched Sources. A mismatch reports the nearest
-  retrieved passage so the anchor can be repaired instead of retried blindly.
+- **One Markdown-first Source fabric.** Every Source keeps its Original Resource separate from Raven's canonical Markdown representation. Exactly four origins are supported: web, local files, llm-wiki pages, and MCP resources. Existing Markdown stays original; conversion names the producing Harness tool; `full`, `segment`, or `unknown` coverage prevents a bounded projection from impersonating a whole Resource. A successful non-web inspection persists a digest binding Resource, Markdown, producer, call ID, and coverage; unavailable or failed conversion defers dependent Claims.
+- **Task-level Source Policy.** Natural requests become steerable policy on the same Task: allow/block web hosts, prefer primary evidence, scope local or llm-wiki roots, and include/exclude named MCP sources. This is never deployment configuration.
+- **Citations checked against source material.** Artifacts cite stable Source IDs with `[@source-id]`. Raven independently re-fetches web Sources with the existing HTTP identity guarantees. Local, llm-wiki, and MCP Sources must name the prior successful Harness `inspectionCallId`; Raven checks its `tool/call` and `tool/result`, producer, resolved file identity or MCP namespace, returned Markdown, and excerpt. Rendered citations expose Origin and conversion provenance. Unknown citations, unattested representations, cross-host redirects, and mismatched excerpts are rejected.
 - **Independence-aware Claim trace.** Every Completion appends a trace mapping material Claim IDs and text to Source
   IDs, marking Claims whose Sources share one `sourceFamily` so reprints of a single originating record cannot read
   as several confirmations. Genuinely conflicting Claims are recorded as contested rather than silently resolved.
@@ -424,7 +423,7 @@ log, and anything you exported is a plain llm-wiki repository you already own.
 starting the session; in any other mode the agent has no Raven tool and will answer without a Task.
 
 Within Raven mode there is no launch phrase and no separate Raven UI — users talk to the Harness agent normally,
-and the model drives the Task lifecycle. Say “focus on primary sources”, “pause here”, “continue”, or “keep this result”
+and the model drives the Task lifecycle. Say “only use these sites”, “block this site”, “use this local folder”, “include this llm-wiki”, “exclude this MCP source”, “focus on primary sources”, “pause here”, “continue”, or “keep this result”
 in ordinary language; the agent translates that intent into Raven's internal protocol. In `guidance: auto` it may offer
 one brief capability hint when useful. Set `guidance: off` in the Raven preset row (or the opt-in settings card) to
 suppress those hints without changing the workflow.
@@ -448,8 +447,7 @@ not invent references.
 Teach me closures with one mental model, two worked examples, and a self-check.
 ```
 
-Steering is just the next message — "focus on cost, not adoption", "make it more sceptical", "cite only primary
-sources" — and it lands on the same Task instead of starting a new one.
+Steering is just the next message — "focus on cost, not adoption", "block example.com", "use only this folder", or "cite only primary sources" — and it updates the same Task, including its Source Policy, instead of starting a new one.
 
 ### Internal protocol reference (integrators)
 
@@ -717,22 +715,14 @@ A user who skips it discovers most of it when a Task refuses to complete.
 
 ### Prerequisites
 
-| Outcome | Needs a composed `web` capability? | Needs a search credential? |
-| --- | --- | --- |
-| `research` | **Required** | Only for `action=discover` |
-| `academic-writing` | **Required** | Only for `action=discover` |
-| `general-writing` | Only if the Task registers Sources | Only for `action=discover` |
-| `learning` | Only if the Task registers Sources | Only for `action=discover` |
+| Outcome | Needs a verified Source? | Needs a composed `web` capability? | Needs a search credential? |
+| --- | --- | --- | --- |
+| `research` | **Required** | Only for web Sources | Only for `action=discover` |
+| `academic-writing` | **Required** | Only for web Sources | Only for `action=discover` |
+| `general-writing` | For external Claims | Only for web Sources | Only for `action=discover` |
+| `learning` | For external Claims | Only for web Sources | Only for `action=discover` |
 
-**A composed `web` capability with a fetch provider is required for `research` and
-`academic-writing`.** These two Outcomes default to `grounding: required`, and that floor
-cannot be lowered to `none` by a setting or by the agent. Verification is what makes a
-Source a Source: Raven reopens each recorded URL and requires the recorded excerpt to
-occur in the retrieved body. With no fetch provider, **no Source can ever be verified**,
-so no externally grounded Checkpoint can be published and Completion cannot succeed — a
-grounding-required Task with zero verified Claims stays `active` rather than being
-labelled complete. That is deliberate: the alternative is a "completed" research
-document whose citations were never checked.
+`research` and `academic-writing` default to `grounding: required`, and that floor cannot be lowered to `none` by a setting or by the agent. They may satisfy it with a verified web, local, llm-wiki, or MCP Source. Web Sources require the composed fetch provider and retain independent re-fetch checks. Non-web Sources require an explicit Task Source Policy plus Markdown from an ordinary Harness file/MCP tool. A successful owning-session receipt produces a persisted `inspectionSha256`, so later Completion or another Agent Team member can verify the immutable snapshot without the original event view. A grounding-required Task with zero verified Claims stays `active` rather than being labelled complete.
 
 The stock Harness profile deliberately leaves HTTP fetch disabled because its current local
 provider does not implement complete SSRF/private-network confinement. The shipped Raven preset explicitly sets
@@ -792,18 +782,12 @@ Raven adds no model of its own, but two actions multiply work the deployment pay
   bounded by `draftMaxTokens` (default `4000` output tokens) and `draftTimeoutMs`
   (default `120000`). This is why the deployment owns the route list and the agent may
   only pick a subset: naming a model is naming spend and a data path.
-- **Verification re-fetches every cited Source, twice per publication.** Sources are
-  reopened at `checkpoint` **and** again at `complete` — Completion does not trust the
-  Checkpoint's earlier result, because a volatile page can change between them and a
-  stale pass is exactly the failure the verification exists to prevent. A Task with 20
-  Sources checkpointed four times and completed once performs on the order of 100 fetches.
-  Bound each one with `sourceCheckTimeoutMs`.
+- **Verification re-fetches every cited web Source, twice per publication.** Web Resources are reopened at `checkpoint` and again at `complete`; Completion does not trust the earlier result because a page can change. A Task with 20 web Sources checkpointed four times and completed once performs about 100 fetches. Local, llm-wiki, and MCP verification rechecks the bounded Markdown already in Task state and makes no network call; their ordinary Harness inspection happened before registration.
 - **Discovery** costs one search-backend call per query in the batch, up to
   `searchMaxQueries` (default `4`), each requesting up to `searchMaxResults` (default `8`)
   candidates.
 
-Checkpoints, steering, status, stop, resume, and export perform no network calls and
-bill nothing.
+Checkpoints that cite no web Source, plus steering, status, stop, resume, and export, perform no Raven network calls and bill nothing.
 
 ### Data handling
 
@@ -812,7 +796,8 @@ leaves the machine leaves through a Harness capability the deployment composed:
 
 | What leaves | Where it goes | When |
 | --- | --- | --- |
-| Recorded Source **URLs**, re-fetched in full | The origin host of each Source | Every `checkpoint` with Sources, and every `complete` |
+| Recorded web Source **URLs**, re-fetched in full | The origin host of each web Source | Every grounded `checkpoint`, and every `complete` |
+| Local, llm-wiki, and MCP resource requests | Whatever ordinary Harness file/MCP tool the agent invokes | Before Source registration; Raven does not add a connector or second retrieval path |
 | **Search queries** you or the agent formulate | The composed search backend (e.g. the DeepSeek search provider) | Every `discover` |
 | The **draft instruction** and whatever context the drafter sends with it | Every configured model route in the round | Every `draft` |
 
@@ -820,8 +805,7 @@ Note the third row: **Artifact and instruction text is sent to each draft route*
 route pointed at a third-party provider is a data path for the text being written. That
 is the reason `draftRoutes` is a deployment setting and not something the agent can widen.
 
-Nothing else is transmitted. Recorded excerpts, Claims, Limitations, and Artifacts live
-in the Harness **session log** and nowhere else; Raven writes no file at any point.
+Nothing else is transmitted by Raven. Original Resource metadata, bounded non-web Markdown representations, excerpts, Claims, Limitations, Source Policy, and Artifacts live in the Harness **session log** and nowhere else. Do not register sensitive local or MCP content unless that session log is an acceptable persistence location. Raven writes no file at any point.
 
 **On `export`, Raven still writes nothing.** `action=export` is a pure projection: it
 returns llm-wiki page bytes and their intended paths, and the *agent* writes them with
@@ -830,16 +814,15 @@ What lands on disk when you accept those writes is:
 
 ```text
 wiki/queries/<slug>.md    the Artifact page, with derived frontmatter
-wiki/raw/<source-id>.md   one immutable page per Source: the verified excerpt only
-                          (capture: excerpt-only) plus its verification receipt and a
-                          sha256 over that page's own body
+wiki/raw/<source-id>.md   one immutable page per Source: Original Resource and Markdown
+                          provenance, the verified excerpt only (capture: excerpt-only),
+                          its verification receipt, and a sha256 over that page's body
 wiki/log.md               one appended entry
 wiki/SCHEMA.md            seeded only with init=true
 wiki/index.md             seeded only with init=true
 ```
 
-The `raw/` pages store the bounded excerpt, **not** a full page capture, so an export is
-not a copy of the sources you read.
+The `raw/` pages store the bounded excerpt and provenance, **not** the full Original Resource or full Markdown representation, so an export is not a copy of the sources you read.
 
 ### Limits
 
@@ -849,6 +832,7 @@ unbounded state would eventually make a session unloadable.
 
 | Cap | Limit | What happens at the limit |
 | --- | --- | --- |
+| Source Markdown | **40,000 characters each** | A larger normalized representation is rejected; shorten it to the relevant document section without altering the cited excerpt. |
 | Sources | **256** | Further Source registrations in the submitted batch are rejected; the Checkpoint is refused with the cap named, leaving prior state intact. |
 | Claims | **512** | Same — the batch is refused rather than silently truncated, so provenance is never partially recorded. |
 | Checkpoints | **128 descriptors** | Older descriptors are trimmed while the first is preserved, and one slot is reserved for Completion. The original Artifact remains in its historical tool result. |
@@ -866,14 +850,14 @@ locator at 4,000) are reported the same way.
 
 | What you see | Why | What to do |
 | --- | --- | --- |
-| `DeepSeek Harness web capability is not composed` | No fetch provider. No Source can be verified. | Compose the `web` capability. For non-grounded writing or learning, start the Task with `grounding: none`. |
+| `DeepSeek Harness web capability is not composed` | No fetch provider, so no web Source can be verified. | Compose `web`, or use an explicitly scoped local, llm-wiki, or MCP Source whose Markdown was produced by an ordinary Harness tool. |
 | `no usable web provider is registered` | `web` is composed but no registered provider can serve the request. | Check which providers the deployment registers and whether they are `available()`. |
 | `DeepSeek search has no API key for "DEEPSEEK_API_KEY"` | Discovery reached the search provider, which has no credential. | Store the key through the credentials service (Models page in the Web GUI, or the environment). Fetch is unaffected. |
 | `DeepSeek Harness web search capability is not composed` | No search half at all. | Compose a search provider, or let the agent use its own retrieval tools — discovery is optional. |
 | Discovery reports unavailable and records a Limitation, with no error | `sourceDiscovery: disabled`. | Deliberate: an empty result would read as "nothing exists". Set it back to `seam`. |
 | `no Draft Variant route is configured` | `draftRoutes` is empty — the default. | Set `draftRoutes` to `provider/model` entries. Drafting is off until you do. |
 | A route is refused with the configured set named | The agent selected a route outside `draftRoutes`. | Expected: the agent may only select a subset. Add the route to the deployment setting if it should be allowed. |
-| A Checkpoint recording Sources is refused, naming `structural-only` | `sourceVerification: structural-only` withholds every remote check. | Set it back to `remote`. It never turns unchecked Sources into confirmed ones. |
+| A Checkpoint citing a web Source is refused, naming `structural-only` | `sourceVerification: structural-only` withholds remote web checks. | Set it back to `remote`, or use a non-web Source with a verified Markdown representation. |
 | Completion is refused: candidate bytes differ from the latest Checkpoint | The final edit was never published as a Checkpoint, or the *submitted* bytes were edited rather than the *stored* ones. | Re-read the rendered Artifact and complete with exactly those bytes. Storage is in the Task's Prose Layout, so the returned bytes differ from what was sent. |
 | Completion is refused: a Steering Revision has no subsequent Checkpoint | A correction arrived after the last Checkpoint. | Publish a Checkpoint that applies the correction, then complete. |
 | A cited Source reports its excerpt absent, naming the nearest passage | The excerpt does not occur in the retrieved body. | Repair the excerpt from the named passage. Do not weaken a correct excerpt until it fits — an *absent* excerpt is a different signal from a *diverging* one. |
@@ -984,8 +968,11 @@ pnpm check:release
 - exposes a useful intermediate research Artifact before final verification;
 - refines the same Task after a mid-run user correction;
 - proceeds through normal stages without a confirmation action;
-- rejects unknown references and recorded excerpts absent from retrieved source bytes;
-- reopens cited URLs before grounded Checkpoints and again at Completion;
+- grounds Claims through the same Source/citation model across exactly web, local, llm-wiki, and MCP origins;
+- preserves original Markdown and exposes converted Markdown provenance;
+- turns unreadable or unsupported resources into unavailable Sources, deferred Claims, and retained Limitations;
+- rejects unknown references and excerpts absent from canonical Markdown;
+- independently reopens cited web URLs before grounded Checkpoints and again at Completion;
 - preserves independent results across partial source failures;
 - requires Completion bytes to equal the latest post-steer Checkpoint;
 - distinguishes Completion from tool/worker termination; and
@@ -1007,8 +994,7 @@ Neither. Raven adds one task abstraction and one tool. The existing Harness agen
 with its own tools and its own model.
 
 **Do I need a vector database, an index, or an embedding pipeline?**
-No. Raven has no store of its own. Sources are recorded by stable identity and reopened over the Harness `web`
-capability when verification runs.
+No. Raven has no connector store of its own. Web Sources are independently reopened through the Harness `web` capability. The agent inspects local files, llm-wiki pages, and MCP resources with ordinary Harness tools and records bounded Markdown plus explicit Original Resource and producer provenance.
 
 **Does Raven search the web itself, or does the agent?**
 Both, on purpose. `action=discover` runs a batch of complementary queries through the same `ctx.web` search seam
@@ -1022,9 +1008,7 @@ Teams is an experimental, unpublished Harness capability, so Raven consumes it o
 membership — including a failing probe — every Agent owns an independent Task book.
 
 **Does it work without web access?**
-Yes, for non-grounded writing and learning. Without a composed Harness `web` capability, external Claims are not
-published as supported: they remain deferred, and a grounding-required Task with zero valid Claims stays active
-rather than being labeled complete.
+Yes. A grounded Task may use local files, llm-wiki pages, or MCP resources without web access when its Source Policy names those inputs and ordinary Harness tools produce Markdown. Web Claims remain unavailable without a web provider. Any Source lacking verified Markdown is deferred, and a grounding-required Task with zero valid Claims stays active rather than being labeled complete.
 
 **Does it work in Code Mode (`run_code`)?**
 Yes — see [One Task book, two durability paths](#one-task-book-two-durability-paths).
@@ -1034,8 +1018,7 @@ A pipeline hides its middle and hands you one final report. Raven publishes the 
 one continuing Task, and gates Completion on excerpt-level verification rather than on the run having finished.
 
 **Does excerpt matching prove the Claim is true?**
-No. Raven verifies URL reachability and literal presence of the bounded excerpt after whitespace/HTML presentation
-normalization. Literal presence is not semantic entailment; the agent remains responsible for Claim judgment.
+No. Raven verifies a bounded excerpt against canonical Markdown and preserves its route to the Original Resource. For web it also verifies HTTP reachability and redirect identity. Literal presence is not semantic entailment; the agent remains responsible for Claim judgment.
 
 **Is it on npm?**
 Not yet. Build and pack from a checkout — see [Install](#install).
@@ -1055,7 +1038,7 @@ behind.
 - Natural-language correction detection is performed by the Harness model using Raven's pre-step context. The plugin
   supplies the deterministic same-Task `steer` transition; it does not guess corrections with a rule-based text
   classifier.
-- Without a composed Harness `web` capability, external Claims stay deferred.
+- Without a composed Harness `web` capability, web Claims stay deferred; explicitly scoped local, llm-wiki, and MCP Sources remain available through their recorded Markdown.
 - The latest successfully persisted Task snapshot is replayable from the owning Harness session records, including
   multiple stopped or completed Task identities and later resume of an older Task. An oversized nested Code Mode log
   can omit that one step; a later direct mutation republishes a full snapshot. Cross-session projects, reusable corpora,

@@ -1,8 +1,9 @@
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 
 import { apply } from '../../src/plugin.js'
 import type { RavenConfig } from '../../src/config.js'
-import type { RavenTaskState } from '../../src/domain.js'
+import { SOURCE_ORIGINS, type RavenTaskState } from '../../src/domain.js'
 
 interface ToolValue {
   readonly kind: 'raven-task-result'
@@ -61,11 +62,31 @@ function createHarness(web?: {
   apply(ctx as never, { sourceNetworkPolicy: 'unrestricted', ...config })
   if (tool === undefined) throw new Error('Raven tool did not register')
   const registeredTool = tool
-  const agent = { id: 'acceptance-session', session: { events: [] } }
+  const agent = { id: 'acceptance-session', session: { events: [] as unknown[] } }
   const signal = new AbortController().signal
   return {
     sections,
     tool: registeredTool,
+    recordInspection: (inspection: { callId: string; name: string; arguments: unknown; text: string; meta?: unknown }) => {
+      agent.session.events.push(
+        { type: 'tool/call', data: { callId: inspection.callId, name: inspection.name, arguments: JSON.stringify(inspection.arguments) } },
+        {
+          type: 'tool/result',
+          data: {
+            message: {
+              source: { callId: inspection.callId },
+              content: [{
+                type: 'tool-result',
+                toolCallId: inspection.callId,
+                content: [{ type: 'text', text: inspection.text }],
+              }],
+            },
+            ...(inspection.meta === undefined ? {} : { meta: inspection.meta }),
+          },
+        },
+      )
+    },
+    clearInspections: () => { agent.session.events.length = 0 },
     run: (args: unknown) => registeredTool.execute(args, { agent, signal }),
     context: async () => {
       if (preStep === undefined) throw new Error('Raven pre-step hook did not register')
@@ -224,6 +245,174 @@ describe('Raven end-to-end acceptance', () => {
     expect(draft.renderedArtifact).toContain('[Primary evidence P1](https://evidence.test/paper-one)')
     expect(completed.status).toBe('completed')
     expect(completed.state.claims[0]?.sourceIds).toEqual(['P1'])
+  })
+
+  it('grounds the same Claim and citation model across exactly four Source origins', async () => {
+    const excerpt = 'Canonical Markdown carries the grounded statement.'
+    const cases = [
+      {
+        origin: 'web',
+        policy: { allowedWebHosts: ['evidence.test'] },
+        source: source('WEB1', 'web-page'),
+      },
+      {
+        origin: 'local',
+        policy: { localRoots: ['file:///Q:/workspace/docs'] },
+        source: {
+          sourceId: 'LOCAL1', title: 'Local Markdown', locator: 'Statement', excerpt, role: 'user-provided',
+          resource: { origin: 'local', uri: 'file:///Q:/workspace/docs/source.md', mediaType: 'text/markdown' },
+          representation: { format: 'markdown', derivation: 'original', coverage: 'segment', producedBy: 'read', inspectionCallId: 'inspect-local', markdown: '# Local\n\n' + excerpt },
+        },
+        inspection: {
+          callId: 'inspect-local', name: 'read', arguments: { file_path: 'file:///Q:/workspace/docs/source.md' }, text: '',
+          meta: { offset: 2, totalLines: 4, path: fileURLToPath('file:///Q:/workspace/docs/source.md'), lines: [
+            { number: 2, text: '# Local' }, { number: 3, text: '' }, { number: 4, text: excerpt },
+          ] },
+        },
+      },
+      {
+        origin: 'llm-wiki',
+        policy: { llmWikiRoots: ['file:///Q:/workspace/wiki'] },
+        source: {
+          sourceId: 'WIKI1', title: 'Wiki page', locator: 'Finding', excerpt, role: 'secondary',
+          resource: { origin: 'llm-wiki', uri: 'file:///Q:/workspace/wiki/queries/finding.md', mediaType: 'text/markdown', sourceName: 'project-wiki' },
+          representation: { format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read', inspectionCallId: 'inspect-wiki', markdown: '# Finding\n\n' + excerpt },
+        },
+        inspection: {
+          callId: 'inspect-wiki', name: 'read', arguments: { file_path: 'file:///Q:/workspace/wiki/queries/finding.md' }, text: '',
+          meta: { offset: 1, totalLines: 3, path: fileURLToPath('file:///Q:/workspace/wiki/queries/finding.md'), lines: [
+            { number: 1, text: '# Finding' }, { number: 2, text: '' }, { number: 3, text: excerpt },
+          ] },
+        },
+      },
+      {
+        origin: 'mcp',
+        policy: { includedMcpSources: ['docs'] },
+        source: {
+          sourceId: 'MCP1', title: 'MCP resource', locator: 'resource body', excerpt, role: 'primary',
+          resource: { origin: 'mcp', uri: 'mcp://docs/finding', mediaType: 'application/json', sourceName: 'docs' },
+          representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'mcp__docs__read_resource', inspectionCallId: 'inspect-mcp', markdown: '# MCP finding\n\n' + excerpt },
+        },
+        inspection: {
+          callId: 'inspect-mcp', name: 'mcp__docs__read_resource', arguments: { uri: 'mcp://docs/finding' },
+          text: '# MCP finding\n\n' + excerpt,
+        },
+      },
+    ] as const
+    expect(cases.map(item => item.origin)).toEqual(SOURCE_ORIGINS)
+
+    for (const item of cases) {
+      const fetch = vi.fn(async ({ url }: { url: string }) => ({
+        url,
+        statusCode: 200,
+        body: { kind: 'text' as const, content: item.origin === 'web' ? 'Exact evidence excerpt for WEB1.' : excerpt },
+      }))
+      const raven = createHarness(item.origin === 'web' ? { fetch } : undefined)
+      const started = await raven.run({
+        action: 'start', outcome: 'research', request: 'Ground one statement from ' + item.origin + '.',
+        sourcePolicy: item.policy,
+      })
+      if ('inspection' in item) raven.recordInspection(item.inspection)
+      const sourceId = item.source.sourceId
+      const claimText = 'The source provides a grounded statement.'
+      const checkpoint = await raven.run({
+        action: 'checkpoint', taskId: started.state.taskId, stage: 'read',
+        summary: 'Grounded ' + item.origin + ' evidence.',
+        artifact: claimText + ' [@' + sourceId + '].',
+        sources: [item.source],
+        claims: [claim('C-' + sourceId, sourceId, claimText)],
+      })
+      if (item.origin !== 'web') raven.clearInspections()
+      const completed = await raven.run({
+        action: 'complete', taskId: started.state.taskId, artifact: checkpoint.state.latestArtifact,
+      })
+
+      expect(checkpoint.status, item.origin).toBe('active')
+      expect(completed.status, item.origin).toBe('completed')
+      expect(completed.state.sources[0]?.resource.origin).toBe(item.origin)
+      expect(completed.state.sources[0]?.check.status).toBe('reachable')
+      if (item.origin !== 'web') expect(completed.state.sources[0]?.inspectionSha256).toMatch(/^sha256:[a-f0-9]{64}$/)
+      expect(completed.renderedArtifact).toContain('## Claim trace')
+    }
+  })
+
+  it('refuses forged Markdown and missing MCP inspection receipts', async () => {
+    const cases = [
+      {
+        expected: 'failed',
+        policy: { localRoots: ['file:///Q:/workspace/docs'] },
+        source: {
+          sourceId: 'FORGED1', title: 'Forged local representation', locator: 'Claim', excerpt: 'fabricated statement',
+          resource: { origin: 'local', uri: 'file:///Q:/workspace/docs/real.md', mediaType: 'text/markdown' },
+          representation: {
+            format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read', inspectionCallId: 'inspect-real',
+            markdown: '# Forged\n\nfabricated statement',
+          },
+        },
+        inspection: {
+          callId: 'inspect-real', name: 'read', arguments: { file_path: 'file:///Q:/workspace/docs/real.md' }, text: '',
+          meta: { offset: 1, totalLines: 3, path: fileURLToPath('file:///Q:/workspace/docs/real.md'), lines: [
+            { number: 1, text: '# Real' }, { number: 2, text: '' }, { number: 3, text: 'different statement' },
+          ] },
+        },
+      },
+      {
+        expected: 'unavailable',
+        policy: { includedMcpSources: ['docs'] },
+        source: {
+          sourceId: 'MISSING1', title: 'Missing MCP receipt', locator: 'resource', excerpt: 'claimed statement',
+          resource: { origin: 'mcp', uri: 'mcp://docs/missing', sourceName: 'docs', mediaType: 'text/plain' },
+          representation: {
+            format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'mcp__docs__read_resource',
+            inspectionCallId: 'missing-call', markdown: 'claimed statement',
+          },
+        },
+      },
+    ] as const
+
+    for (const item of cases) {
+      const raven = createHarness()
+      const started = await raven.run({
+        action: 'start', outcome: 'research', request: 'Reject unattested non-web evidence.', sourcePolicy: item.policy,
+      })
+      if ('inspection' in item) raven.recordInspection(item.inspection)
+      const result = await raven.run({
+        action: 'checkpoint', taskId: started.state.taskId, stage: 'read', summary: 'Untrusted representation.',
+        artifact: 'The source claims a statement [@' + item.source.sourceId + '].',
+        sources: [item.source],
+        claims: [claim('C-' + item.source.sourceId, item.source.sourceId, 'The source claims a statement.')],
+      })
+      expect(result.status).toBe('needs-revision')
+      expect(result.state.checkpoints).toHaveLength(0)
+      expect(result.state.sources[0]?.check.status).toBe(item.expected)
+      expect(result.state.claims[0]?.disposition).toBe('deferred')
+      expect(result.state.limitations.some(limit => limit.sourceId === item.source.sourceId)).toBe(true)
+    }
+  })
+
+  it('defers a Claim when a local resource has no readable Markdown representation', async () => {
+    const raven = createHarness()
+    const started = await raven.run({
+      action: 'start', outcome: 'research', request: 'Use an unsupported local document.',
+      sourcePolicy: { localRoots: ['file:///Q:/workspace/docs'] },
+    })
+    const result = await raven.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read',
+      summary: 'Unsupported local document.',
+      artifact: 'The document appears to state a result [@PDF1].',
+      sources: [{
+        sourceId: 'PDF1', title: 'Unreadable PDF', locator: 'Page 3', excerpt: 'unverified PDF excerpt',
+        resource: { origin: 'local', uri: 'file:///Q:/workspace/docs/report.pdf', mediaType: 'application/pdf' },
+        representation: null,
+      }],
+      claims: [claim('PDF-C1', 'PDF1', 'The document appears to state a result.')],
+    })
+
+    expect(result.status).toBe('needs-revision')
+    expect(result.state.checkpoints).toHaveLength(0)
+    expect(result.state.sources[0]?.check).toMatchObject({ status: 'unavailable', detail: expect.stringContaining('no normalized Markdown') })
+    expect(result.state.claims[0]?.disposition).toBe('deferred')
+    expect(result.state.limitations.some(item => item.sourceId === 'PDF1')).toBe(true)
   })
 
   it('supports learning through an early explanation and a refined self-check', async () => {

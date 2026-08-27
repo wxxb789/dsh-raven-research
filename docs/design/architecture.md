@@ -70,6 +70,7 @@ type RavenTaskAction =
       outcome: "research" | "general-writing" | "academic-writing" | "learning"
       request: string
       grounding?: "required" | "optional" | "none"
+      sourcePolicy?: Partial<SourcePolicy>
     }
   | {
       action: "checkpoint"
@@ -83,7 +84,7 @@ type RavenTaskAction =
     }
   | { action: "discover"; taskId: string; queries: string[] }
   | { action: "draft"; taskId: string; instruction: string; routes?: string[] }
-  | { action: "steer"; taskId: string; correction: string }
+  | { action: "steer"; taskId: string; correction: string; sourcePolicy?: Partial<SourcePolicy> }
   | { action: "complete"; taskId: string; artifact: string }
   | { action: "status"; taskId?: string }
   | { action: "stop"; taskId: string; reason?: string }
@@ -147,10 +148,10 @@ verification job, workflow stage controller, or approval action.
 
 One compact JSON state contains:
 
-- Task ID, Outcome, request, grounding policy, phase, monotonic revision, and times;
-- Steering Revisions;
+- Task ID, Outcome, request, grounding policy, steerable Source Policy, phase, monotonic revision, and times;
+- Steering Revisions, including effective Source Policy snapshots when changed;
 - immutable Checkpoint descriptors and the latest Artifact;
-- normalized Sources and Claims;
+- Sources with distinct Original Resources and Markdown Representations, plus origin-agnostic Claims;
 - Source/tool/coverage Limitations;
 - the most recent verification receipt and exact Artifact SHA-256.
 
@@ -175,18 +176,39 @@ backend answering twice is still one observation.
 
 ### Source
 
-A Source has a stable ID, canonical HTTP(S) URL, title, locator, bounded excerpt,
-optional role/family/as-of metadata, inspection time, and source-check result.
-Registration rejects credential-bearing URLs, duplicate identities, missing
-locators/excerpts, and any attempt to change the URL, title, locator, excerpt, role,
-family, or as-of metadata behind an existing ID. Exact resubmission is idempotent and
-preserves the prior verification record; changed evidence requires a new Source ID.
+A Source has a stable ID and one Original Resource whose `origin` is exactly `web`,
+`local`, `llm-wiki`, or `mcp`. The Resource carries a credential-free canonical URI,
+optional original media type, and a named source for llm-wiki or MCP. Separately, the
+Source records Raven's canonical semantic representation: Markdown preserved as
+`original`, Markdown marked `converted` with its producing Harness tool/converter, or
+`null` when inspection/conversion failed. Coverage is explicit: `full`, exact `segment`,
+or `unknown` projection, so a bounded read cannot impersonate a whole Resource. Title,
+locator, bounded excerpt, role/family/as-of metadata, inspection time, and source-check
+result remain common to every origin.
+The legacy `url` field remains an alias for the Resource URI so existing web calls replay.
 
-A search result, snippet, remembered citation, or worker mention is not a Source
-until the main agent has inspected it and supplies the locator and bounded verbatim
-excerpt. Before an externally grounded Checkpoint is published, Raven independently
-reopens the URL and requires that excerpt to occur in the retrieved body after
-HTML/entity and whitespace presentation normalization.
+Identity is the canonical Original Resource URI; Source IDs and identities cannot be rebound, and relabeling the same Resource with another Origin cannot manufacture independent evidence. Origin is also bound to scheme: HTTP(S) for web, `file:` for local, `file:`/`llm-wiki:` for llm-wiki, and `mcp:` for MCP. Exact
+resubmission is idempotent and preserves the prior verification record. A refused Source
+may be repaired under its ID, returning to `unchecked`, while changed confirmed evidence
+requires a new Source ID. Original Markdown requires `text/markdown` and is stored without
+transformation. Non-web normalized Markdown is bounded by the aggregate Task-state budget.
+
+A Lead or uninspected tool result is not a Source. The main agent inspects web, file,
+llm-wiki, or MCP resources with ordinary Harness tools before registration. Web keeps its
+existing independent re-fetch, HTTP identity, redirect, and excerpt checks. Other origins verify the Evidence Link against session-attested Markdown while retaining the Original Resource URI and producer. Every non-web representation names a successful `inspectionCallId`; Raven correlates it with the owning session's `tool/call` and `tool/result`, validates resolved file identity or the `mcp__<sourceName>__*` namespace, and requires the recorded Markdown and declared coverage to match the actual result. A successful attestation persists `inspectionSha256`, binding Resource, representation, producer, call ID, and coverage so later Completion, replay, or another Team member can verify the immutable snapshot without possessing the original member's event view. Missing or empty Markdown, unsupported formats,
+unreadable files, unavailable MCP capabilities, and conversion failures become
+`unavailable` Source checks; dependent Claims are deferred and a Limitation is retained.
+
+### Source Policy
+
+Source Policy is mutable Raven Task state, not plugin configuration. `start` accepts a
+partial policy and `steer` patches it on the same Task. Blocked web hosts override the
+allowlist and include subdomains; configured local and llm-wiki roots constrain canonical
+URIs at path boundaries; included/excluded MCP names select the named MCP source; and
+`preferPrimary` guides evidence choice without rejecting secondary evidence. Non-web evidence is default-deny: local and llm-wiki require a configured root, while MCP requires an include or exclude rule on the Task. Verification
+filters against the effective policy before calling `SourceVerifier`. A steering change
+immediately marks newly excluded Sources unavailable and defers Claims lacking another
+reachable Source, preserving both provenance and the reason for exclusion.
 
 ### Claim
 
@@ -209,7 +231,9 @@ Sources list and a generated Claim trace that maps every material supported/qual
 Claim ID and escaped text to its Source IDs. Source titles, locators, and Claim text
 are Markdown/HTML escaped before rendering. Unknown IDs and unregistered raw external
 URLs are rejected. This keeps the URL and Claim↔Source mapping outside model memory;
-literal anchor matching does not replace main-agent semantic entailment judgment.
+literal anchor matching does not replace main-agent semantic entailment judgment. The Sources
+list names each Source Origin and whether its Markdown was original or converted (and by
+what), so a Claim trace can always continue from Source ID to the Original Resource.
 
 The Claim trace also annotates independence. A Claim citing two or more Sources that
 all declare one `sourceFamily` renders as a single family and explicitly not as
@@ -237,7 +261,8 @@ engine validates each submitted transition but does not schedule when the agent 
 ```text
 start Raven Task
 → use existing Harness tools to inspect an initial credible source set
-→ reopen the recorded URLs and match the bounded excerpts
+→ preserve or convert content to Markdown and match bounded excerpts
+→ independently re-fetch web Resources; retain non-web Resource and producer provenance
 → checkpoint a useful outline, draft, explanation, or findings
 → continue research and evidence checks without asking permission
 → apply user correction as a Steering Revision on the same Task
@@ -252,8 +277,7 @@ slogan as a Checkpoint.
 
 ## Completion and graceful degradation
 
-`checkpoint` and `complete` both ask the `SourceVerifier` to reopen relevant URLs
-and match recorded excerpts. `complete` also performs deterministic checks against
+`checkpoint` and `complete` both ask the `SourceVerifier` to verify relevant Original Resources and match recorded excerpts against canonical Markdown. Web Resources are independently reopened; non-web representations retain their inspection producer. `complete` also performs deterministic checks against
 the exact latest Checkpoint fingerprint.
 
 Completion is rejected without losing an accepted Artifact or Checkpoint when:
@@ -355,35 +379,18 @@ This is the second Raven-owned infrastructure Seam:
 
 ```ts
 interface SourceVerifier {
-  verify(sources: readonly SourceRecord[], signal: AbortSignal):
+  verify(sources: readonly SourceCheckRequest[], signal: AbortSignal, execution?: RavenExecution):
     Promise<readonly SourceCheckResult[]>
 }
 ```
 
-Two real Adapters justify it:
+The production Adapter dispatches internally by Source Origin while preserving one interface for the Task engine:
 
-1. `HarnessWebSourceVerifier` dynamically reads the optional `ctx.web` capability,
-   reopens URLs with the tool cancellation signal, normalizes HTML/entity/whitespace
-   presentation, rejects cross-host resolution, and marks a Source reachable only
-   when its bounded excerpt occurs in the retrieved body. Provider absence, identity
-   drift, or mismatch is never fabricated success. Extraction distinguishes block-level
-   from inline elements: block boundaries emit one separator, inline markup emits none,
-   so `pre<em>cise</em>`, `50<sup>th</sup>`, and inline-wrapped CJK do not produce false
-   anchor failures. On mismatch the adapter reports the longest matching prefix plus the
-   nearest retrieved passage so the agent repairs the anchor instead of retrying it
-   unchanged, and separates a partial divergence from an excerpt absent entirely — the
-   latter is a fabrication signal rather than an anchor defect. A `truncated` retrieval
-   is reported as `unavailable`, not `failed`: a cut-off body cannot disprove an excerpt
-   drawn from the tail. Both outcomes block publication, but only one of them accuses
-   the agent of fabricating a quotation, and the wrong label would push it to weaken a
-   correct excerpt until it fits the visible prefix.
-2. `DeterministicSourceVerifier` supplies reachable, failed, redirected, unavailable,
-   and cancelled outcomes for tests.
+1. Web Sources dynamically use the optional `ctx.web` capability. Raven reopens the URL with the tool cancellation signal, normalizes the result to Markdown-compatible text, rejects cross-host resolution, and marks the Source reachable only when the bounded excerpt occurs. Provider absence, identity drift, truncation, or mismatch is never fabricated success. Existing block/inline extraction, nearest-passage repair diagnostics, status taxonomy, retries, deadlines, and network policy remain unchanged.
+2. Local, llm-wiki, and MCP Sources use canonical Markdown from a prior ordinary Harness file/MCP inspection. `inspectionCallId` must resolve exactly once to a successful call/result pair in the owning session. Raven checks the actual tool name against `producedBy`, uses structured `read` metadata to bind resolved file identity and reconstruct Markdown, or checks the named MCP namespace, Resource URI argument, and returned text. Exact excerpt presence then yields a non-HTTP `reachable` result. Missing receipts/content yield `unavailable`; provenance or content mismatch yields `failed`.
+3. Deterministic test Adapters supply reachable, failed, redirected, unavailable, and cancelled outcomes through the same seam.
 
-The Adapter reports observations only. Responses must match the requested Source ID
-set exactly once per Source and pass runtime validation for status, time, HTTP code,
-and resolved URL; protocol violations conservatively make the requested Sources
-unavailable. Provider calls are raced against cancellation so an adapter that ignores
+The Adapter reports observations only. Responses must match the requested Source ID set exactly once per Source and pass origin-aware runtime validation: HTTP status and resolved URL are required only for web and forbidden for non-web. Protocol violations conservatively make the requested Sources unavailable. Provider calls are raced against cancellation so an adapter that ignores
 `AbortSignal` cannot hold Raven open. Claim and Completion policy remains in the Task
 engine, preserving Locality.
 

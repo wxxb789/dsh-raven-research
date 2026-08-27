@@ -48,7 +48,7 @@ Raven 改变的是这项工作的形态。
 | --- | --- |
 | 出结果前一直沉默 | 先给出可用的提纲 / 初稿 / 发现清单作为 **Checkpoint**，再对同一 Artifact 增量精修 |
 | 一次纠正就要重来 | 纠正变成同一个 Task 上的 **Steering Revision**，此前的证据与 Checkpoint 全部保留 |
-| 引用是"记住"的字符串 | 引用指向**真正打开过的 Source**，摘录会与抓取到的正文比对 |
+| 引用是"记住"的字符串 | 引用指向来自 web、本地文件、llm-wiki 或 MCP 的**真正检查过的 Source**；摘录会与规范 Markdown 比对 |
 | 同一通稿的三次转载被当成三次印证 | 共享同一 `sourceFamily` 的 Claim 会被标记为**不构成独立佐证** |
 | 一个死链拖垮整轮 | 失败的依赖只会 **defer 受影响的 Claim**，其余已验证的工作照常诚实完成 |
 | 状态随工具调用消失 | 最近一次成功持久化的 Task snapshot 由 session log 重建，并支持 stop / resume |
@@ -67,9 +67,9 @@ Raven 改变的是这项工作的形态。
 - **渐进交付。** Raven prompt 指示主 Agent 在 Task 仍 active 时尽早发布一份可独立使用的 Checkpoint。Checkpoint 校验由
   runtime 强制执行；何时向用户显示、何时继续后续 model/tool step，则由 Harness agent loop 决定。
 - **纠偏而不是重启。** `steer` 把用户的修正应用到运行中的 Task，并保留既有证据。
-- **引用要对得上抓取字节。** Artifact 用 `[@source-id]` 引用稳定的 Source ID；Raven 将有界摘录与抓取正文比对，
-  机械渲染记录的 URL，并拒绝未知引用、未注册 URL、跨站重定向以及失效或不匹配的 Source。不匹配时会报告最接近的
-  抓取片段，方便修正锚点，而不是原样重试。
+- **统一的 Markdown-first Source fabric。** 每个 Source 都把 Original Resource 与 Raven 的规范 Markdown Representation 分开保存。恰好支持四种 origin：web、本地文件、llm-wiki 页面和 MCP resource。原本就是 Markdown 的内容保持原样；发生转换时会记录产出它的 Harness tool provenance；资源不可读、不受支持或转换失败时，依赖它的 Claim 会被 defer。
+- **Task-level Source Policy。** 自然语言请求会变成同一 Task 上可继续纠偏的 policy：允许/屏蔽 web host、优先一手证据、限定本地或 llm-wiki root，以及包含/排除指定 MCP source。这不是部署配置。
+- **引用要对得上 Source material。** Artifact 用 `[@source-id]` 引用稳定的 Source ID。Raven 仅对 web Source 以既有 HTTP 身份保证独立重新抓取；本地、llm-wiki 与 MCP 的摘录则与已记录的 Markdown Representation 比对。渲染后的引用会暴露 Origin 与转换 provenance；未知引用、未注册 web URL、跨站重定向、损坏的 Representation 和不匹配摘录都会被拒绝。
 - **带独立性判断的 Claim trace。** 每次 Completion 都会追加一张把关键 Claim ID / 文本映射到 Source ID 的 trace，
   并标出共享同一 `sourceFamily` 的 Claim，避免同一原始记录的多份转载被读成多次印证；真正冲突的 Claim 会被记录为
   contested，而不是被悄悄消解。
@@ -373,7 +373,7 @@ Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pr
 `raven_task` 由 `raven` agent preset 注册，因此它**只在 Raven 模式下存在**。请在新建会话时选择该模式；在其他任何
 模式下，agent 都没有 Raven 工具，会直接作答而不开 Task。
 
-在 Raven 模式内部，没有启动咒语，也没有独立 Raven UI —— 用户照常和 Harness agent 对话。直接说“只看一手来源”“先暂停”“继续”或“保留这份结果”即可，主 Agent 会把自然语言翻译成 Raven 的内部协议。`guidance: auto` 仅在有帮助时提示一项相关能力；在 Raven preset 行（或选择性开启的 settings 卡片）设 `guidance: off`，即可关闭提示而不改变工作流。
+在 Raven 模式内部，没有启动咒语，也没有独立 Raven UI —— 用户照常和 Harness agent 对话。直接说“只用这些站点”“屏蔽这个站点”“使用这个本地文件夹”“包含这个 llm-wiki”“排除这个 MCP source”“只看一手来源”“先暂停”“继续”或“保留这份结果”即可，主 Agent 会把自然语言翻译成 Raven 的内部协议。`guidance: auto` 仅在有帮助时提示一项相关能力；在 Raven preset 行（或选择性开启的 settings 卡片）设 `guidance: off`，即可关闭提示而不改变工作流。
 
 ```text
 研究支持与反对这项政策的最强一手证据。先给我一份早期发现提纲，继续推进，
@@ -392,8 +392,7 @@ Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pr
 用一个心智模型、两个例子和一次自测，教我理解闭包。
 ```
 
-纠偏就是下一条消息 —— "重点讲成本，不要讲采用率""再挑剔一些""只引用一手资料" —— 它会落在同一个 Task 上，
-而不是开一个新的。
+纠偏就是下一条消息 —— "重点讲成本，不要讲采用率"、"屏蔽 example.com"、"只使用这个文件夹"或"只引用一手资料" —— 它会更新同一个 Task（包括 Source Policy），而不是开一个新的。
 
 ### 内部协议参考（供集成者）
 
@@ -522,14 +521,13 @@ tool-owned content finalizer 附加 `<raven_task_recovery>` 提示 —— 这是
 
 ### 校验流水线
 
-有据可依的 Checkpoint 与 Completion 会把记录在案的 Source 送进内部的 `SourceVerifier` 接缝（生产用 Harness-web
-适配器，测试用确定性适配器）：
+有据可依的 Checkpoint 与 Completion 会把四种 origin 的 Source 送进同一条 Markdown-first 校验流水线：
 
-1. 通过 Harness `web` 能力重新打开记录的 URL，受 `sourceCheckTimeoutMs` 约束。
-2. 拒绝偏离原始 source 身份的重定向，避免停靠域名或聚合站悄悄顶替一条引用。
-3. 把 HTML 呈现归一化为文本，再对有界摘录做字面匹配；不匹配时报告最接近的抓取片段，而不是只丢一个失败。
-4. 把截断的抓取判为**不可验证**，绝不判为编造 —— 被 fetch 契约截断的正文是检索限制，不是证据缺失。
-5. 单个 Source 超时按不可验证上报，而不是让整个 Checkpoint 一直挂着。
+1. web Source 通过 Harness `web` 能力重新打开 Original Resource，受 `sourceCheckTimeoutMs` 约束，并拒绝偏离原始身份的重定向。
+2. 本地文件、llm-wiki 页面与 MCP resource 不经过第二套 retrieval runtime；agent 在登记前用普通 Harness file/MCP tool 检查内容，并记录 `inspectionCallId`。Raven 会在所属 session log 中核对真实 `tool/call` 与 `tool/result`、producer、解析后的文件身份或 MCP namespace，以及返回的 Markdown，而不是接受调用者自证的 Representation。
+3. 原始 Markdown 保持原样；转换后的 Representation 记录 producer Harness tool provenance。
+4. 对规范 Markdown 做有界摘录的字面匹配；web 抓取被截断、资源不可读、不受支持或转换失败时，Source 标记为 `unavailable`，依赖的 Claim 被 defer，并保留 Limitation。
+5. 单个 web Source 超时按不可验证上报，而不是让整个 Checkpoint 一直挂着。
 
 Completion 会再次核对引用身份、关键 Claim 链接、Source 可达性与 Artifact 指纹，并追加带独立性判断的 Claim trace。
 
@@ -571,7 +569,7 @@ Raven 拥有 `raven-research` 这个 settings namespace。只要注册插件，�
 | 字段 | 默认值 | 作用 |
 | --- | --- | --- |
 | `guidance` | `auto` | `auto` 仅在相关时让主 Agent 提示至多一项 Raven 能力，并避免重复、教程、协议细节和审批门。`off` 关闭这些可选提示，不改变 Task 行为。 |
-| `sourceVerification` | `remote` | `structural-only` 会屏蔽所有远程检查。此时没有 Source 能被确认，因此记录了 Source 的 Checkpoint 会被拒绝并指明该策略。仅在网络确实不可达时使用。 |
+| `sourceVerification` | `remote` | `structural-only` 只屏蔽远程 web 检查；本地、llm-wiki 与 MCP Source 仍可根据已记录且验证过的 Markdown Representation 确认。仅在网络确实不可达时使用。 |
 | `sourceNetworkPolicy` | `unrestricted`（schema 兼容默认）；Raven preset：`public-only` | `public-only` 会在调用 fetch provider 前拒绝本机、私有或特殊网络目标。省略该新字段的旧配置仍保持 `unrestricted`；新安装的 Raven 模式会显式设置 `public-only`。 |
 | `sourceCheckTimeoutMs` | `0`（schema 兼容默认）；Raven preset：`20000` | 单个远程 Source 检查的期限（毫秒）。`0` 表示不设单次期限。新安装的 Raven 模式会显式使用 20 秒；超时会把该 Source 报告为不可验证。 |
 | `sourceDiscovery` | `seam` | `disabled` 会完全屏蔽 `action=discover`：调用会报告发现能力不可用并记录一条 Limitation，而不是返回一个可能被 agent 误读成"什么都不存在"的空结果。agent 仍然保有自己的 Harness 工具。 |
@@ -632,17 +630,12 @@ executable helpers from one another."* 因此被拒绝的输入会直接显示 s
 
 | Outcome | 需要组合 `web` 能力吗？ | 需要搜索凭据吗？ |
 | --- | --- | --- |
-| `research` | **必需** | 仅 `action=discover` 需要 |
-| `academic-writing` | **必需** | 仅 `action=discover` 需要 |
-| `general-writing` | 仅当 Task 登记 Source 时 | 仅 `action=discover` 需要 |
-| `learning` | 仅当 Task 登记 Source 时 | 仅 `action=discover` 需要 |
+| `research` | 仅使用 web Source 时需要 | 仅 `action=discover` 需要 |
+| `academic-writing` | 仅使用 web Source 时需要 | 仅 `action=discover` 需要 |
+| `general-writing` | 仅使用 web Source 时需要 | 仅 `action=discover` 需要 |
+| `learning` | 仅使用 web Source 时需要 | 仅 `action=discover` 需要 |
 
-**`research` 与 `academic-writing` 必需一个组合了 fetch provider 的 `web` 能力。** 这两种 Outcome 的
-`grounding` 默认是 `required`，且该底线不能被任何配置或 agent 降到 `none`。让 Source 成其为 Source 的正是校验：
-Raven 会重新打开每个已记录的 URL，并要求记录的摘录出现在抓取到的正文中。没有 fetch provider，就
-**没有任何 Source 能被验证**，因此无法发布有据可依的 Checkpoint，Completion 也无法成功 —— 一个要求 grounding
-却没有任何已验证 Claim 的 Task 会保持 `active`，而不会被标记为完成。这是刻意的：另一种做法，是交出一份引用从未被
-检查过的"已完成"研究文档。
+`research` 与 `academic-writing` 默认 `grounding: required`，且该底线不能被配置或 agent 降到 `none`。它们可用已验证的 web、本地、llm-wiki 或 MCP Source 满足该要求。web Source 需要组合 fetch provider，并保留独立重新抓取检查；非 web Source 需要显式 Task Source Policy，以及由普通 Harness file/MCP tool 产出的 Markdown Representation，不引入第二套 retrieval runtime。没有任何已验证 Claim 的 grounding-required Task 会保持 `active`，而不会被标记为完成。
 
 Harness 的 stock profile 会刻意关闭 HTTP fetch，因为当前本地 provider 尚未实现完整的 SSRF／私网隔离。随附的 Raven preset 会显式设置
 `sourceNetworkPolicy: public-only`，会在委托抓取前拒绝本机名、私有／特殊 IP，以及含任何非公共 DNS 结果的域名。
@@ -689,14 +682,11 @@ Raven 不引入自己的模型，但有两个动作会成倍放大部署实际�
   （或 agent 选定的子集）并发执行，因此一轮的成本是各 route 之和，而不是一个模型的成本。三个 route 就是为一条指令
   付三次补全费用。每份变体受 `draftMaxTokens`（默认 `4000` 输出 token）与 `draftTimeoutMs`（默认 `120000`）约束。
   这正是 route 清单归部署所有、agent 只能选子集的原因：指定一个模型，就是在指定花费和一条数据通路。
-- **校验会重新抓取每一个被引用的 Source，且每次发布抓两遍。** Source 在 `checkpoint` **以及** `complete` 时各重开
-  一次 —— Completion 不信任 Checkpoint 早先的结果，因为易变页面可能在两者之间改变，而"凭旧结论放行"恰恰是校验本身
-  要防的失败。一个含 20 个 Source、checkpoint 四次并完成一次的 Task，量级上会产生约 100 次抓取。请用
-  `sourceCheckTimeoutMs` 给每一次设限。
+- **校验只会重新抓取每一个被引用的 web Source，且每次发布抓两遍。** web Resource 在 `checkpoint` **以及** `complete` 时各重开一次；Completion 不信任 Checkpoint 早先的结果，因为页面可能改变。一个含 20 个 web Source、checkpoint 四次并完成一次的 Task，量级上会产生约 100 次抓取，请用 `sourceCheckTimeoutMs` 给每次设限。本地、llm-wiki 与 MCP 校验只重查 Task state 中有界的 Markdown，不发起网络调用；它们在登记前已由普通 Harness tool 检查。
 - **发现**的成本是每批中每个 query 一次搜索后端调用，query 数最多 `searchMaxQueries`（默认 `4`），每个 query 最多
   请求 `searchMaxResults`（默认 `8`）个候选。
 
-Checkpoint、steer、status、stop、resume 与 export 不发起任何网络调用，不产生费用。
+本地、llm-wiki 与 MCP 的 Source 校验，以及 checkpoint、steer、status、stop、resume 与 export 本身，都不发起 Raven 网络调用，也不产生 Raven 侧费用；只有 checkpoint/complete 中的 web Source 会触发上述重新抓取。
 
 ### 数据流向
 
@@ -704,23 +694,24 @@ Raven 没有自己的存储、遥测和网络目的地。所有离开本机的�
 
 | 离开的内容 | 去向 | 时机 |
 | --- | --- | --- |
-| 已记录的 Source **URL**，并完整重新抓取 | 各 Source 的源站 | 每次带 Source 的 `checkpoint`，以及每次 `complete` |
+| 已记录的 web Source **URL**，并完整重新抓取 | 各 web Source 的源站 | 每次有据可依的 `checkpoint`，以及每次 `complete` |
+| 本地、llm-wiki 与 MCP resource 请求 | agent 调用的普通 Harness file/MCP tool | Source 登记之前；Raven 不增加 connector 或第二条 retrieval path |
 | 你或 agent 拟定的**搜索 query** | 已组合的搜索后端（例如 DeepSeek 搜索 provider） | 每次 `discover` |
 | **起草指令**及 drafter 随附的上下文 | 本轮中每一个已配置的模型 route | 每次 `draft` |
 
 请特别注意第三行：**Artifact 与指令文本会发送给每一个 draft route**，因此指向第三方 provider 的 route，就是正在
 撰写的文本的一条数据通路。这正是 `draftRoutes` 属于部署配置、而 agent 无法自行扩大的原因。
 
-除此之外不再传输任何内容。记录的摘录、Claim、Limitation 与 Artifact 只存在于 Harness 的 **session log** 中；
-Raven 在任何环节都不写文件。
+除此之外不再传输任何内容。Original Resource metadata、有界的非 web Markdown Representation、摘录、Claim、Limitation、Source Policy 与 Artifact 只存在于 Harness 的 **session log** 中；除非该 session log 是可接受的持久化位置，否则不要登记敏感的本地或 MCP 内容。Raven 在任何环节都不写文件。
 
 **即使 `export`，Raven 依然不写任何文件。** `action=export` 是一次纯投影：它返回 llm-wiki 的页面字节及其目标路径，
 由 *agent* 用普通的 Harness 文件工具写入，处在该 agent 既有的审批与沙箱边界之内。你接受这些写入后，落到磁盘上的是：
 
 ```text
 wiki/queries/<slug>.md    Artifact 页，带派生出的 frontmatter
-wiki/raw/<source-id>.md   每个 Source 一张不可变页：仅含已验证的摘录
-                          （capture: excerpt-only）、其校验回执，以及对该页自身正文的 sha256
+wiki/raw/<source-id>.md   每个 Source 一张不可变页：Original Resource、Markdown producer 与
+                          inspection receipt provenance、已验证摘录（capture: excerpt-only）、
+                          校验回执，以及对该页自身正文的 sha256
 wiki/log.md               追加一条记录
 wiki/SCHEMA.md            仅在 init=true 时播种
 wiki/index.md             仅在 init=true 时播种
@@ -736,6 +727,7 @@ wiki/index.md             仅在 init=true 时播种
 | 上限项 | 数值 | 触顶时会怎样 |
 | --- | --- | --- |
 | Source | **256** | 本次提交批次中后续的 Source 登记被拒；该 Checkpoint 连同上限一并被拒绝，既有状态原封不动。 |
+| Source Markdown | **每个 40,000 字符** | 更大的规范化 Representation 会被拒绝；请缩短到相关文档章节，但不要改动被引用的摘录。 |
 | Claim | **512** | 同上 —— 整批被拒而不是静默截断，因此不会出现只记录了一半的 provenance。 |
 | Checkpoint | **128 个描述符** | 触顶时裁剪较旧描述符但保留第一个，并为 Completion 预留位置；历史 Artifact 仍保留在原始 tool result 中。 |
 | Limitation | **256** | 记录的失败不再累积。Task 照常工作；上限会被报告，因此不会有 Limitation 被静默丢弃。 |
@@ -751,14 +743,14 @@ Source 标题 1,000、locator 4,000）的报告方式与此相同。
 
 | 你看到的 | 原因 | 怎么办 |
 | --- | --- | --- |
-| `DeepSeek Harness web capability is not composed` | 没有 fetch provider，任何 Source 都无法验证。 | 组合 `web` 能力。若只是非取证类的写作或学习，可用 `grounding: none` 起 Task。 |
+| `DeepSeek Harness web capability is not composed` | 没有 fetch provider，因此 web Source 无法验证。 | 组合 `web`，或使用由显式 Task Source Policy 准入、并有真实 Harness inspection receipt 的本地、llm-wiki 或 MCP Source。 |
 | `no usable web provider is registered` | `web` 已组合，但没有任何已注册 provider 能服务该请求。 | 检查部署注册了哪些 provider，以及它们的 `available()` 是否为真。 |
 | `DeepSeek search has no API key for "DEEPSEEK_API_KEY"` | 发现已到达搜索 provider，但它没有凭据。 | 通过 credentials 服务存入 key（Web GUI 的 Models 页，或环境变量）。不影响 fetch。 |
 | `DeepSeek Harness web search capability is not composed` | 根本没有搜索半边。 | 组合一个搜索 provider，或让 agent 用自己的检索工具 —— 发现本就是可选的。 |
 | 发现报告不可用并记下一条 Limitation，但没有报错 | `sourceDiscovery: disabled`。 | 这是刻意的：空结果会被读成"什么都不存在"。改回 `seam` 即可。 |
 | `no Draft Variant route is configured` | `draftRoutes` 为空 —— 即默认值。 | 把 `draftRoutes` 配成若干 `provider/model` 条目。在此之前起草是关闭的。 |
 | 某个 route 被拒绝，并列出了已配置的集合 | agent 选了 `draftRoutes` 之外的 route。 | 符合预期：agent 只能选子集。若该 route 确实应被允许，把它加进部署配置。 |
-| 记录了 Source 的 Checkpoint 被拒，并指明 `structural-only` | `sourceVerification: structural-only` 屏蔽了所有远程检查。 | 改回 `remote`。它绝不会把未检查的 Source 变成已确认。 |
+| 引用了 web Source 的 Checkpoint 被拒，并指明 `structural-only` | `sourceVerification: structural-only` 屏蔽远程 web 检查。 | 改回 `remote`，或使用带已验证 Markdown 与 inspection receipt 的非 web Source。 |
 | Completion 被拒：候选字节与最新 Checkpoint 不一致 | 最后一次编辑没有先发布为 Checkpoint，或改的是*提交过*的字节而不是*存下来*的那份。 | 重新读取渲染后的 Artifact，并用那份字节完成。存储采用 Task 的 Prose Layout，因此返回的字节与提交的并不相同。 |
 | Completion 被拒：某个 Steering Revision 之后没有 Checkpoint | 纠偏发生在最后一次 Checkpoint 之后。 | 先发布一个应用了该纠偏的 Checkpoint，再完成。 |
 | 被引用的 Source 报告摘录不存在，并给出最接近的片段 | 该摘录未出现在抓取到的正文中。 | 依据给出的片段修正摘录。不要为了"能对上"而把一条正确的摘录削弱 —— 摘录*完全不存在*与摘录*有偏差*是两种不同的信号。 |
@@ -854,8 +846,11 @@ pnpm check:release
 - 在最终校验前就暴露可用的中间研究 Artifact；
 - 在中途纠偏后继续精修同一个 Task；
 - 正常阶段推进无需确认动作；
-- 拒绝未知引用，以及在抓取字节中不存在的摘录；
-- 在有据可依的 Checkpoint 之前以及 Completion 时重新打开被引用的 URL；
+- 让 web、本地、llm-wiki 与 MCP 四种 origin 通过同一 Source/Claim/citation contract 完成 grounding；
+- 保留原始 Markdown，并暴露 converted Markdown 的 producer 与 inspection receipt provenance；
+- 把不可读、不受支持、缺失 receipt 或伪造的 material 如实降级为 unavailable/failed Source、deferred Claim 与 Limitation；
+- 拒绝未知引用，以及规范 Markdown 中不存在的摘录；
+- 在有据可依的 Checkpoint 之前以及 Completion 时独立重新打开被引用的 web URL；
 - 在部分 source 失败时保留独立结果；
 - 要求 Completion 字节等于最新一次 steer 之后的 Checkpoint；
 - 区分 Completion 与工具/worker 终止；以及
@@ -874,7 +869,7 @@ pnpm check:release
 都不会。Raven 只增加一个任务抽象和一个工具；研究与写作仍由现有 Harness agent 用自己的工具和模型完成。
 
 **需要向量数据库、索引或 embedding 管线吗？**
-不需要。Raven 没有自己的存储。Source 以稳定身份记录，并在校验时通过 Harness 的 `web` 能力重新打开。
+不需要。Raven 没有 connector store。web Source 会通过 Harness `web` 能力独立重新打开；本地、llm-wiki 与 MCP 则由 agent 使用普通 Harness tool 检查，并通过所属 session 的 inspection receipt 绑定 Original Resource 与有界 Markdown。
 
 **Raven 自己搜网，还是 agent 搜？**
 都搜，这是有意为之。`action=discover` 通过与 Harness `web_search` 工具同源的 `ctx.web` 搜索接缝跑一批互补 query，
@@ -886,8 +881,7 @@ pnpm check:release
 能力，因此 Raven 以可选方式消费它；没有检测到成员关系（包括探测失败）时，每个 Agent 各自拥有独立 Task book。
 
 **没有联网能用吗？**
-非取证类的写作与学习可以。没有组合 `web` 能力时，外部 Claim 不会被发布为"已支撑"：它们保持 deferred；一个要求
-grounding 但没有任何有效 Claim 的 Task 会保持 active，而不会被标记为完成。
+可以。没有 web 时，有据要求的 Task 仍可使用由 Source Policy 显式准入的本地、llm-wiki 或 MCP Resource；普通 Harness tool 的 inspection receipt 必须证明 Markdown provenance。web Claim 仍保持 deferred；没有任何有效 Claim 的 grounding-required Task 会保持 active，而不会被标记为完成。
 
 **Code Mode（`run_code`）里能用吗？**
 可以 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
@@ -897,8 +891,7 @@ grounding 但没有任何有效 Claim 的 Task 会保持 active，而不会被�
 摘录级校验（而不是"跑完了"）作为 Completion 的闸口。
 
 **摘录匹配能证明 Claim 为真吗？**
-不能。Raven 校验的是 URL 可达性，以及在空白/HTML 呈现归一化之后有界摘录的字面存在。字面存在不等于语义蕴含，
-Claim 的判断仍由 agent 负责。
+不能。Raven 校验有界摘录是否存在于有 receipt 的规范 Markdown，并保留其到 Original Resource 的路径；web 还会额外校验 HTTP 可达性与重定向身份。字面存在不等于语义蕴含，Claim 的判断仍由 agent 负责。
 
 **发到 npm 了吗？**
 还没有。请按[安装](#安装)从仓库构建打包。
@@ -916,7 +909,7 @@ Claim 的判断仍由 agent 负责。
   确定性的文本生成器，因此内容质量仍取决于模型。
 - 自然语言纠偏的识别由 Harness 模型基于 Raven 的前置上下文完成。插件提供的是确定性的同 Task `steer` 迁移，
   而不是基于规则的文本分类器去猜测纠正意图。
-- 未组合 Harness `web` 能力时，外部 Claim 保持 deferred。
+- 未组合 Harness `web` 能力时，web Claim 保持 deferred；由 Source Policy 显式准入且 inspection receipt 有效的本地、llm-wiki 与 MCP Source 仍可用于 grounding。
 - 最近一次成功持久化的 Task snapshot 可从所属 Harness session record 重放，包括多个 stopped/completed Task 身份及稍后
   resume 旧 Task。超大的 nested Code Mode log 可能漏掉那一步；后续直接 mutation 会重新发布完整 snapshot。跨会话项目、
   可复用语料库和间隔重复存储不在范围内；要留存成果请用 `export`。

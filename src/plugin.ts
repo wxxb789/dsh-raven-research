@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
@@ -33,6 +34,7 @@ import {
 import { assertPublicDestination, SourceNetworkPolicyError } from './network-policy.js'
 import { RAVEN_PROMPT } from './prompt.js'
 import type { ProseLayoutOptions } from './prose.js'
+import { sourceInspectionSha256 } from './source.js'
 import { canonicalSourceUrl, redactedLeadUrl, sameSourceIdentity } from './url.js'
 import { RavenError, RAVEN_LIMITS } from './domain.js'
 import type {
@@ -45,6 +47,7 @@ import type {
   RavenDispatchResult,
   RavenDraftRoute,
   RavenDraftVariant,
+  RavenExecution,
   RavenLead,
   RavenTaskState,
   SourceCheckRequest,
@@ -372,7 +375,7 @@ type WebCapabilityState =
  * registered: the seam resolves its provider at call time and throws
  * WEB_PROVIDER_UNAVAILABLE when none is usable. That distinction stayed invisible
  * until the money was spent -- a grounding-required Task would start, discover,
- * read, draft, and only then find every Source check reporting the capability
+ * read, draft, and only then find every web Source check reporting the capability
  * missing, which makes the Checkpoint and then Completion refuse, against a floor
  * that `research` and `academic-writing` cannot lower. The failure has to arrive
  * BEFORE the research spend, so the provider registries are probed structurally.
@@ -1167,16 +1170,16 @@ function classifyFetched(
           }
         : { status: 'reachable' }
     }
-    if (statusOutcome !== undefined) {
-      return { status: statusOutcome.status, detail: statusOutcome.detail + retryNote }
-    }
     if (!identityMatched) {
-      // Host drift is an identity defect in the citation itself: the bytes that
-      // answered are not the ones this Source names.
+      // Host drift is an identity defect before HTTP status: even an error page
+      // from another host is not the Original Resource this Source names.
       return {
         status: 'failed',
         detail: 'source resolved to a different host: ' + new URL(fetched.url).hostname,
       }
+    }
+    if (statusOutcome !== undefined) {
+      return { status: statusOutcome.status, detail: statusOutcome.detail + retryNote }
     }
     // A cut-off body cannot disprove an excerpt drawn from the tail. Report it as
     // unverifiable rather than as an evidence defect: both block publication, but
@@ -1223,17 +1226,252 @@ async function fetchSource(
   return fetched
 }
 
+interface InspectionReceipt {
+  readonly toolName: string
+  readonly arguments: unknown
+  readonly text: string
+  readonly meta?: Record<string, unknown>
+}
+
+type InspectionLookup =
+  | { readonly status: 'ok'; readonly receipt: InspectionReceipt }
+  | { readonly status: 'unavailable'; readonly detail: string }
+
+function textBlocks(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const text: string[] = []
+  for (const raw of value) {
+    const block = asRecord(raw)
+    if (block?.type === 'text' && typeof block.text === 'string') text.push(block.text)
+  }
+  return text
+}
+
+function inspectionReceipt(events: readonly unknown[], callId: string): InspectionLookup {
+  const calls: Record<string, unknown>[] = []
+  const results: Record<string, unknown>[] = []
+  for (const raw of events) {
+    const event = asRecord(raw)
+    const data = asRecord(event?.data)
+    if (event?.type === 'tool/call' && data?.callId === callId) calls.push(data)
+    if (event?.type !== 'tool/result') continue
+    const message = asRecord(data?.message)
+    const source = asRecord(message?.source)
+    if (source?.callId === callId) results.push(data as Record<string, unknown>)
+  }
+  if (calls.length !== 1 || results.length !== 1) {
+    return { status: 'unavailable', detail: 'inspection call ' + callId + ' is absent or ambiguous in the owning session log' }
+  }
+  const call = calls[0]
+  const result = results[0]
+  if (typeof call?.name !== 'string' || typeof call.arguments !== 'string') {
+    return { status: 'unavailable', detail: 'inspection call ' + callId + ' has no usable tool identity or arguments' }
+  }
+  let args: unknown
+  try {
+    args = JSON.parse(call.arguments)
+  } catch {
+    return { status: 'unavailable', detail: 'inspection call ' + callId + ' has malformed recorded arguments' }
+  }
+  if (result?.error !== undefined) {
+    return { status: 'unavailable', detail: 'inspection call ' + callId + ' ended with a recorded tool error' }
+  }
+  const message = asRecord(result?.message)
+  const outer = Array.isArray(message?.content) ? message.content : []
+  const blocks = outer
+    .map(asRecord)
+    .filter((block): block is Record<string, unknown> => block !== undefined && block.type === 'tool-result' && block.toolCallId === callId)
+  if (blocks.length !== 1 || blocks[0]?.isError === true) {
+    return { status: 'unavailable', detail: 'inspection call ' + callId + ' has no successful model-visible result' }
+  }
+  const meta = asRecord(result?.meta)
+  return {
+    status: 'ok',
+    receipt: {
+      toolName: call.name,
+      arguments: args,
+      text: textBlocks(blocks[0]?.content).join('\n'),
+      ...(meta === undefined ? {} : { meta }),
+    },
+  }
+}
+
+function containsResourceArgument(
+  value: unknown,
+  candidates: readonly string[],
+  origin: SourceCheckRequest['resource']['origin'],
+): boolean {
+  const object = asRecord(value)
+  if (object === undefined) return false
+  const keys = origin === 'mcp'
+    ? ['uri', 'resourceUri', 'resource_uri']
+    : ['file_path', 'path', 'uri']
+  return keys.some(key => typeof object[key] === 'string' && candidates.includes(object[key]))
+}
+
+function fileArgumentCandidates(uri: string): string[] {
+  try {
+    const path = fileURLToPath(uri)
+    return [uri, path, path.replaceAll('\\', '/'), path.replaceAll('/', '\\')]
+  } catch {
+    return [uri]
+  }
+}
+
+function markdownFromReadMeta(
+  meta: Record<string, unknown> | undefined,
+  uri: string,
+): { readonly markdown: string; readonly coverage: 'full' | 'segment' } | undefined {
+  if (meta === undefined
+    || typeof meta.path !== 'string'
+    || !Number.isSafeInteger(meta.offset)
+    || (meta.offset as number) < 1
+    || !Number.isSafeInteger(meta.totalLines)
+    || (meta.totalLines as number) < 0
+    || !Array.isArray(meta.lines)) return undefined
+  const expected = fileArgumentCandidates(uri).slice(1)
+    .map(path => process.platform === 'win32' ? path.toLowerCase() : path)
+  const actual = process.platform === 'win32' ? meta.path.toLowerCase() : meta.path
+  if (!expected.includes(actual)) return undefined
+  const offset = meta.offset as number
+  const totalLines = meta.totalLines as number
+  const lines: string[] = []
+  let expectedNumber = offset
+  for (const raw of meta.lines) {
+    const line = asRecord(raw)
+    if (line?.number !== expectedNumber || typeof line.text !== 'string') return undefined
+    expectedNumber += 1
+    lines.push(line.text)
+  }
+  const end = lines.length === 0 ? offset - 1 : expectedNumber - 1
+  if (end > totalLines) return undefined
+  return {
+    markdown: lines.join('\n'),
+    coverage: offset === 1 && end === totalLines ? 'full' : 'segment',
+  }
+}
+
+function inspectionFailure(source: SourceCheckRequest, checkedAt: string, detail: string, status: 'failed' | 'unavailable'): SourceCheckResult {
+  return {
+    sourceId: source.sourceId,
+    status,
+    checkedAt,
+    detail: detail + '. Original resource: ' + source.resource.uri + '; keep the Claim deferred',
+  }
+}
+
+function validateInspectionReceipt(source: SourceCheckRequest, checkedAt: string, events: readonly unknown[]): SourceCheckResult | undefined {
+  const representation = source.representation
+  if (representation === null || representation.markdown === undefined || representation.inspectionCallId === undefined) return undefined
+  const found = inspectionReceipt(events, representation.inspectionCallId)
+  if (found.status === 'unavailable') return inspectionFailure(source, checkedAt, found.detail, 'unavailable')
+  const receipt = found.receipt
+  if (receipt.toolName !== representation.producedBy) {
+    return inspectionFailure(source, checkedAt, 'representation producer does not match inspection tool ' + receipt.toolName, 'failed')
+  }
+  if (source.resource.origin === 'mcp') {
+    const prefix = 'mcp__' + source.resource.sourceName + '__'
+    if (!receipt.toolName.startsWith(prefix)) {
+      return inspectionFailure(source, checkedAt, 'inspection tool is outside the named MCP source ' + source.resource.sourceName, 'failed')
+    }
+  }
+  const candidates = source.resource.origin === 'local' || source.resource.origin === 'llm-wiki'
+    ? fileArgumentCandidates(source.resource.uri)
+    : [source.resource.uri]
+  const readObservation = receipt.toolName === 'read'
+    ? markdownFromReadMeta(receipt.meta, source.resource.uri)
+    : undefined
+  const observedMarkdown = receipt.toolName === 'read'
+    ? readObservation?.markdown
+    : receipt.text === representation.markdown ? representation.markdown : undefined
+  if (receipt.toolName === 'read' && readObservation?.coverage !== representation.coverage) {
+    return inspectionFailure(source, checkedAt, 'recorded Markdown coverage does not match the read result', 'failed')
+  }
+  if (receipt.toolName !== 'read' && representation.coverage !== 'unknown') {
+    return inspectionFailure(source, checkedAt, 'this inspection tool cannot attest full-resource coverage', 'failed')
+  }
+  if (!containsResourceArgument(receipt.arguments, candidates, source.resource.origin)) {
+    return inspectionFailure(source, checkedAt, 'inspection arguments do not identify this Original Resource', 'failed')
+  }
+  if (observedMarkdown !== representation.markdown) {
+    return inspectionFailure(source, checkedAt, 'recorded Markdown does not match the successful inspection result', 'failed')
+  }
+  return undefined
+}
+
+function classifyMarkdownRepresentation(
+  source: SourceCheckRequest,
+  checkedAt: string,
+  events: readonly unknown[],
+): SourceCheckResult {
+  const representation = source.representation
+  const markdown = representation?.markdown
+  if (representation === null || markdown === undefined) {
+    const media = source.resource.mediaType === undefined ? 'unknown media type' : source.resource.mediaType
+    const capability = source.resource.origin === 'mcp'
+      ? 'the MCP capability was unavailable, returned unsupported content, or conversion failed'
+      : 'the resource was unreadable, unsupported, or conversion failed'
+    return {
+      sourceId: source.sourceId,
+      status: 'unavailable',
+      checkedAt,
+      detail: 'no normalized Markdown representation is available for the ' + source.resource.origin
+        + ' resource (' + media + '): ' + capability + '. The original resource remains ' + source.resource.uri
+        + '; keep the Claim deferred rather than treating the excerpt as verified',
+    }
+  }
+  const expectedInspectionSha256 = sourceInspectionSha256(source.resource, representation)
+  if (source.inspectionSha256 !== expectedInspectionSha256) {
+    const receiptFailure = validateInspectionReceipt(source, checkedAt, events)
+    if (receiptFailure !== undefined) return receiptFailure
+  }
+  const normalized = normalizedEvidence(markdown)
+  const excerpt = normalizedEvidence(source.excerpt)
+  if (normalized.length === 0) {
+    return {
+      sourceId: source.sourceId,
+      status: 'unavailable',
+      checkedAt,
+      detail: 'the normalized Markdown representation is empty, so the excerpt at ' + source.locator
+        + ' could be neither confirmed nor disproved; the original resource remains ' + source.resource.uri,
+    }
+  }
+  if (!normalized.includes(excerpt)) {
+    return {
+      sourceId: source.sourceId,
+      status: 'failed',
+      checkedAt,
+      detail: excerptMismatchDetail(normalized, excerpt, source.locator),
+    }
+  }
+  return {
+    sourceId: source.sourceId,
+    status: 'reachable',
+    checkedAt,
+    detail: 'verified against the ' + representation.derivation + ' Markdown representation produced by '
+      + representation.producedBy + '; original resource: ' + source.resource.uri,
+  }
+}
+
 function sourceVerifier(
   ctx: Context,
   now: () => string,
   settings: () => RavenConfig,
 ): SourceVerifier {
   return {
-    async verify(sources: readonly SourceCheckRequest[], signal: AbortSignal): Promise<readonly SourceCheckResult[]> {
+    async verify(
+      sources: readonly SourceCheckRequest[],
+      signal: AbortSignal,
+      execution?: RavenExecution,
+    ): Promise<readonly SourceCheckResult[]> {
       const config = settings()
+      const markdownResults = sources
+        .filter(source => source.resource.origin !== 'web')
+        .map(source => classifyMarkdownRepresentation(source, now(), execution?.inspectionEvents ?? []))
+      const webSources = sources.filter(source => source.resource.origin === 'web')
       const unverifiable = (detail: string): readonly SourceCheckResult[] => {
         const checkedAt = now()
-        return sources.map(source => ({
+        return webSources.map(source => ({
           sourceId: source.sourceId,
           status: 'unavailable' as const,
           checkedAt,
@@ -1243,18 +1481,19 @@ function sourceVerifier(
       if ((config.sourceVerification ?? 'remote') === 'structural-only') {
         // Withholding the network is a deployment decision, so it reports the same
         // way an absent capability does: unverifiable evidence, never silent trust.
-        return unverifiable(
+        return [...markdownResults, ...unverifiable(
           'remote Source verification is disabled for this deployment'
           + ' (raven-research.sourceVerification=structural-only)',
-        )
+        )]
       }
+      if (webSources.length === 0) return markdownResults
       const web = webHalf(ctx, 'fetch')
-      if (web === undefined) return unverifiable(WEB_FETCH_ABSENT_DETAIL)
+      if (web === undefined) return [...markdownResults, ...unverifiable(WEB_FETCH_ABSENT_DETAIL)]
       const timeoutMs = config.sourceCheckTimeoutMs ?? 0
       const passDeadline = Date.now() + VERIFICATION_PASS_BUDGET_MS
       const lastHostCheck = new Map<string, number>()
       const results: SourceCheckResult[] = []
-      for (const source of sources) {
+      for (const source of webSources) {
         signal.throwIfAborted()
         const checkedAt = now()
         if (Date.now() >= passDeadline) {
@@ -1332,7 +1571,7 @@ function sourceVerifier(
           })
         }
       }
-      return results
+      return [...markdownResults, ...results]
     },
   }
 }
@@ -1386,13 +1625,65 @@ function renderToolValue(value: RavenToolValue): string {
   return lines.join('\n\n')
 }
 
+const SOURCE_RESOURCE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['origin', 'uri'],
+  properties: {
+    origin: { type: 'string', enum: ['web', 'local', 'llm-wiki', 'mcp'] },
+    uri: { type: 'string', description: 'Absolute identity of the Original Resource.' },
+    mediaType: { type: 'string', description: 'Original media type, bounded by Raven Source limits.' },
+    sourceName: { type: 'string', description: 'Required named llm-wiki or MCP source; invalid for web/local.' },
+  },
+} as const
+
+const SOURCE_REPRESENTATION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['format', 'derivation', 'coverage', 'producedBy'],
+  properties: {
+    format: { type: 'string', enum: ['markdown'] },
+    derivation: { type: 'string', enum: ['original', 'converted'] },
+    coverage: { type: 'string', enum: ['full', 'segment', 'unknown'], description: 'Whether Markdown covers the resource, an exact segment, or an unprovable tool projection.' },
+    producedBy: { type: 'string', description: 'Harness file/MCP/web tool or converter that produced this Markdown.' },
+    inspectionCallId: { type: 'string', description: 'Prior successful ordinary Harness tool call that produced non-web Markdown.' },
+    markdown: { type: 'string', description: 'Exact canonical Markdown. Required for non-web material.' },
+  },
+} as const
+
+const SOURCE_POLICY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    allowedWebHosts: { type: 'array', items: { type: 'string' } },
+    blockedWebHosts: { type: 'array', items: { type: 'string' } },
+    preferPrimary: { type: 'boolean' },
+    localRoots: { type: 'array', items: { type: 'string' } },
+    llmWikiRoots: { type: 'array', items: { type: 'string' } },
+    includedMcpSources: { type: 'array', items: { type: 'string' } },
+    excludedMcpSources: { type: 'array', items: { type: 'string' } },
+  },
+} as const
+
 const SOURCE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['sourceId', 'url', 'title', 'locator', 'excerpt'],
+  required: ['sourceId', 'title', 'locator', 'excerpt'],
+  oneOf: [
+    {
+      required: ['url'],
+      not: { anyOf: [{ required: ['resource'] }, { required: ['representation'] }] },
+    },
+    { required: ['resource', 'representation'] },
+  ],
   properties: {
     sourceId: { type: 'string', description: 'Stable Source ID, 1-64 safe identifier characters.' },
-    url: { type: 'string', description: 'Canonical HTTP(S) URL, at most 2048 characters.' },
+    url: { type: 'string', description: 'Legacy web URL or compatibility alias for resource.uri. Required only for legacy web input.' },
+    resource: SOURCE_RESOURCE_SCHEMA,
+    representation: {
+      oneOf: [{ type: 'null' }, SOURCE_REPRESENTATION_SCHEMA],
+      description: 'Canonical Markdown kept distinct from the Original Resource. Use null only when inspection/conversion failed.',
+    },
     title: { type: 'string', description: `Source title, at most ${RAVEN_LIMITS.sourceTitleChars} characters.` },
     locator: { type: 'string', description: `Evidence locator, at most ${RAVEN_LIMITS.sourceLocatorChars} characters.` },
     excerpt: { type: 'string', description: `Bounded verbatim excerpt, at most ${RAVEN_LIMITS.sourceExcerptChars} characters.` },
@@ -1471,6 +1762,10 @@ function groundedStartBlocker(
   // settings surface owns and tests. Refusing the Task outright would replace that
   // documented behaviour. A missing capability is not the same thing: nobody chose
   // it, and nothing downstream names it as a decision.
+  const policy = asRecord(input?.sourcePolicy)
+  const hasNonWebSource = ['localRoots', 'llmWikiRoots', 'includedMcpSources', 'excludedMcpSources']
+    .some(key => Array.isArray(policy?.[key]) && policy[key].length > 0)
+  if (hasNonWebSource) return undefined
   const advice = webCapabilityAdvice(webCapabilityState(ctx, 'fetch'), 'fetch')
   if (advice === undefined) return undefined
   return 'a ' + outcome + ' Raven Task cannot reach its evidence floor in this deployment: it needs at'
@@ -1529,6 +1824,10 @@ function toolDefinition(
           type: 'string',
           enum: ['required', 'optional', 'none'],
           description: 'Evidence policy for this Task. Only with action=start; defaults from the outcome.',
+        },
+        sourcePolicy: {
+          ...SOURCE_POLICY_SCHEMA,
+          description: 'Task-level Source Policy patch. With action=start it sets sites, local folders, llm-wikis, MCP sources, and primary preference; with action=steer it updates the same Task.',
         },
         stage: {
           type: 'string',
@@ -1614,8 +1913,8 @@ function toolDefinition(
         throw new Error('stop the current active Raven Task before resuming another Task in this session')
       }
       // The evidence floor is checked against the DEPLOYMENT before the Task exists.
-      // A grounding-required Outcome whose Sources can never be verified is not a Task
-      // that degrades gracefully: every Source reports unavailable, so the Checkpoint
+      // A grounding-required Outcome restricted to web whose Sources can never be verified is not a Task
+      // that degrades gracefully: every eligible Source reports unavailable, so the Checkpoint
       // is refused, then Completion is refused, and the floor cannot be lowered because
       // it belongs to the Outcome rather than to the executor. Discovering that after
       // the research is a total loss of the spend, so it is refused HERE, naming the
@@ -1632,6 +1931,7 @@ function toolDefinition(
         // different Task ids and bypass the book's first-write CAS guard.
         sessionId: membership?.id ?? agent.id,
         signal: exec.signal,
+        inspectionEvents: agent.session.events,
       })
       // Compare-and-set, not last-writer-wins. `previous` was read BEFORE an
       // await-heavy verification pass, so inside an Agent Team two teammates
@@ -1756,6 +2056,7 @@ function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike
         + ' contribute Sources, Claims, and Checkpoints to it, and never start a competing Task of your own.']),
     `Outcome: ${state.outcome}. Phase: ${state.phase}. Task revision: ${state.revision}. Steering revision: ${state.steeringRevision}.`,
     `Evidence: ${state.sources.length} Source(s), ${state.claims.length} Claim(s), ${state.limitations.length} Limitation(s).`,
+    `Source Policy: ${JSON.stringify(state.sourcePolicy)}.`,
     latest === undefined
       ? 'No Checkpoint exists yet; publish the first useful Artifact early.'
       : `Latest Checkpoint ${latest.ordinal}: ${latest.stage} — ${latest.summary}`,
@@ -1959,10 +2260,10 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
   if (fetchAdvice !== undefined) {
     warnOperator(
       ctx,
-      'Raven cannot verify any Source in this deployment: ' + fetchAdvice
-      + '. Until it is composed, every recorded Source reports unavailable, so a research or'
-      + ' academic-writing Task cannot reach a Checkpoint or Completion and raven_task will'
-      + ' refuse to start one.',
+      'Raven cannot verify web Sources in this deployment: ' + fetchAdvice
+      + '. Until it is composed, web Sources report unavailable. A grounding-required Task without'
+      + ' an explicit local, llm-wiki, or MCP Source Policy is refused before research spend; those'
+      + ' non-web origins remain usable through their recorded Markdown representations.',
     )
   }
   const searchAdvice = isHost ? webCapabilityAdvice(webCapabilityState(ctx, 'search'), 'search') : undefined
