@@ -54,18 +54,23 @@
   config:
     role: agent
     # Raven's configuration lives here, and by default this is the ONLY place it
-    # lives. Every field below is shown at its default and commented out, so an
-    # operator can see what is configurable without leaving the file. Uncomment
-    # what you want to change.
+    # lives. Every field is visible below. Compatibility-sensitive network fields
+    # are set explicitly to the safer new-install values; the remaining schema
+    # defaults stay commented until an operator changes them.
     #
     # If the settings card is mounted as an opt-in (the host row), these become
     # the base layer instead: a value stored in the user's settings.yaml then
     # overrides them while that provider is composed, and they become
     # authoritative again if it goes away.
     #
+    # User guidance: auto may surface one brief, relevant capability hint; off
+    # suppresses optional hints without changing Task behavior.
+    # guidance: auto
+    #
     # Sources: how hard a Source is checked before it may support a Claim.
     # sourceVerification: remote
-    # sourceCheckTimeoutMs: 20000
+    sourceNetworkPolicy: public-only
+    sourceCheckTimeoutMs: 20000
     # sourceDiscovery: seam
     # # Discovery: the bound on one discover batch.
     # searchMaxQueries: 4

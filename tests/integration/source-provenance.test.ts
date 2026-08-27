@@ -46,7 +46,7 @@ describe('Source provenance integration', () => {
         }
       },
       on() { return () => undefined },
-    } as never)
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
     if (tool === undefined) throw new Error('Raven tool did not register')
     const registeredTool = tool
     const signal = new AbortController().signal
@@ -129,7 +129,7 @@ describe('Source provenance integration', () => {
         }
       },
       on() { return () => undefined },
-    } as never)
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
     if (tool === undefined) throw new Error('Raven tool did not register')
     const registeredTool = tool
     const signal = new AbortController().signal
@@ -215,7 +215,7 @@ describe('Source provenance integration', () => {
         }
       },
       on() { return () => undefined },
-    } as never)
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
     if (tool === undefined) throw new Error('Raven tool did not register')
     const registeredTool = tool
     const signal = new AbortController().signal
@@ -293,7 +293,7 @@ describe('Source provenance integration', () => {
         }
       },
       on() { return () => undefined },
-    } as never)
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
     if (tool === undefined) throw new Error('Raven tool did not register')
     const registeredTool = tool
     const signal = new AbortController().signal
@@ -403,7 +403,7 @@ describe('Source provenance integration', () => {
           : undefined
       },
       on() { return () => undefined },
-    } as never)
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
     if (tool === undefined) throw new Error('Raven tool did not register')
     const registeredTool = tool
     const controller = new AbortController()

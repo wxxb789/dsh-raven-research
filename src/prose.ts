@@ -59,6 +59,7 @@ const ABBREVIATIONS = new Set([
   'no', 'nos', 'nov', 'oct', 'p', 'pp', 'prof', 'pt', 'rev', 'sec', 'sep',
   'sept', 'sr', 'st', 'tbl', 'univ', 'vol', 'vols', 'vs', 'v',
 ])
+const MAX_ABBREVIATION_LENGTH = Math.max(...[...ABBREVIATIONS].map(value => value.length))
 
 const CJK_PATTERN = /[\u1100-\u11FF\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7AF\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/u
 
@@ -81,10 +82,27 @@ function opensSentence(character: string): boolean {
 
 /** The token immediately before a period, lowercased and stripped of punctuation. */
 function precedingToken(text: string, periodIndex: number): string {
-  let start = periodIndex
-  while (start > 0 && /[^\s]/.test(text[start - 1] ?? '')) start -= 1
-  return text.slice(start, periodIndex).toLowerCase().replaceAll(/[^a-z.]/g, '')
+  let token = ''
+  for (let index = periodIndex - 1; index >= 0; index -= 1) {
+    const character = text[index] ?? ''
+    if (/\s/.test(character)) break
+    const lower = character.toLowerCase()
+    if (lower !== '.' && (lower < 'a' || lower > 'z')) continue
+    token = lower + token
+    // No member of the finite abbreviation set can match once the significant
+    // token is longer than its longest member. Stop instead of rescanning an
+    // arbitrarily long URL or unbroken token for every period it contains.
+    if (token.length > MAX_ABBREVIATION_LENGTH) return ''
+  }
+  return token
 }
+
+/**
+ * A footnote or numeric citation marker such as `[^1]` or `[12]`. Sticky so it can
+ * be anchored at an arbitrary offset without slicing the remaining text.
+ * Module-level and stateful via `lastIndex`; every use must set `lastIndex` first.
+ */
+const FOOTNOTE_MARKER = /\[\^?[\w.-]+\]/y
 
 /**
  * Split one already-joined paragraph into sentences.
@@ -129,7 +147,9 @@ export function splitSentences(text: string): string[] {
       && (WIDE_TERMINATORS.has(text[end] ?? '') || NARROW_TERMINATORS.has(text[end] ?? ''))) end += 1
     while (end < text.length && TRAILING_MARKS.has(text[end] ?? '')) end += 1
     // A footnote or numeric citation marker is part of the sentence that cites it.
-    const marker = /^\[\^?[\w.-]+\]/.exec(text.slice(end))
+    // Sticky match anchored at `end`, avoiding a `text.slice(end)` temporary.
+    FOOTNOTE_MARKER.lastIndex = end
+    const marker = FOOTNOTE_MARKER.exec(text)
     if (marker !== null) end += marker[0].length
 
     let next = end

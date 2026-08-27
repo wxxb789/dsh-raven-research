@@ -2,6 +2,7 @@ import { settingsNamespace, type SettingsNamespace } from '@deepseek-ai/dsh-sett
 import z from '@deepseek-ai/schemastery'
 
 import { RAVEN_LIMITS } from './domain.js'
+import { SOURCE_NETWORK_POLICIES, type SourceNetworkPolicy } from './network-policy.js'
 import type { ProseFormat, ProseLayout } from './prose.js'
 import type { SourceDiscoveryMode, SourceVerificationMode } from './route.js'
 
@@ -10,6 +11,12 @@ export const RAVEN_ROLES = ['host', 'agent', 'both'] as const
 
 /** Which half of Raven a single mount registers. See {@link RavenConfig.role}. */
 export type RavenRole = (typeof RAVEN_ROLES)[number]
+
+/** User-facing contextual guidance policy. Tool behavior is identical in both modes. */
+export const RAVEN_GUIDANCE_POLICIES = ['auto', 'off'] as const
+
+/** Whether the main agent may surface brief, relevant Raven capability hints. */
+export type RavenGuidancePolicy = (typeof RAVEN_GUIDANCE_POLICIES)[number]
 
 /**
  * The settings namespace Raven owns. Registering it is what exposes it: a Harness
@@ -26,6 +33,7 @@ export {
   type SourceDiscoveryMode,
   type SourceVerificationMode,
 } from './route.js'
+export { SOURCE_NETWORK_POLICIES, type SourceNetworkPolicy } from './network-policy.js'
 
 /**
  * Ceilings on every settings-reachable numeric.
@@ -52,8 +60,8 @@ export const RAVEN_SETTINGS_CEILINGS = {
 /**
  * Deployment-owned Raven policy.
  *
- * Every field is a decision about the environment a Raven Task runs in, never a
- * decision about the Task itself. The evidence floor belongs to the Outcome and no
+ * Every field is deployment/user policy for the environment or interaction, never
+ * persisted Raven Task state. The evidence floor belongs to the Outcome and no
  * setting can lower it: withholding remote checks makes Sources unverifiable and
  * refuses the Checkpoint, which is the honest degradation, not a weaker standard.
  */
@@ -63,7 +71,9 @@ export interface RavenConfig {
    * never from the live settings thunk. See the schema description below.
    */
   role?: RavenRole
+  guidance?: RavenGuidancePolicy
   sourceVerification?: SourceVerificationMode
+  sourceNetworkPolicy?: SourceNetworkPolicy
   sourceCheckTimeoutMs?: number
   sourceDiscovery?: SourceDiscoveryMode
   searchMaxQueries?: number
@@ -91,9 +101,8 @@ export const Config: z<RavenConfig> = z.object({
       + 'the failure is silent rather than loud: with no host row nothing serves the settings namespace, '
       + 'so the browser settings card has nothing to edit and every field falls back to its default; '
       + 'with no agent row no raven_task is registered, so the agent carries the prompt for a tool that '
-      + 'does not exist. Splitting the roles also splits the in-memory Task book — each agent-role mount '
-      + 'is its own plugin instance with its own book, so an Agent Team no longer shares one in-memory '
-      + 'book and falls back to what each member\'s durable session log carries. '
+      + 'does not exist. One agent-role row mounts once under the preset\'s standing scope; Raven keys '
+      + 'that shared instance by Agent identity or successfully detected Team identity; failed membership probing falls back to an independent Agent book. '
       + 'This is a MOUNT-TIME decision and is therefore read from the composition entry alone, unlike '
       + 'every other field here: a settings surface that could flip a mount\'s role at runtime would '
       + 'register or unregister a tool underneath a running agent.',
@@ -105,6 +114,16 @@ export const Config: z<RavenConfig> = z.object({
     // with the decision instead of hard-coding one field name into the renderer,
     // which would silently stop covering the next mount-time field somebody adds.
     .hidden(),
+  guidance: z
+    .union(RAVEN_GUIDANCE_POLICIES.map(value => z.const(value)))
+    .default('auto')
+    .description(
+      'Whether the main agent may briefly surface a Raven capability when it is directly relevant. '
+      + '"auto" may mention one useful option such as redirecting the work, changing source constraints, '
+      + 'pausing and resuming, or preserving a finished result. It must not turn routine work into a tutorial, '
+      + 'repeat a capability the user already understands, expose tool protocol, or add approval gates. '
+      + '"off" suppresses these optional hints without changing Raven Task behavior.',
+    ),
   sourceVerification: z
     .union([z.const('remote'), z.const('structural-only')])
     .default('remote')
@@ -115,18 +134,27 @@ export const Config: z<RavenConfig> = z.object({
       + 'publishing evidence nobody inspected. Set it only for a deployment that cannot reach '
       + 'the network, where the honest outcome is a clear refusal rather than a link error per Source.',
     ),
+  sourceNetworkPolicy: z
+    .union(SOURCE_NETWORK_POLICIES.map(value => z.const(value)))
+    .default('unrestricted')
+    .description(
+      'Pre-flight policy for model-supplied Source URLs. "public-only" refuses local hostnames, '
+      + 'private or special IP literals, and DNS names with any non-public answer before calling '
+      + 'the Harness fetch provider. It reduces SSRF exposure but cannot close DNS rebinding because '
+      + 'the current web seam resolves again at connect time. "unrestricted" skips this filter; it remains '
+      + 'the compatibility fallback for deployments that omitted this newer setting, while shipped Raven presets '
+      + 'explicitly use "public-only" for new installs. Set "unrestricted" deliberately only when the fetch '
+      + 'provider is already network-confined or intentionally serves trusted internal Sources.',
+    ),
   sourceCheckTimeoutMs: z
     .natural()
     .max(RAVEN_SETTINGS_CEILINGS.timeoutMs)
-    .default(20_000)
+    .default(0)
     .description(
       'Deadline for one remote Source check, in milliseconds. 0 means no deadline. '
       + 'An exceeded deadline reports that one Source as unverifiable instead of holding the Checkpoint open. '
-      + 'It defaults to a real deadline rather than to 0 because the verification pass walks the recorded '
-      + 'Sources one at a time and BOTH Checkpoint and Completion re-run it: without a deadline one hung '
-      + 'origin holds a Task step open for as long as the provider is willing to wait. 0 remains available '
-      + 'for a deployment that deliberately wants to wait out a slow archive, and the whole pass is bounded '
-      + 'separately so no number of Sources can add up to an unbounded wait.',
+      + 'The compatibility default remains 0 for deployments that omitted this newer setting; shipped Raven '
+      + 'presets explicitly use 20000 so new Raven-mode installs still bound each check.',
     ),
   sourceDiscovery: z
     .union([z.const('seam'), z.const('disabled')])

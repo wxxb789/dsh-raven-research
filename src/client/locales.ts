@@ -24,7 +24,9 @@ export const RAVEN_LOCALE_NS = 'settings.raven-research'
   | 'title' | 'description'
   | 'expand' | 'collapse' | 'unsaved' | 'readOnly' | 'memory' | 'unavailable' | 'loading'
   | 'group.evidence' | 'group.discovery' | 'group.prose' | 'group.draft' | 'group.other'
+  | 'guidance' | 'guidanceHint'
   | 'sourceVerification' | 'sourceVerificationHint'
+  | 'sourceNetworkPolicy' | 'sourceNetworkPolicyHint'
   | 'sourceCheckTimeoutMs' | 'sourceCheckTimeoutMsHint'
   | 'sourceDiscovery' | 'sourceDiscoveryHint'
   | 'searchMaxQueries' | 'searchMaxQueriesHint'
@@ -35,7 +37,9 @@ export const RAVEN_LOCALE_NS = 'settings.raven-research'
   | 'draftRoutes' | 'draftRoutesHint'
   | 'draftMaxTokens' | 'draftMaxTokensHint'
   | 'draftTimeoutMs' | 'draftTimeoutMsHint'
+  | 'choice.auto' | 'choice.off'
   | 'choice.remote' | 'choice.structural-only'
+  | 'choice.public-only' | 'choice.unrestricted'
   | 'choice.seam' | 'choice.disabled'
   | 'choice.sentence-per-line' | 'choice.as-written'
   | 'choice.markdown' | 'choice.plain'
@@ -59,10 +63,17 @@ export const en: Record<RavenCardKey, string> = {
   'group.prose': 'Artifact prose',
   'group.draft': 'Draft Variants',
   'group.other': 'Other',
+  guidance: 'Contextual guidance',
+  guidanceHint:
+    'Auto lets the main agent mention one useful Raven option only when relevant, without tutorials, repetition, or approval gates. Off suppresses these optional hints; Task behavior is unchanged.',
   sourceVerification: 'Source verification',
   sourceVerificationHint:
     'Whether recorded Sources are re-fetched to confirm their excerpts. Structural only makes every Source '
     + 'unverifiable, so a Checkpoint carrying Sources is refused rather than published unchecked.',
+  sourceNetworkPolicy: 'Source network policy',
+  sourceNetworkPolicyHint:
+    'Public only refuses local/private destinations before fetching. It reduces SSRF exposure but cannot stop DNS '
+    + 'rebinding inside the provider. Unrestricted is only for an already confined or intentionally internal provider.',
   sourceCheckTimeoutMs: 'Source check deadline',
   sourceCheckTimeoutMsHint:
     'Milliseconds allowed for one remote Source check; 0 means no deadline. An exceeded deadline reports that '
@@ -97,8 +108,12 @@ export const en: Record<RavenCardKey, string> = {
   draftTimeoutMsHint:
     'Milliseconds allowed for one Draft Variant; 0 means no deadline. A route that exceeds it produces no variant; '
     + 'its siblings still return theirs.',
+  'choice.auto': 'Auto',
+  'choice.off': 'Off',
   'choice.remote': 'Re-fetch',
   'choice.structural-only': 'Structural only',
+  'choice.public-only': 'Public network only',
+  'choice.unrestricted': 'Unrestricted',
   'choice.seam': 'Search seam',
   'choice.disabled': 'Disabled',
   'choice.sentence-per-line': 'Sentence per line',
@@ -130,10 +145,16 @@ export const zh: Record<RavenCardKey, string> = {
   'group.prose': 'Artifact 排版',
   'group.draft': 'Draft Variant',
   'group.other': '其它',
+  guidance: '情境提示',
+  guidanceHint: '自动模式仅在相关时让主 Agent 简短提示一项 Raven 能力，不会变成教程、重复提示或审批流程。关闭后不再提供此类可选提示，Task 行为不变。',
   sourceVerification: 'Source 校验方式',
   sourceVerificationHint:
     '是否重新抓取已登记的 Source 以核对其原文摘录。选择「仅结构校验」后任何 Source 都无法被确认，'
     + '携带 Source 的 Checkpoint 会被拒绝，而不是未经核对就发布。',
+  sourceNetworkPolicy: 'Source 网络策略',
+  sourceNetworkPolicyHint:
+    '「仅公共网络」会在抓取前拒绝本机或私有地址，可降低 SSRF 暴露，但无法阻止 provider 内部的 DNS rebinding。'
+    + '仅当 fetch provider 已被网络隔离或明确用于可信内网时，才使用「不限制」。',
   sourceCheckTimeoutMs: 'Source 校验超时',
   sourceCheckTimeoutMsHint:
     '单次远程 Source 校验的毫秒上限，0 表示不限。超时会把该 Source 记为无法核验，而不是让 Checkpoint 一直挂起。',
@@ -162,8 +183,12 @@ export const zh: Record<RavenCardKey, string> = {
   draftTimeoutMs: 'Draft 超时',
   draftTimeoutMsHint:
     '单个 Draft Variant 的毫秒上限，0 表示不限。超时的路由不产出变体，同轮其它路由仍会返回各自的变体。',
+  'choice.auto': '自动',
+  'choice.off': '关闭',
   'choice.remote': '重新抓取核验',
   'choice.structural-only': '仅结构校验',
+  'choice.public-only': '仅公共网络',
+  'choice.unrestricted': '不限制',
   'choice.seam': '走搜索接缝',
   'choice.disabled': '禁用',
   'choice.sentence-per-line': '一句一行',

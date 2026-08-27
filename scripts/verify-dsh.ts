@@ -115,6 +115,8 @@ await writeFile(configPath, [
   '    watch: false',
   '- id: raven',
   "  name: 'test-raven'",
+  '  config:',
+  "    sourceNetworkPolicy: 'unrestricted'",
   '',
 ].join('\n'))
 

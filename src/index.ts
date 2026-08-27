@@ -1,6 +1,6 @@
 export * from './domain.js'
-export { Config, RAVEN_ROLES, RAVEN_SETTINGS_NAMESPACE, SOURCE_DISCOVERY_MODES, SOURCE_VERIFICATION_MODES } from './config.js'
-export type { RavenConfig, RavenRole, SourceDiscoveryMode, SourceVerificationMode } from './config.js'
+export { Config, RAVEN_GUIDANCE_POLICIES, RAVEN_ROLES, RAVEN_SETTINGS_NAMESPACE, SOURCE_DISCOVERY_MODES, SOURCE_NETWORK_POLICIES, SOURCE_VERIFICATION_MODES } from './config.js'
+export type { RavenConfig, RavenGuidancePolicy, RavenRole, SourceDiscoveryMode, SourceNetworkPolicy, SourceVerificationMode } from './config.js'
 export { createRavenEngine, formatDraftRoute, parseDraftRoute, renderArtifact, renderLeads, renderVariants } from './engine.js'
 export type { RavenDraftLimits, RavenSearchLimits } from './engine.js'
 export { layoutProse, proseLayoutReport, splitSentences, PROSE_FORMATS, PROSE_LAYOUTS } from './prose.js'

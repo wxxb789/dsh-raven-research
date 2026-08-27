@@ -104,6 +104,32 @@ describe('Raven inside an Agent Team', () => {
     expect(leadDecision.messages?.[0]?.content[0]?.text ?? '').not.toContain('Agent Team member')
   })
 
+  it('admits only one of two Team members racing to start the shared Task', async () => {
+    const { tool } = harness(teamService({
+      'lead-race': { id: 'lead-race', role: 'lead', name: 'lead' },
+      'mate-race': { id: 'lead-race', role: 'teammate', name: 'reader' },
+    }))
+    const start = (id: string) => tool.execute({
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'One Task even when two members start together.',
+    }, { agent: { id, session: { events: [] } }, signal })
+
+    const settled = await Promise.allSettled([start('lead-race'), start('mate-race')])
+    const fulfilled = settled.filter(result => result.status === 'fulfilled')
+    const rejected = settled.filter(result => result.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    const winner = fulfilled[0]?.status === 'fulfilled' ? fulfilled[0].value : undefined
+    const loser = rejected[0]?.status === 'rejected' ? String(rejected[0].reason) : ''
+    expect(loser).toContain('already exists in this session')
+
+    const teammate = { id: 'mate-race', session: { events: [] as unknown[] } }
+    const current = await tool.execute({ action: 'status' }, { agent: teammate, signal })
+    expect(current.state.taskId).toBe(winner?.state.taskId)
+  })
+
   it('merges each member\'s own durable records into the shared Task book', async () => {
     const roster = {
       'lead-session': { id: 'lead-session', role: 'lead' as const, name: 'lead' },
@@ -130,6 +156,38 @@ describe('Raven inside an Agent Team', () => {
     expect(afterLead.state.taskId).toBe(started.state.taskId)
     const teammateSees = await reloaded.tool.execute({ action: 'status' }, { agent: teammate, signal })
     expect(teammateSees.state.taskId).toBe(started.state.taskId)
+  })
+
+  it('keeps an undurable active Team Task resident beyond the book limit', async () => {
+    const roster: Record<string, { id: string; role: 'lead' | 'teammate'; name: string }> = {
+      'original-lead': { id: 'original-team', role: 'lead', name: 'lead' },
+      'original-mate': { id: 'original-team', role: 'teammate', name: 'reader' },
+    }
+    for (let index = 0; index < 65; index += 1) {
+      roster[`pressure-${index}`] = { id: `pressure-team-${index}`, role: 'lead', name: `lead-${index}` }
+    }
+    const { tool } = harness(teamService(roster))
+    const started = await tool.execute({
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'An undurable Team Task that must remain shared.',
+    }, { agent: { id: 'original-lead', session: { events: [] } }, signal })
+
+    for (let index = 0; index < 65; index += 1) {
+      await tool.execute({
+        action: 'start',
+        outcome: 'general-writing',
+        grounding: 'none',
+        request: `Distinct Team Task ${index}.`,
+      }, { agent: { id: `pressure-${index}`, session: { events: [] } }, signal })
+    }
+
+    const seen = await tool.execute({ action: 'status' }, {
+      agent: { id: 'original-mate', session: { events: [] } },
+      signal,
+    })
+    expect(seen.state.taskId).toBe(started.state.taskId)
   })
 
   it('keeps working where no Team capability is composed, and where it throws', async () => {

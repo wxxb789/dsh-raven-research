@@ -20,8 +20,11 @@ together.
 
 ## What is and is not in Raven's trust boundary
 
-Raven is a plugin inside a Harness process. It runs no server, opens no port, and owns
-no database, cache, or files. That shapes what a vulnerability report here can mean.
+Raven's runtime plugin lives inside a Harness process. It runs no server, opens no port,
+and owns no database, cache, Task-state file, or export file. The separate preset installer
+writes only its documented user preset directory, and exported paths/bytes become files
+only when the Harness agent or user writes them. That shapes what a vulnerability report
+here can mean.
 
 **In scope**
 
@@ -39,7 +42,22 @@ no database, cache, or files. That shapes what a vulnerability report here can m
   write. A projected path that escapes the intended wiki directory is in scope even
   though Raven itself never writes it.
 - **Denial of service through the caps.** A submission that evades the per-Task ceilings
-  (Sources, Claims, Checkpoints, Limitations, Artifact size) to exhaust memory.
+  (individual fields plus the aggregate durable-snapshot byte budget) to exhaust memory.
+
+### Source destination filtering and residual SSRF risk
+
+With `sourceNetworkPolicy: public-only` (explicit in the shipped Raven preset), Raven refuses local hostnames,
+private/special IP literals, and DNS names for which any answer is non-public before it
+calls `ctx.web.fetch`. It repeats the check for the provider's final URL. A policy refusal
+is `unavailable`, never evidence that the Source or excerpt is false.
+
+This is a pre-flight destination filter, **not an SSRF sandbox**. The current Harness web
+seam exposes no dispatcher, pinned-address, or DNS-lookup hook, so the provider resolves
+the hostname again when it connects. An attacker controlling authoritative DNS may change
+the answer between Raven's check and that connection. Deployments that can reach sensitive
+internal targets must confine the fetch provider at the network layer. `unrestricted`
+removes Raven's filter and is only appropriate when that confinement already exists or the
+provider intentionally serves trusted internal Sources.
 
 **Out of scope**
 

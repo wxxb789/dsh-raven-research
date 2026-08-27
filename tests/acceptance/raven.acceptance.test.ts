@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { apply } from '../../src/plugin.js'
+import type { RavenConfig } from '../../src/config.js'
 import type { RavenTaskState } from '../../src/domain.js'
 
 interface ToolValue {
@@ -16,14 +17,22 @@ interface CapturedTool {
   execute(args: unknown, exec: unknown): Promise<ToolValue>
 }
 
+interface PreStepDecision {
+  readonly kind: 'enter' | 'reject'
+  readonly messages: readonly { readonly content: readonly { readonly type: string; readonly text?: string }[] }[]
+}
+
+type PreStep = (event: { agent: unknown }, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>
+
 function createHarness(web?: {
   fetch(request: { url: string }, signal?: AbortSignal): Promise<{
     url: string
     statusCode: number
     body: { kind: 'html' | 'text'; content: string }
   }>
-}) {
+}, config: RavenConfig = {}) {
   let tool: CapturedTool | undefined
+  let preStep: PreStep | undefined
   const sections: Array<Record<string, unknown>> = []
   const ctx = {
     tools: {
@@ -44,11 +53,12 @@ function createHarness(web?: {
     get(name: string) {
       return name === 'web' ? web : undefined
     },
-    on() {
+    on(event: string, listener: unknown) {
+      if (event === 'agent/pre-step') preStep = listener as PreStep
       return () => undefined
     },
   }
-  apply(ctx as never)
+  apply(ctx as never, { sourceNetworkPolicy: 'unrestricted', ...config })
   if (tool === undefined) throw new Error('Raven tool did not register')
   const registeredTool = tool
   const agent = { id: 'acceptance-session', session: { events: [] } }
@@ -57,6 +67,14 @@ function createHarness(web?: {
     sections,
     tool: registeredTool,
     run: (args: unknown) => registeredTool.execute(args, { agent, signal }),
+    context: async () => {
+      if (preStep === undefined) throw new Error('Raven pre-step hook did not register')
+      const decision = await preStep({ agent }, async () => ({ kind: 'enter', messages: [] }))
+      return decision.messages.flatMap(message => message.content)
+        .filter(part => part.type === 'text')
+        .map(part => part.text ?? '')
+        .join('\n')
+    },
   }
 }
 
@@ -304,6 +322,81 @@ describe('Raven end-to-end acceptance', () => {
     expect(draft.issues.join(' ')).toContain('HTTP 404')
   })
 
+  it('offers contextual guidance in auto and stays silent in off without changing the workflow', async () => {
+    const auto = createHarness()
+    const initialContext = await auto.context()
+    expect(initialContext.match(/<raven_guidance>/g)).toHaveLength(1)
+    expect(initialContext).toContain('at most one brief')
+    expect(initialContext).toContain('Do not repeat a capability')
+    expect(initialContext).not.toContain('action=')
+
+    const autoStarted = await auto.run({
+      action: 'start',
+      outcome: 'learning',
+      grounding: 'none',
+      request: 'Teach closures progressively.',
+    })
+    const activeContext = await auto.context()
+    expect(activeContext).toContain('<raven_task_context>')
+    expect(activeContext).toContain(autoStarted.state.taskId)
+    expect(activeContext.match(/<raven_guidance>/g)).toHaveLength(1)
+    expect(activeContext).toContain('sources')
+    expect(activeContext).toContain('pausing')
+
+    const autoDraft = await auto.run({
+      action: 'checkpoint',
+      taskId: autoStarted.state.taskId,
+      stage: 'draft',
+      summary: 'A useful explanation.',
+      artifact: 'A closure carries the lexical environment where it was created.',
+    })
+    await auto.run({ action: 'stop', taskId: autoStarted.state.taskId })
+    const autoStoppedContext = await auto.context()
+    expect(autoStoppedContext.match(/<raven_guidance>/g)).toHaveLength(1)
+    expect(autoStoppedContext).toContain('paused and preserved')
+    expect(autoStoppedContext).not.toContain('During active work')
+    await auto.run({ action: 'resume', taskId: autoStarted.state.taskId })
+    await auto.run({
+      action: 'complete',
+      taskId: autoStarted.state.taskId,
+      artifact: autoDraft.state.latestArtifact,
+    })
+    const autoCompletedContext = await auto.context()
+    expect(autoCompletedContext.match(/<raven_guidance>/g)).toHaveLength(1)
+    expect(autoCompletedContext).toContain('current result is complete')
+    expect(autoCompletedContext).not.toContain('<raven_task_context>')
+    expect(autoCompletedContext).not.toContain('During active work')
+
+    const off = createHarness(undefined, { guidance: 'off' })
+    expect(await off.context()).not.toContain('<raven_guidance>')
+    const offStarted = await off.run({
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Draft a short release note.',
+    })
+    const offDraft = await off.run({
+      action: 'checkpoint',
+      taskId: offStarted.state.taskId,
+      stage: 'draft',
+      summary: 'A useful first draft.',
+      artifact: 'The release will roll out in two controlled steps.',
+    })
+    const offStopped = await off.run({ action: 'stop', taskId: offStarted.state.taskId })
+    const stoppedContext = await off.context()
+    expect(stoppedContext).toContain('<raven_task_context>')
+    expect(stoppedContext).not.toContain('<raven_guidance>')
+    const offResumed = await off.run({ action: 'resume', taskId: offStarted.state.taskId })
+    const offCompleted = await off.run({
+      action: 'complete',
+      taskId: offStarted.state.taskId,
+      artifact: offDraft.state.latestArtifact,
+    })
+    expect(offStopped.status).toBe('stopped')
+    expect(offResumed.state.taskId).toBe(offStarted.state.taskId)
+    expect(offCompleted.status).toBe('completed')
+  })
+
   it('has no confirmation action between normal research stages', () => {
     const raven = createHarness()
     const properties = raven.tool.parameters.properties as Record<string, unknown>
@@ -313,5 +406,7 @@ describe('Raven end-to-end acceptance', () => {
     expect(action.enum).not.toContain('confirm')
     expect(action.enum).not.toContain('approve')
     expect(String(raven.sections[0]?.text)).toContain('Do not ask for approval between')
+    expect(String(raven.sections[0]?.text)).toContain('internal orchestration')
+    expect(String(raven.sections[0]?.text)).toContain('Users speak naturally')
   })
 })

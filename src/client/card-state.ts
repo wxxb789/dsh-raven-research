@@ -39,7 +39,9 @@ export const RAVEN_GROUPS: readonly RavenFieldGroup[] = ['evidence', 'discovery'
 
 /** Which group each known field renders under. */
 export const RAVEN_FIELD_GROUPS: Readonly<Record<string, RavenFieldGroup>> = {
+  guidance: 'other',
   sourceVerification: 'evidence',
+  sourceNetworkPolicy: 'evidence',
   sourceCheckTimeoutMs: 'evidence',
   sourceDiscovery: 'discovery',
   searchMaxQueries: 'discovery',

@@ -21,7 +21,7 @@ Node `^22.19.0 || >=24.0.0` and pnpm `11.21.0` (the `packageManager` field pins 
 | `pnpm run test` | Vitest: unit, acceptance, integration. | CI (`check`) |
 | `pnpm run build` | tsdown ESM + declarations. | CI (`check`) |
 | `pnpm run check` | All four of the above. | CI, per Node version |
-| `pnpm run test:pack` | The **published tarball**: exact file allowlist, real `prepack`, install into a clean external consumer, then import/apply/execute. Needs registry access. | CI (`pack` job) |
+| `pnpm run test:pack` | The **published tarball**: exact file allowlist, real `prepack`, install into a clean external consumer, then import/apply/execute. Uses registry access by default; an offline workstation may provide `RAVEN_PACK_STORE_DIR`, `RAVEN_PACK_CACHE_DIR`, and `RAVEN_PACK_OFFLINE=1` for pre-populated pnpm data. | CI (`pack` job) |
 | `pnpm run test:dsh` | Raven composed against a **real Harness checkout** at the pinned commit: Loader, prompt registry, tool registry, Code Mode bridge, settings, bundle patch, browser slot contracts, disposal. | **Local only** |
 | `pnpm run check:release` | `check` + `test:pack` + `test:dsh`. | **Local only** |
 

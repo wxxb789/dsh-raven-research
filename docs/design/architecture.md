@@ -50,8 +50,11 @@ research and writing with its existing tools, then atomically contributes Source
 Claims, Limitations, and an Artifact Checkpoint to Raven.
 
 This preserves a deep external Module while avoiding a semantically overloaded
-`advance` operation. Tool actions are an internal protocol for the model, not new
-user-visible tasks or stages.
+`advance` operation. Tool actions, Task ids, phases, and revisions are a model-facing
+internal protocol, not a user-operated workflow language. The main-agent prompt maps
+ordinary requests onto that protocol; the engine enforces the resulting transitions,
+not the natural-language classification that selected them. Contextual user guidance is
+a separate `auto | off` policy and never changes Task semantics.
 
 ## External Interface
 
@@ -130,8 +133,10 @@ registry.
   It either completes, completes with explicit Limitations, or returns actionable
   issues while leaving the Task active.
 - `status` reconstructs compact state after resume or compaction.
-- `stop` and `resume` let the user interrupt work without losing or replacing the
-  Task.
+- `stop` marks an active Task stopped, preserving its accepted state; `resume` reopens
+  only a stopped Task after an explicit current-user request. Stop prevents later Task
+  mutation after it is processed, but it does not cancel Harness execution, providers,
+  or workers already in flight. Completed Tasks are terminal.
 
 There is deliberately no public Source CRUD, Claim CRUD, worker management,
 verification job, workflow stage controller, or approval action.
@@ -148,6 +153,12 @@ One compact JSON state contains:
 - normalized Sources and Claims;
 - Source/tool/coverage Limitations;
 - the most recent verification receipt and exact Artifact SHA-256.
+
+A mutation is admitted only when the whole UTF-8 JSON snapshot remains at or below
+1,000,000 bytes; non-final mutations leave 64,000 bytes of that ceiling reserved so
+Completion cannot deadlock on the cap. This aggregate budget closes the multiplicative
+gap left by independent per-field caps. Results that do not advance Task revision carry only a compact metadata
+pointer rather than persisting the same snapshot again.
 
 Task phases are `active`, `stopped`, `completed`, and `completed-with-limits`.
 Normal research stages do not appear as phases.
@@ -220,7 +231,8 @@ all have executable size ceilings shared by action validation and replay decodin
 
 ## Progressive execution
 
-The prompt requires this observable cadence for substantial work:
+The prompt instructs the main agent toward this cadence for substantial work; the
+engine validates each submitted transition but does not schedule when the agent calls it:
 
 ```text
 start Raven Task
@@ -233,9 +245,10 @@ start Raven Task
 → complete only those exact latest Checkpoint bytes
 ```
 
-A Checkpoint result renders the useful Artifact immediately while the Task remains
-active. The user can react to it while the Harness agent proceeds through later
-model/tool steps. The system never treats a progress slogan as a Checkpoint.
+A Checkpoint result makes the useful Artifact available while the Task remains active.
+Display timing and whether the Harness agent proceeds through later model/tool steps are
+owned by the Harness loop, not by Raven's engine. The system never treats a progress
+slogan as a Checkpoint.
 
 ## Completion and graceful degradation
 
@@ -243,7 +256,11 @@ model/tool steps. The system never treats a progress slogan as a Checkpoint.
 and match recorded excerpts. `complete` also performs deterministic checks against
 the exact latest Checkpoint fingerprint.
 
-Completion is rejected, with no state loss, when:
+Completion is rejected without losing an accepted Artifact or Checkpoint when:
+
+A failed re-verification may still advance diagnostic state — refreshed Source checks,
+deferred Claims, Limitations, and the receipt — while the Task remains active. Rejection
+is therefore not necessarily a byte-for-byte no-op.
 
 - the final Artifact has unknown citation IDs or unknown raw URLs;
 - no useful prior Checkpoint exists;
@@ -262,7 +279,11 @@ support, affected Claims are deferred, and coverage Limits are explicit. A broke
 unverifiable Source cannot appear in the completed Artifact as accepted support.
 Independent verified Sources, Claims, and Artifact sections survive. When a Source
 later fails verification, Raven automatically defers every supported/qualified Claim
-whose usable support set becomes empty and records a Source Limitation.
+whose usable support set becomes empty and records a Source Limitation. This is a
+two-step recovery: the failed call returns `needs-revision` while the Task remains active;
+the agent removes or narrows unsupported prose in a new Checkpoint, and only a later
+Completion may become `completed-with-limits`. Graceful degradation applies when useful
+verified work remains, not to missing required capabilities or zero valid grounded work.
 
 Every substantive final edit must first become a Checkpoint; Completion requires the
 candidate SHA-256 to equal that exact latest post-steer Checkpoint fingerprint.
@@ -375,12 +396,13 @@ recursively validates all root fields, nested records, allowed key sets, size ce
 unique identities, counters, URLs, hashes, evidence links, and phase invariants;
 malformed, unknown-version, or unknown-field snapshots are skipped so an older valid
 snapshot can be restored. Metadata v2 records the updated Task plus the Session's
-`currentTaskId`; replay scans every Raven result and rebuilds a `session → taskId →
-state` registry instead of retaining only the latest Task. At most one Task may be
-active in a Session, status inspection of history does not change the current Task,
-resuming an older Task requires the current one to be stopped, and new Task ordinals
-use the Session-wide maximum. An in-memory registry covers calls before results are
-durably appended; replay metadata remains the restart source of truth.
+`currentTaskId`; replay scans every Raven result and rebuilds an owning-book registry —
+Agent identity by default, detected Team identity when available — instead of retaining
+only the latest Task. At most one Task may be active in one owning book, status inspection
+of history does not change the current Task, resuming an older Task requires the current
+one to be stopped, and new Task ordinals use that book's maximum. An in-memory registry
+covers calls before results are durably appended; the latest successfully persisted
+snapshot is the restart source of truth.
 
 A Code Mode sub-call gets no result card, so its record cannot ride `tool/result.meta`.
 It rides the durable copy of the sub-dispatch instead, through the official
@@ -414,8 +436,12 @@ one additional constraint: the Harness Team packages are `private: true`, exclud
 the release payload, and carry no stability promise, so Raven may not import their
 types or declare a peer dependency. It mirrors structurally the one method it reads,
 `tryMembership(agent)`, contains every call, and keys the Task book by the returned
-Team id so a Team shares one Task. Every failure mode — no capability, no membership, a
-throwing probe — degrades to the single-agent book.
+Team id so detected members share one active Task. After process restart, durable records
+fold into that Team book as each member is observed; before then the rebuilt view may
+contain only the calling member's history. Every probe failure mode — no capability, no
+membership, or a throw — degrades to an independent single-Agent book. Raven therefore
+documents Team ownership as conditional, not as a durability guarantee when membership
+cannot be detected.
 
 Long-running continuation, subagents, and workflows remain ordinary Harness tools
 available to the main agent. The prompt may recommend them proportionately, but the
@@ -449,9 +475,13 @@ regeneration, tier promotion, stub materialization, log rotation — is deferred
 ## Cordis lifetime and composition
 
 The plugin declares `inject = ["tools", "systemPrompt"]`. It registers one scoped
-prompt section, one scoped tool, and one scoped `agent/pre-step` listener that injects
-only a compact active-Task summary after resume. All registrations are owned by the
-Cordis fiber and disappear on unload.
+prompt section, one scoped tool, and one scoped `agent/pre-step` listener. The listener
+always restores compact continuity context for an active or stopped Task. Separately,
+`guidance: auto` adds one policy block telling the main agent to offer at most one brief,
+context-relevant capability hint and avoid repetition, tutorials, protocol exposure, and
+approval gates; `guidance: off` omits only that block. The setting is read per step, so a
+committed host override takes effect without changing Task state. All registrations are
+owned by the Cordis fiber and disappear on unload.
 
 The package publishes no service. A row in a user-authored agent preset can therefore
 sit loose without an isolate realm. Shipped presets and the Harness host composition
@@ -545,8 +575,8 @@ card.
 Raven composes in two halves, split by the `role` setting (`host` | `agent` | `both`,
 defaulting to `both` so a row naming no role keeps today's behaviour).
 
-The package declares NO `dsh.bundle.patch`, and that absence is the isolation
-guarantee. Declaring it is exactly what makes `dsh plugin add` append a package to a
+The package declares no `dsh.bundle`, and that absence is the shipped default's
+isolation guarantee. Declaring it is exactly what makes `dsh plugin add` append a package to a
 profile's bundle list, and the row that follows would register the `raven-research`
 settings namespace — which is served process-wide, on a settings page that is global,
 so a user sitting in any other mode would see a Raven card. The same row decides the
@@ -617,11 +647,11 @@ digest, and is re-synced with `--force`.
 
 The waterfall does not hold the tool on the host plane: event admission extends UP the
 scope chain and `tools/code-dispatch-log` is scoped to `dispatch.agent`, so an
-agent-scoped listener still receives its own agent's Code Mode sub-dispatches. The cost
-is that each agent scope gets its own plugin instance and therefore its own IN-MEMORY
-Task book, so an Agent Team falls back to what each member's durable session log
-carries. `examples/agent-row.cordis.yml` remains the hand-mounted preset-scoped
-alternative. With the roles split, mounting both planes no longer registers
+agent-scoped listener still receives its own agent's Code Mode sub-dispatches. The preset
+mounts once under a standing scope; every joined session shares that plugin instance, and
+Raven keys its Task books by Agent identity or successfully detected Team identity. `examples/agent-row.cordis.yml`
+remains the hand-mounted preset-scoped alternative. With the roles split, mounting both
+planes no longer registers
 `raven_task` twice. See `docs/adr/0006-raven-as-a-mode.md`.
 
 ## Agreed test Seams

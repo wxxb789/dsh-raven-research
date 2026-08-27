@@ -12,14 +12,27 @@ const DEFAULT_PORTS: Record<string, string> = {
   'https:': '443',
 }
 
-function identity(value: URL): string {
-  const hostname = value.hostname.toLowerCase().replace(/\.$/, '')
-  const scheme = value.protocol.toLowerCase()
-  const port = value.port === '' ? DEFAULT_PORTS[scheme] ?? 'default' : value.port
-  return `${hostname}:${port}`
+interface Identity {
+  hostname: string
+  scheme: string
+  port: string
 }
 
-/** Parse one canonical public HTTP(S) Source URL and reject embedded credentials. */
+function identity(value: URL): Identity {
+  const scheme = value.protocol.toLowerCase()
+  return {
+    hostname: value.hostname.toLowerCase().replace(/\.$/, ''),
+    scheme,
+    port: value.port === '' ? DEFAULT_PORTS[scheme] ?? 'default' : value.port,
+  }
+}
+
+/** True when the identity sits on the port its own scheme implies. */
+function isDefaultPort(value: Identity): boolean {
+  return value.port === DEFAULT_PORTS[value.scheme]
+}
+
+/** Parse one canonical HTTP(S) Source URL and reject embedded credentials. */
 export function canonicalSourceUrl(value: string): string {
   let parsed: URL
   try {
@@ -64,7 +77,22 @@ export function redactedLeadUrl(value: string): string | undefined {
   return parsed.href
 }
 
-/** Same host identity, allowing an ordinary HTTP→HTTPS upgrade but not host/port drift. */
+/**
+ * Same host identity, allowing an ordinary HTTP→HTTPS upgrade but not host/port
+ * drift.
+ *
+ * The upgrade is accepted in ONE direction and only between the two schemes'
+ * own default ports: `http://host` → `https://host` is the redirect every
+ * origin emits, while `https://host` → `http://host` is a downgrade whose
+ * evidence is no longer the evidence that was registered, so it is refused. A
+ * non-default port never participates, which keeps `:8443` distinct from `:443`
+ * and leaves a genuine cross-origin redirect refused.
+ */
 export function sameSourceIdentity(left: string, right: string): boolean {
-  return identity(new URL(canonicalSourceUrl(left))) === identity(new URL(canonicalSourceUrl(right)))
+  const from = identity(new URL(canonicalSourceUrl(left)))
+  const to = identity(new URL(canonicalSourceUrl(right)))
+  if (from.hostname !== to.hostname) return false
+  if (from.scheme === to.scheme) return from.port === to.port
+  if (from.scheme !== 'http:' || to.scheme !== 'https:') return false
+  return isDefaultPort(from) && isDefaultPort(to)
 }

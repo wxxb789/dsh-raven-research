@@ -37,6 +37,39 @@ describe('splitSentences', () => {
     ])
   })
 
+  it('attaches markers of every accepted shape', () => {
+    expect(splitSentences('A holds.[12] B holds.[^note.a-1] C holds.')).toEqual([
+      'A holds.[12]',
+      'B holds.[^note.a-1]',
+      'C holds.',
+    ])
+  })
+
+  it('does not attach a bracket that is not a marker', () => {
+    expect(splitSentences('A holds.[ 3] B holds.')).toEqual(['A holds.[ 3] B holds.'])
+  })
+
+  it('is idempotent: re-splitting each sentence yields that sentence unchanged', () => {
+    const input = 'A holds.[^1] B holds.[2] C holds!? D holds.'
+    const once = splitSentences(input)
+    expect(once.flatMap(sentence => splitSentences(sentence))).toEqual(once)
+  })
+
+  it('does not carry sticky regex state between calls', () => {
+    const first = splitSentences('A holds.[^1] B holds.')
+    const second = splitSentences('A holds.[^1] B holds.')
+    expect(second).toEqual(first)
+  })
+
+  it('splits a paragraph with many footnote markers correctly at scale', () => {
+    const count = 16000
+    const text = Array.from({ length: count }, (_, index) => `Sentence ${index} holds.[^${index}]`).join(' ')
+    const sentences = splitSentences(text)
+    expect(sentences).toHaveLength(count)
+    expect(sentences[0]).toBe('Sentence 0 holds.[^0]')
+    expect(sentences[count - 1]).toBe(`Sentence ${count - 1} holds.[^${count - 1}]`)
+  })
+
   it('never splits inside an inline code span or a link destination', () => {
     expect(splitSentences('Call `run. now` first. See [Fig. 2](https://x.test/a.b) next.')).toEqual([
       'Call `run. now` first.',
@@ -135,6 +168,11 @@ describe('layoutProse', () => {
     expect(layoutProse(once, markdown)).toBe(once)
     const plainOnce = layoutProse(source, plain)
     expect(layoutProse(plainOnce, plain)).toBe(plainOnce)
+  })
+
+  it('bounds abbreviation lookbehind on a long unbroken dot-dense token', { timeout: 2_000 }, () => {
+    const token = `https://example.test/${'a.'.repeat(20_000)}`
+    expect(splitSentences(`${token} End.`)).toEqual([token, 'End.'])
   })
 
   it('treats every block as prose in plain format', () => {

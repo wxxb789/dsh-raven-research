@@ -295,7 +295,15 @@ export function includePath(file: string): string {
  * @returns the row.
  */
 export function ravenRow(): Record<string, unknown> {
-  return { id: ROW_ID, name: ROW_NAME, config: { role: 'agent' } }
+  return {
+    id: ROW_ID,
+    name: ROW_NAME,
+    config: {
+      role: 'agent',
+      sourceNetworkPolicy: 'public-only',
+      sourceCheckTimeoutMs: 20_000,
+    },
+  }
 }
 
 /**

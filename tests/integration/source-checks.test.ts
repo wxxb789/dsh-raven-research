@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { apply } from '../../src/plugin.js'
-import type { RavenTaskState } from '../../src/domain.js'
+import type { RavenConfig, RavenTaskState } from '../../src/index.js'
 
 interface TestTool extends Record<string, unknown> {
   execute(args: unknown, exec: unknown): Promise<{
@@ -32,7 +32,12 @@ function webService(fetcher: Fetcher) {
   }
 }
 
-function mount(options: { fetch?: Fetcher; web?: unknown; warn?: (message: string) => void }) {
+function mount(options: {
+  fetch?: Fetcher
+  web?: unknown
+  warn?: (message: string) => void
+  config?: RavenConfig
+}) {
   let tool: TestTool | undefined
   const service = options.web !== undefined
     ? options.web
@@ -49,7 +54,7 @@ function mount(options: { fetch?: Fetcher; web?: unknown; warn?: (message: strin
     get(name: string) { return name === 'web' ? service : undefined },
     on() { return () => undefined },
     logger: () => ({ warn: options.warn ?? (() => undefined) }),
-  } as never)
+  } as never, options.config ?? {})
   if (tool === undefined) throw new Error('Raven tool did not register')
   return tool
 }
@@ -363,6 +368,80 @@ describe('Excerpt normalization', () => {
   })
 })
 
+describe('Source destination network policy', () => {
+  it('keeps direct raw config omission unrestricted for backward compatibility', async () => {
+    let fetches = 0
+    const tool = mount({
+      fetch: async request => {
+        fetches += 1
+        return {
+          url: request.url,
+          statusCode: 200,
+          body: { kind: 'text' as const, content: 'the passage that is really there, stated plainly' },
+          truncated: false,
+        }
+      },
+    })
+    const { checkpoint } = await checkOne(
+      tool,
+      'omitted-network-policy-session',
+      'the passage that is really there',
+      'http://127.0.0.1/private-record',
+    )
+    expect(fetches).toBe(1)
+    expect(checkpoint.state.sources[0]?.check.status).toBe('reachable')
+  })
+
+  it('refuses a private destination before calling the fetch provider', async () => {
+    let fetches = 0
+    const tool = mount({
+      config: { sourceNetworkPolicy: 'public-only' },
+      fetch: async request => {
+        fetches += 1
+        return {
+          url: request.url,
+          statusCode: 200,
+          body: { kind: 'text' as const, content: 'the passage that is really there, stated plainly' },
+          truncated: false,
+        }
+      },
+    })
+    const { checkpoint } = await checkOne(
+      tool,
+      'private-destination-session',
+      'the passage that is really there',
+      'http://169.254.169.254/latest/meta-data',
+    )
+    expect(fetches).toBe(0)
+    expect(checkStatus(checkpoint)).toBe('unavailable')
+    expect(checkpoint.issues.join(' ')).toContain('non-public network address')
+  })
+
+  it('keeps an explicit unrestricted escape hatch for a network-confined provider', async () => {
+    let fetches = 0
+    const tool = mount({
+      config: { sourceNetworkPolicy: 'unrestricted' },
+      fetch: async request => {
+        fetches += 1
+        return {
+          url: request.url,
+          statusCode: 200,
+          body: { kind: 'text' as const, content: 'the passage that is really there, stated plainly' },
+          truncated: false,
+        }
+      },
+    })
+    const { checkpoint } = await checkOne(
+      tool,
+      'trusted-private-session',
+      'the passage that is really there',
+      'http://127.0.0.1/private-record',
+    )
+    expect(fetches).toBe(1)
+    expect(checkpoint.state.sources[0]?.check.status).toBe('reachable')
+  })
+})
+
 describe('Source identity across a redirect', () => {
   it('accepts a redirect that only spells the default port out', async () => {
     const tool = mount({
@@ -434,6 +513,47 @@ describe('Deployment preconditions', () => {
       request: 'Research with an explicitly narrowed floor.',
     }, { agent, signal })
     expect(narrowed.state.phase).toBe('active')
+  })
+
+  it('refuses ambiguous or invalid configured fetch-provider selections before starting research', async () => {
+    const provider = (usable: boolean) => ({ id: 'provider', available: () => usable })
+    const cases = [
+      {
+        id: 'ambiguous',
+        web: {
+          fetch: async () => { throw new Error('must not fetch') },
+          fetchProviders: new Map([['one', provider(true)], ['two', provider(true)]]),
+        },
+        message: /multiple usable providers/,
+      },
+      {
+        id: 'configured-missing',
+        web: {
+          fetch: async () => { throw new Error('must not fetch') },
+          fetchProviderId: 'missing',
+          fetchProviders: new Map([['one', provider(true)]]),
+        },
+        message: /provider id that is not registered/,
+      },
+      {
+        id: 'configured-unavailable',
+        web: {
+          fetch: async () => { throw new Error('must not fetch') },
+          fetchProviderId: 'one',
+          fetchProviders: new Map([['one', provider(false)]]),
+        },
+        message: /provider that reports unavailable/,
+      },
+    ]
+    for (const item of cases) {
+      const tool = mount({ web: item.web })
+      await expect(tool.execute({
+        action: 'start',
+        outcome: 'research',
+        request: 'Refuse a provider selection that the Harness runtime cannot execute.',
+      }, { agent: { id: `provider-${item.id}`, session: { events: [] } }, signal }))
+        .rejects.toThrow(item.message)
+    }
   })
 
   it('warns but does not refuse where the capability is absent entirely and the Outcome is not grounded', async () => {

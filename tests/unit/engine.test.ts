@@ -1122,6 +1122,69 @@ describe('Raven task engine', () => {
     expect(completed.state.checkpoints.length).toBeLessThanOrEqual(RAVEN_LIMITS.checkpoints)
   })
 
+  it('refuses a Task snapshot whose aggregate serialized size exceeds the durable budget', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Keep the durable Task state bounded as a whole.',
+    }, { sessionId: 'session-state-bytes', signal })
+    const sources = Array.from({ length: 60 }, (_value, index) => ({
+      sourceId: `BIG${index}`,
+      url: `https://example.test/big-${index}`,
+      title: `Large Source ${index}`,
+      locator: 'Body',
+      excerpt: 'x'.repeat(RAVEN_LIMITS.sourceExcerptChars),
+      role: 'secondary',
+    }))
+
+    await expect(engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'analyze',
+      summary: 'A contribution whose individual fields are legal but aggregate state is not.',
+      artifact: 'A bounded Artifact.',
+      sources,
+    }, { sessionId: 'session-state-bytes', signal })).rejects.toThrow(
+      `durable snapshot budget of ${RAVEN_LIMITS.stateBytes - RAVEN_LIMITS.stateCompletionReserveBytes}`,
+    )
+    expect(started.state.sources).toEqual([])
+    expect(started.state.revision).toBe(1)
+  })
+
+  it('reserves aggregate state headroom so a large accepted Task can still complete', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'general-writing',
+      grounding: 'none',
+      request: 'Keep enough snapshot headroom for Completion.',
+    }, { sessionId: 'session-state-reserve', signal })
+    const checkpoint = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'draft',
+      summary: 'A large but admissible Task.',
+      artifact: 'A final paragraph.',
+      sources: Array.from({ length: 43 }, (_value, index) => ({
+        sourceId: `RESERVE${index}`,
+        url: `https://example.test/reserve-${index}`,
+        title: `Reserve Source ${index}`,
+        locator: 'Body',
+        excerpt: 'x'.repeat(RAVEN_LIMITS.sourceExcerptChars),
+        role: 'secondary',
+      })),
+    }, { sessionId: 'session-state-reserve', signal })
+
+    const completed = await engine.dispatch(checkpoint.state, {
+      action: 'complete',
+      taskId: checkpoint.state.taskId,
+      artifact: checkpoint.state.latestArtifact,
+    }, { sessionId: 'session-state-reserve', signal })
+    expect(completed.status).toMatch(/^completed/)
+  })
+
   it('accepts Sources and Claims at their caps and refuses only the excess', async () => {
     const engine = createRavenEngine({ now, sourceVerifier })
     const started = await engine.dispatch(null, {

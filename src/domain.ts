@@ -29,6 +29,10 @@ export const RAVEN_LIMITS = {
   draftInstructionChars: 8_000,
   draftRounds: 32,
   draftVariantChars: 40_000,
+  /** Maximum UTF-8 JSON size of one durable Task snapshot. */
+  stateBytes: 1_000_000,
+  /** Headroom non-final mutations leave so Completion cannot deadlock on the state cap. */
+  stateCompletionReserveBytes: 64_000,
 } as const
 
 export const OUTCOMES = [

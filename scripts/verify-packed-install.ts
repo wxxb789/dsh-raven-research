@@ -7,11 +7,41 @@ import { pathToFileURL } from 'node:url'
 import { runProcess } from './process.js'
 
 const root = process.cwd()
+// Invoke the already-running pnpm CLI directly. The PATH shim is a package-manager
+// manager: under this gate's intentionally empty HOME it tries to download @pnpm/exe
+// before packing, even when every manage-package-manager flag is false. npm_execpath
+// points at the CLI that launched this script, so using Node on that file preserves the
+// exact tool version without a registry-dependent bootstrap.
+const inheritedPnpm = process.env.npm_execpath
+const pnpmCommand = inheritedPnpm?.match(/\.[cm]?js$/) === null || inheritedPnpm === undefined
+  ? 'pnpm'
+  : process.execPath
+const pnpmPrefix = [
+  ...(pnpmCommand === process.execPath ? [inheritedPnpm as string] : []),
+  // pnpm 11 defaults a packageManager version mismatch to "download"; this is
+  // the documented bypass for a gate that must exercise the current CLI offline.
+  '--pm-on-fail=ignore',
+]
 const temporary = await mkdtemp(join(tmpdir(), 'dsh-raven-packed-consumer-'))
 const staging = join(temporary, 'staging')
 const packed = join(temporary, 'packed')
 const consumer = join(temporary, 'consumer')
-const isolatedStore = join(temporary, 'pnpm-store')
+const suppliedStore = process.env.RAVEN_PACK_STORE_DIR?.trim()
+if (suppliedStore !== undefined && suppliedStore.length > 0 && !isAbsolute(suppliedStore)) {
+  throw new Error('RAVEN_PACK_STORE_DIR must be an absolute path')
+}
+// CI uses a fresh store and the registry. A mirrored/offline workstation may point at
+// a pre-populated content-addressable store without linking the consumer to this repo.
+const isolatedStore = suppliedStore === undefined || suppliedStore.length === 0
+  ? join(temporary, 'pnpm-store')
+  : suppliedStore
+const suppliedCache = process.env.RAVEN_PACK_CACHE_DIR?.trim()
+if (suppliedCache !== undefined && suppliedCache.length > 0 && !isAbsolute(suppliedCache)) {
+  throw new Error('RAVEN_PACK_CACHE_DIR must be an absolute path')
+}
+const pnpmCache = suppliedCache === undefined || suppliedCache.length === 0
+  ? join(temporary, 'npm-cache')
+  : suppliedCache
 const isolatedHome = join(temporary, 'home')
 const userConfig = join(isolatedHome, '.npmrc')
 const expectedFiles = [
@@ -47,9 +77,14 @@ function isolatedPnpmEnv(): NodeJS.ProcessEnv {
     USERPROFILE: isolatedHome,
     npm_config_userconfig: userConfig,
     NPM_CONFIG_USERCONFIG: userConfig,
-    npm_config_cache: join(temporary, 'npm-cache'),
+    npm_config_cache: pnpmCache,
+    npm_config_cache_dir: pnpmCache,
+    pnpm_config_cache_dir: pnpmCache,
     npm_config_store_dir: isolatedStore,
     pnpm_config_store_dir: isolatedStore,
+    ...(process.env.RAVEN_PACK_OFFLINE === '1'
+      ? { npm_config_offline: 'true', NPM_CONFIG_OFFLINE: 'true' }
+      : {}),
     // Never let the isolated run self-provision a package manager. `packageManager`
     // pins pnpm, the isolated HOME has no previously downloaded copy, and pnpm
     // therefore fetches `pnpm` from whatever registry the injected user config
@@ -78,19 +113,12 @@ function isolatedPnpmEnv(): NodeJS.ProcessEnv {
 /*
  * Residual barrier, recorded because it costs an hour to rediscover.
  *
- * With an isolated HOME pnpm may still PROVISION the package manager named by
- * `packageManager` and fetch `@pnpm/exe`. The repository .npmrc, the
- * `--config.manage-package-manager-versions=false` flag passed to the pack
- * command, and the env vars above all say not to, and pnpm 11.22 does it anyway.
- * On the public registry that fetch succeeds and nobody notices; on a mirror
- * that does not serve `@pnpm/exe` it answers 401 and this gate dies before
- * packing anything — with an error that reads as authentication rather than as
- * package-manager provisioning.
- *
- * That is an environment limitation and not a defect in the tarball: CI resolves
- * from the public registry and runs this gate on every push. To check the packed
- * contents from a mirrored network, run `pnpm pack` in the repository itself and
- * compare its printed file list against {@link expectedFiles}.
+ * An isolated HOME makes pnpm's packageManager mismatch handler try to download
+ * `@pnpm/exe` before packing. `manage-package-manager-versions=false` is not enough
+ * in pnpm 11.22; the CLI's documented `--pm-on-fail=ignore` switch is. Every child
+ * invocation uses that switch and the inherited `npm_execpath`, so the gate tests
+ * the exact already-running pnpm without a registry-dependent bootstrap. Registry
+ * access remains intentional only for installing the packed consumer's peers.
  */
 
 function escapeRegExp(value: string): string {
@@ -126,6 +154,23 @@ const peerSpecifiers = Object.keys(rootManifest.peerDependencies ?? {}).map((pee
   if (pinned === undefined) throw new Error(`peer "${peer}" has no pinned devDependency to install`)
   return `${peer}@${pinned}`
 })
+// These are peers of the Harness packages rather than Raven. Pinning them explicitly
+// keeps ^0.1.0-rc.6 from floating to a later prerelease in a fresh consumer. The
+// direct dsh-agent pin is the one source of truth for the Harness package RC.
+const harnessRuntimeVersion = rootManifest.devDependencies?.['@deepseek-ai/dsh-agent']
+if (harnessRuntimeVersion === undefined) throw new Error('dsh-agent has no pinned devDependency')
+for (const peer of [
+  'dsh-attachment',
+  'dsh-brand',
+  'dsh-code-runtime',
+  'dsh-invariants',
+  'dsh-scope',
+  'dsh-timeout',
+  'dsh-typert-protocol',
+  'dsh-user-approval',
+]) {
+  peerSpecifiers.push(`@deepseek-ai/${peer}@${harnessRuntimeVersion}`)
+}
 try {
   for (const file of [
     '.npmignore',
@@ -148,7 +193,7 @@ try {
   await cp(join(root, 'scripts'), join(staging, 'scripts'), { recursive: true })
   await symlink(join(root, 'node_modules'), join(staging, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir')
 
-  const packedResult = await runProcess('pnpm', [
+  const packedResult = await runProcess(pnpmCommand, [...pnpmPrefix,
     '--config.manage-package-manager-versions=false',
     'pack',
     '--pack-destination',
@@ -222,7 +267,7 @@ try {
   }, null, 2))
   // The tarball itself installs offline with nothing auto-installed: Raven ships
   // no runtime dependency of its own.
-  await runProcess('pnpm', [
+  await runProcess(pnpmCommand, [...pnpmPrefix,
     'add',
     './raven.tgz',
     '--offline',
@@ -240,11 +285,13 @@ try {
   // (Cordis and its invariants), which is what a Harness deployment already has;
   // this install re-links the tree, so it has to run after the tarball, not before.
   if (peerSpecifiers.length > 0) {
-    await runProcess('pnpm', [
+    await runProcess(pnpmCommand, [...pnpmPrefix,
       'add',
       ...peerSpecifiers,
+      ...(process.env.RAVEN_PACK_OFFLINE === '1' ? ['--offline'] : []),
       '--ignore-scripts',
       '--config.auto-install-peers=true',
+      '--config.resolution-mode=lowest-direct',
       '--store-dir',
       isolatedStore,
     ], {
@@ -366,7 +413,7 @@ const checkpoint = await tools[0].execute(
 )
 assert.equal(checkpoint.state.latestArtifact, 'A concept holds.\\nA second sentence explains it.')
 assert.equal(checkpoint.state.checkpoints[0].proseLayout, 'sentence-per-line')
-console.log('packed install: isolated staged prepack, exact files, bundle manifest and patch, isolated install, import, apply, settings defaults, discovery and drafting degradation, prose layout, and tool execution passed')
+console.log('packed install: isolated staged prepack, exact files, bundle manifest and patch, clean external install, import, apply, settings defaults, discovery and drafting degradation, prose layout, and tool execution passed')
 `)
   await runProcess(process.execPath, ['verify.mjs'], {
     cwd: consumer,

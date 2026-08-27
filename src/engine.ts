@@ -1,5 +1,7 @@
+import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 
+import { settleWithAbort } from './abort.js'
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { layoutProse, proseLayoutReport, type ProseLayoutOptions, type ProseLayoutReport } from './prose.js'
 import { formatDraftRoute } from './route.js'
@@ -747,26 +749,6 @@ function relevantSources(
   return sources.filter(source => relevantIds.has(source.sourceId))
 }
 
-function settleWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted()
-  return new Promise<T>((resolve, reject) => {
-    let settled = false
-    const finish = (callback: () => void) => {
-      if (settled) return
-      settled = true
-      signal.removeEventListener('abort', aborted)
-      callback()
-    }
-    const aborted = () => finish(() => reject(signal.reason))
-    signal.addEventListener('abort', aborted, { once: true })
-    if (signal.aborted) aborted()
-    void operation.then(
-      value => finish(() => resolve(value)),
-      error => finish(() => reject(error)),
-    )
-  })
-}
-
 /**
  * One-line form of an arbitrary failure.
  *
@@ -1181,9 +1163,21 @@ function draftSystemPrompt(layout: ProseLayoutOptions): string {
   ].join('\n')
 }
 
+function assertStateBudget(state: RavenTaskState, maximum: number): void {
+  const bytes = Buffer.byteLength(JSON.stringify(state), 'utf8')
+  if (bytes > maximum) {
+    throw new RavenError(
+      'limit-exceeded',
+      `Raven Task state would occupy ${bytes} bytes, above this mutation's durable snapshot budget of`
+      + ` ${maximum} (${RAVEN_LIMITS.stateBytes} total with`
+      + ` ${RAVEN_LIMITS.stateCompletionReserveBytes} reserved for Completion).`
+      + ' Shorten or split Sources, Claims, excerpts, corrections, or Limitations',
+    )
+  }
+}
+
 export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
-  return {
-    async dispatch(previous, input, execution) {
+  const dispatchUnchecked: RavenEngine['dispatch'] = async (previous, input, execution) => {
       execution.signal.throwIfAborted()
       const args = record(input, 'Raven action')
       const action = requiredText(args.action, 'action')
@@ -1790,6 +1784,21 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
       }
 
       throw new RavenTypeError('unsupported-action', `Unsupported Raven action: ${action}`)
+  }
+  return {
+    async dispatch(previous, input, execution) {
+      const result = await dispatchUnchecked(previous, input, execution)
+      const changed = previous === null
+        || previous.taskId !== result.state.taskId
+        || previous.revision !== result.state.revision
+      if (changed) {
+        const action = (input as Record<string, unknown>).action
+        const maximum = action === 'complete'
+          ? RAVEN_LIMITS.stateBytes
+          : RAVEN_LIMITS.stateBytes - RAVEN_LIMITS.stateCompletionReserveBytes
+        assertStateBudget(result.state, maximum)
+      }
+      return result
     },
   }
 }

@@ -23,6 +23,8 @@ interface MountOptions {
   /** Present when a settings service attaches; returns the resolved section. */
   resolved?: () => Record<string, unknown>
   fetch?: (request: { url: string }, signal?: AbortSignal) => Promise<unknown>
+  /** A host-registered settings provider visible to a split agent-role mount. */
+  settings?: unknown
 }
 
 function mount(options: MountOptions) {
@@ -45,7 +47,10 @@ function mount(options: MountOptions) {
         settings: {
           register(ns: unknown, schema: unknown, registerOptions: { base?: unknown }) {
             registrations.push({ ns, schema, options: registerOptions })
-            return { get: () => options.resolved?.(), watch: () => undefined }
+            return {
+              get: () => ({ sourceNetworkPolicy: 'unrestricted', ...options.resolved?.() }),
+              watch: () => undefined,
+            }
           },
         },
         effect: () => undefined,
@@ -53,11 +58,12 @@ function mount(options: MountOptions) {
       return () => undefined
     },
     get(name: string) {
+      if (name === 'settings') return options.settings
       if (name !== 'web' || options.fetch === undefined) return undefined
       return { fetch: options.fetch }
     },
     on() { return () => undefined },
-  } as never, options.entry as never)
+  } as never, { sourceNetworkPolicy: 'unrestricted', ...options.entry } as never)
   if (tool === undefined) throw new Error('Raven tool did not register')
   return { tool, injected, registrations }
 }
@@ -118,7 +124,10 @@ describe('Raven settings surface', () => {
     expect(registrations).toHaveLength(1)
     expect(registrations[0]?.ns).toBe(RAVEN_SETTINGS_NAMESPACE)
     expect(registrations[0]?.schema).toBe(Config)
-    expect(registrations[0]?.options.base).toEqual({ sourceVerification: 'structural-only' })
+    expect(registrations[0]?.options.base).toEqual({
+      sourceNetworkPolicy: 'unrestricted',
+      sourceVerification: 'structural-only',
+    })
   })
 
   it('keeps working on the composition entry when no settings service is composed', async () => {
@@ -182,6 +191,29 @@ describe('Raven settings surface', () => {
 
     expect(fetches).toBe(1)
     expect(later.state.sources[0]?.check.status).toBe('unavailable')
+  })
+
+  it('applies the host namespace user layer to a split agent-role mount', async () => {
+    let fetches = 0
+    const settings = {
+      describe: () => [{
+        ns: RAVEN_SETTINGS_NAMESPACE,
+        user: { sourceVerification: 'structural-only' },
+      }],
+    }
+    const { tool, registrations } = mount({
+      entry: { role: 'agent', sourceVerification: 'remote' },
+      settings,
+      fetch: async (request) => {
+        fetches += 1
+        return reachable(request)
+      },
+    })
+
+    expect(registrations).toHaveLength(0)
+    const { checkpoint } = await checkpointOne(tool, 'split-settings-session')
+    expect(fetches).toBe(0)
+    expect(checkpoint.issues.join(' ')).toContain('structural-only')
   })
 
   it('turns a stalled Source check into a bounded failure at the configured deadline', async () => {

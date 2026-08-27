@@ -68,8 +68,10 @@ const shell: RavenCardShell = { open: true, saving: false, failed: false }
 const ready: RavenScopeSnapshot = {
   status: 'ready',
   value: {
+    guidance: 'auto',
     sourceVerification: 'remote',
-    sourceCheckTimeoutMs: 0,
+    sourceNetworkPolicy: 'public-only',
+    sourceCheckTimeoutMs: 20_000,
     sourceDiscovery: 'seam',
     searchMaxQueries: 4,
     searchMaxResults: 8,
@@ -116,6 +118,7 @@ describe('Raven settings card fields, read from the registered schema', () => {
   })
 
   it('derives the accepted choices from the schema union', () => {
+    expect(specOf('guidance').choices).toEqual(['auto', 'off'])
     expect(specOf('proseLayout').choices).toEqual(['sentence-per-line', 'as-written'])
     expect(specOf('sourceDiscovery').choices).toEqual(['seam', 'disabled'])
     expect(specOf('searchTimeoutMs').choices).toEqual([])
