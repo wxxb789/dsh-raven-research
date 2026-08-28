@@ -160,6 +160,83 @@ describe('Raven Cordis plugin', () => {
     expect(restored.state.latestArtifact).toBe('A useful explanation that survives replay.')
   })
 
+  it('migrates a real schema-v1 web Task from session metadata and continues it', async () => {
+    interface TestTool extends Record<string, unknown> {
+      execute(args: unknown, exec: unknown): Promise<{ state: RavenPlugin.RavenTaskState; status: string }>
+    }
+    let tool: TestTool | undefined
+    const fetch = async ({ url }: { url: string }) => ({
+      url,
+      statusCode: 200,
+      body: { kind: 'text' as const, content: 'legacy exact excerpt' },
+      truncated: false,
+    })
+    RavenPlugin.apply({
+      tools: { register(definition: TestTool) { tool = definition; return vi.fn() } },
+      systemPrompt: { section() { return vi.fn() } },
+      inject() { return vi.fn() },
+      get(name: string) { return name === 'web' ? { fetch } : undefined },
+      on() { return vi.fn() },
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
+    if (tool === undefined) throw new Error('Raven tool did not register')
+
+    const taskId = 'rvn-123456789abc-1'
+    const timestamp = '2026-08-16T16:00:00.000Z'
+    const v1 = {
+      schemaVersion: 1,
+      taskId,
+      ordinal: 1,
+      outcome: 'research',
+      request: 'Continue a legacy web research Task.',
+      grounding: 'required',
+      phase: 'active',
+      revision: 1,
+      steeringRevision: 0,
+      steering: [],
+      checkpoints: [],
+      sources: [{
+        sourceId: 'OLD1',
+        url: 'HTTPS://EXAMPLE.TEST:443/legacy',
+        title: 'Legacy Source',
+        locator: 'Body',
+        excerpt: 'legacy exact excerpt',
+        role: 'primary',
+        inspectedAt: timestamp,
+        check: { status: 'reachable', checkedAt: timestamp, statusCode: 200, resolvedUrl: 'https://example.test/legacy' },
+      }],
+      claims: [{
+        claimId: 'OLD-C1', text: 'Legacy evidence.', kind: 'external', importance: 'material',
+        disposition: 'supported', sourceIds: ['OLD1'],
+      }],
+      limitations: [],
+      latestArtifact: null,
+      verification: null,
+      finalArtifactSha256: null,
+      startedAt: timestamp,
+      updatedAt: timestamp,
+    }
+    const meta = { kind: 'dsh-raven-research/task-state', version: 1, state: v1 }
+    const agent = { id: 'legacy-replay', session: { events: [{ type: 'tool/result', data: { meta } }] } }
+    const signal = new AbortController().signal
+    const restored = await tool.execute({ action: 'status', taskId }, { agent, signal })
+
+    expect(restored.state.schemaVersion).toBe(2)
+    expect(restored.state.sources[0]).toMatchObject({
+      url: 'https://example.test/legacy',
+      resource: { origin: 'web', uri: 'https://example.test/legacy' },
+      representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
+    })
+    const checkpoint = await tool.execute({
+      action: 'checkpoint', taskId, stage: 'verify', summary: 'Legacy evidence migrated.',
+      artifact: 'Legacy evidence [@OLD1].',
+    }, { agent, signal })
+    expect(checkpoint.status).toBe('active')
+    const completed = await tool.execute({
+      action: 'complete', taskId, artifact: checkpoint.state.latestArtifact,
+    }, { agent, signal })
+    expect(completed.status).toBe('completed')
+  })
+
   it('preserves prior Task identities when a later Task starts in the same session', async () => {
     interface TestValue {
       state: RavenPlugin.RavenTaskState

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { PROSE_LAYOUTS } from './prose.js'
+import { sourceInspectionSha256 } from './source.js'
 
 import {
   CLAIM_DISPOSITIONS,
@@ -11,16 +12,21 @@ import {
   GROUNDING_POLICIES,
   LIMITATION_KINDS,
   OUTCOMES,
+  EMPTY_SOURCE_POLICY,
   RAVEN_LIMITS,
   RAVEN_STAGES,
+  SOURCE_ORIGINS,
   SOURCE_ROLES,
   type RavenSourceCheck,
+  type RavenSourcePolicy,
+  type RavenSourceRepresentation,
+  type RavenSourceResource,
   type RavenTaskState,
 } from './domain.js'
 
 const PHASES = ['active', 'stopped', 'completed', 'completed-with-limits'] as const
 const CHECK_STATUSES = ['reachable', 'failed', 'unavailable'] as const
-const VERIFICATION_MODES = ['remote', 'structural-only'] as const
+const VERIFICATION_MODES = ['remote', 'source', 'structural-only'] as const
 const SHA256 = /^sha256:[a-f0-9]{64}$/
 const STABLE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
@@ -66,7 +72,85 @@ function uniqueStrings(value: unknown, valid: (item: string) => boolean = () => 
     && new Set(value).size === value.length
 }
 
-function validCheck(value: unknown, sourceUrl: string): value is RavenSourceCheck {
+function validUri(value: unknown, origin: string): value is string {
+  if (!string(value) || value.length > RAVEN_LIMITS.sourceLocatorChars) return false
+  if (origin === 'web') return validUrl(value)
+  try {
+    const parsed = new URL(value)
+    const schemeMatches = origin === 'local'
+      ? parsed.protocol === 'file:'
+      : origin === 'llm-wiki'
+        ? parsed.protocol === 'file:' || parsed.protocol === 'llm-wiki:'
+        : origin === 'mcp' && parsed.protocol === 'mcp:'
+    return parsed.username === '' && parsed.password === '' && parsed.href === value && schemeMatches
+  } catch {
+    return false
+  }
+}
+
+function validPolicyHost(value: string): boolean {
+  if (value !== value.trim() || value !== value.toLowerCase()) return false
+  try {
+    const parsed = new URL(`https://${value}`)
+    return parsed.hostname === value && parsed.port === '' && parsed.pathname === '/' && parsed.search === '' && parsed.hash === ''
+  } catch {
+    return false
+  }
+}
+
+function validPolicyRoot(value: string, origin: 'local' | 'llm-wiki'): boolean {
+  if (value !== value.trim() || !validUri(value, origin)) return false
+  return new URL(value).href === value
+}
+
+function validPolicy(value: unknown): value is RavenSourcePolicy {
+  const policy = record(value)
+  if (policy === undefined || !exactKeys(policy, [
+    'allowedWebHosts', 'blockedWebHosts', 'preferPrimary', 'localRoots', 'llmWikiRoots',
+    'includedMcpSources', 'excludedMcpSources',
+  ]) || typeof policy.preferPrimary !== 'boolean') return false
+  const lists = ['allowedWebHosts', 'blockedWebHosts', 'localRoots', 'llmWikiRoots', 'includedMcpSources', 'excludedMcpSources'] as const
+  for (const key of lists) {
+    if (!uniqueStrings(policy[key], item => item.length <= RAVEN_LIMITS.sourcePolicyStringChars)
+      || policy[key].length > RAVEN_LIMITS.sourcePolicyItems) return false
+  }
+  const typed = policy as unknown as RavenSourcePolicy
+  if (typed.allowedWebHosts.some(host => !validPolicyHost(host))
+    || typed.blockedWebHosts.some(host => !validPolicyHost(host))
+    || typed.localRoots.some(root => !validPolicyRoot(root, 'local'))
+    || typed.llmWikiRoots.some(root => !validPolicyRoot(root, 'llm-wiki'))
+    || typed.includedMcpSources.some(name => name !== name.trim())
+    || typed.excludedMcpSources.some(name => name !== name.trim())) return false
+  const overlaps = (left: readonly string[], right: readonly string[]) => left.some(item => right.includes(item))
+  return !overlaps(typed.allowedWebHosts, typed.blockedWebHosts)
+    && !overlaps(typed.includedMcpSources, typed.excludedMcpSources)
+}
+
+function validRepresentation(value: unknown, resourceValue: unknown): boolean {
+  const resource = record(resourceValue)
+  if (resource === undefined || !member(resource.origin, SOURCE_ORIGINS)) return false
+  if (value === null) return resource.origin !== 'web'
+  const representation = record(value)
+  if (representation === undefined
+    || !exactKeys(representation, ['format', 'derivation', 'coverage', 'producedBy', 'inspectionCallId', 'markdown'])
+    || representation.format !== 'markdown'
+    || !member(representation.derivation, ['original', 'converted'] as const)
+    || !member(representation.coverage, ['full', 'segment', 'unknown'] as const)
+    || !string(representation.producedBy)
+    || representation.producedBy.length > RAVEN_LIMITS.sourceProducedByChars
+    || (representation.inspectionCallId !== undefined
+      && (!string(representation.inspectionCallId) || representation.inspectionCallId.length > RAVEN_LIMITS.sourceInspectionCallIdChars))
+    || (representation.markdown !== undefined
+      && (!string(representation.markdown, false) || representation.markdown.length > RAVEN_LIMITS.sourceMarkdownChars))
+    || (resource.origin !== 'web' && (representation.markdown === undefined || representation.inspectionCallId === undefined))
+    || (resource.origin === 'web' && (representation.inspectionCallId !== undefined || representation.coverage !== 'unknown'))) return false
+  const mediaType = typeof resource.mediaType === 'string'
+    ? resource.mediaType.split(';', 1)[0]?.trim().toLowerCase()
+    : undefined
+  return representation.derivation !== 'original' || mediaType === 'text/markdown'
+}
+
+function validCheck(value: unknown, sourceUrl: string, origin: string): value is RavenSourceCheck {
   const check = record(value)
   if (check === undefined || !string(check.status)) return false
   if (check.status === 'unchecked') return exactKeys(check, ['status']) && Object.keys(check).length === 1
@@ -75,14 +159,16 @@ function validCheck(value: unknown, sourceUrl: string): value is RavenSourceChec
   if (check.statusCode !== undefined && (!integer(check.statusCode, 100) || check.statusCode > 599)) return false
   if (check.resolvedUrl !== undefined && !validUrl(check.resolvedUrl)) return false
   if (check.detail !== undefined && !string(check.detail)) return false
-  if (check.status === 'reachable') {
+  if (check.status === 'reachable' && origin === 'web') {
     if (!integer(check.statusCode, 200)
       || check.statusCode >= 400
       || !validUrl(check.resolvedUrl)
       || !sameSourceIdentity(sourceUrl, check.resolvedUrl)) return false
   }
-  if (check.status === 'failed'
+  if (origin !== 'web' && (check.statusCode !== undefined || check.resolvedUrl !== undefined)) return false
+  if (check.status === 'failed' && origin === 'web'
     && (!integer(check.statusCode, 100) || !validUrl(check.resolvedUrl) || !string(check.detail))) return false
+  if (check.status === 'failed' && origin !== 'web' && !string(check.detail)) return false
   if (check.status === 'unavailable' && !string(check.detail)) return false
   return true
 }
@@ -92,18 +178,38 @@ function sha256(value: string): string {
 }
 
 /** The schema version this build writes. Older versions are migrated forward. */
-export const RAVEN_SCHEMA_VERSION = 1
+export const RAVEN_SCHEMA_VERSION = 2
 
 /**
  * Forward migrations, keyed by the version being migrated FROM.
  *
  * The decoder used to reject any `schemaVersion` but 1 outright, so the first
  * bump would have silently dropped every stored Task on replay — a data-loss
- * path with no code path to fix it in. The seam exists now even though it holds
- * nothing: the next bump adds one entry here instead of rediscovering that the
- * only place to put it does not exist.
+ * path with no code path to fix it in. The table now carries the v1 web-to-v2
+ * Source fabric migration; future bumps add one entry per forward step.
  */
-const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<string, unknown> | undefined> = {}
+const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<string, unknown> | undefined> = {
+  1: state => {
+    if (!Array.isArray(state.sources)) return undefined
+    const sources = state.sources.map(raw => {
+      const source = record(raw)
+      if (source === undefined || !string(source.url)) return raw
+      let url: string
+      try {
+        url = canonicalSourceUrl(source.url)
+      } catch {
+        return raw
+      }
+      return {
+        ...source,
+        url,
+        resource: { origin: 'web', uri: url },
+        representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
+      }
+    })
+    return { ...state, schemaVersion: 2, sourcePolicy: EMPTY_SOURCE_POLICY, sources }
+  },
+}
 
 function migrateToCurrent(state: Record<string, unknown>): Record<string, unknown> | undefined {
   let current = state
@@ -134,7 +240,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
       'revision', 'steeringRevision', 'steering', 'checkpoints', 'sources', 'claims',
       'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
-      'startedAt', 'updatedAt',
+      'sourcePolicy', 'startedAt', 'updatedAt',
     ])
     || state.schemaVersion !== RAVEN_SCHEMA_VERSION
     || !string(state.taskId)
@@ -143,6 +249,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     || !string(state.request)
     || state.request.length > RAVEN_LIMITS.requestChars
     || !member(state.grounding, GROUNDING_POLICIES)
+    || !validPolicy(state.sourcePolicy)
     || !member(state.phase, PHASES)
     || !integer(state.revision, 1)
     || !integer(state.steeringRevision)
@@ -166,11 +273,12 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   for (const [index, raw] of state.steering.entries()) {
     const item = record(raw)
     if (item === undefined
-      || !exactKeys(item, ['revision', 'correction', 'createdAt'])
+      || !exactKeys(item, ['revision', 'correction', 'createdAt', 'sourcePolicy'])
       || item.revision !== index + 1
       || !string(item.correction)
       || item.correction.length > RAVEN_LIMITS.correctionChars
-      || !timestamp(item.createdAt)) return undefined
+      || !timestamp(item.createdAt)
+      || (item.sourcePolicy !== undefined && !validPolicy(item.sourcePolicy))) return undefined
   }
 
   // Checkpoint identity is NOT positional any more. Ordinals used to be
@@ -237,20 +345,41 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   }
 
   const sourceIds = new Set<string>()
-  const sourceUrls = new Set<string>()
+  const sourceIdentities = new Set<string>()
   const sourceChecks = new Map<string, RavenSourceCheck>()
   for (const raw of state.sources) {
     const item = record(raw)
     if (item === undefined
       || !exactKeys(item, [
-        'sourceId', 'url', 'title', 'locator', 'excerpt', 'role', 'sourceFamily', 'asOf',
-        'inspectedAt', 'check',
+        'sourceId', 'url', 'resource', 'representation', 'inspectionSha256', 'title', 'locator', 'excerpt', 'role',
+        'sourceFamily', 'asOf', 'inspectedAt', 'check',
       ])
       || !string(item.sourceId)
       || !STABLE_ID.test(item.sourceId)
       || sourceIds.has(item.sourceId)
-      || !validUrl(item.url)
-      || sourceUrls.has(item.url)
+      || !string(item.url)
+      || (() => {
+        const resource = record(item.resource)
+        return resource === undefined
+          || !exactKeys(resource, ['origin', 'uri', 'mediaType', 'sourceName'])
+          || !member(resource.origin, SOURCE_ORIGINS)
+          || !validUri(resource.uri, resource.origin)
+          || sourceIdentities.has(resource.uri)
+          || item.url !== resource.uri
+          || (resource.mediaType !== undefined && (!string(resource.mediaType) || resource.mediaType !== resource.mediaType.trim() || resource.mediaType.length > RAVEN_LIMITS.sourceMediaTypeChars))
+          || (resource.sourceName !== undefined && (!string(resource.sourceName) || resource.sourceName !== resource.sourceName.trim() || resource.sourceName.length > RAVEN_LIMITS.sourceNameChars))
+          || ((resource.origin === 'llm-wiki' || resource.origin === 'mcp') && !string(resource.sourceName))
+          || ((resource.origin === 'web' || resource.origin === 'local') && resource.sourceName !== undefined)
+          || (resource.origin === 'mcp' && new URL(resource.uri as string).hostname !== resource.sourceName)
+          || (resource.origin === 'llm-wiki' && new URL(resource.uri as string).protocol === 'llm-wiki:'
+            && new URL(resource.uri as string).hostname !== resource.sourceName)
+      })()
+      || !validRepresentation(item.representation, item.resource)
+      || (item.inspectionSha256 !== undefined && (!string(item.inspectionSha256) || !SHA256.test(item.inspectionSha256)))
+      || ((item.resource as Record<string, unknown>).origin === 'web' && item.inspectionSha256 !== undefined)
+      || ((item.resource as Record<string, unknown>).origin !== 'web'
+        && record(item.check)?.status === 'reachable'
+        && item.inspectionSha256 === undefined)
       || !string(item.title)
       || item.title.length > RAVEN_LIMITS.sourceTitleChars
       || !string(item.locator)
@@ -263,24 +392,20 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || (item.asOf !== undefined
         && (!string(item.asOf) || item.asOf.length > RAVEN_LIMITS.sourceAsOfChars))
       || !timestamp(item.inspectedAt)
-      || !validCheck(item.check, item.url)) return undefined
+      || !validCheck(item.check, item.url, (item.resource as Record<string, unknown>).origin as string)) return undefined
+
+    if (item.inspectionSha256 !== undefined) {
+      if (item.representation === null
+        || item.inspectionSha256 !== sourceInspectionSha256(
+          item.resource as unknown as RavenSourceResource,
+          item.representation as unknown as RavenSourceRepresentation,
+        )) return undefined
+    }
     sourceIds.add(item.sourceId)
-    sourceUrls.add(item.url)
+    const resource = item.resource as Record<string, string>
+    sourceIdentities.add(resource.uri as string)
     sourceChecks.set(item.sourceId, item.check as RavenSourceCheck)
   }
-
-  // A single unusable Claim must never cost the whole Task.
-  //
-  // Rejecting the snapshot when one external supported/qualified Claim's Sources
-  // are not currently reachable meant plugin.ts's replay skipped the state
-  // entirely and the Task vanished — a whole research session lost to one dead
-  // link. Downgrading that Claim to `deferred` is exactly what the engine's own
-  // propagation does when a Source later fails (`propagateSourceChecks`), so the
-  // repair is the engine's rule applied at the boundary rather than a second
-  // policy. The threshold below is therefore "no Source reachable", NOT "any
-  // Source unreachable": those are not complements for a multi-Source Claim, and
-  // the stricter reading silently turned a published `supported` Claim into a
-  // `deferred` one on replay whenever one of several Sources had failed — a Claim
   // trace and an Artifact citation that changed meaning across a restart, with no
   // message, Limitation, or issue anywhere. The
   // structural checks below still reject the snapshot: a malformed Claim is a
@@ -291,7 +416,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   for (const raw of state.claims) {
     const item = record(raw)
     if (item === undefined
-      || !exactKeys(item, ['claimId', 'text', 'kind', 'importance', 'disposition', 'sourceIds', 'contradicts'])
+      || !exactKeys(item, ['claimId', 'text', 'kind', 'importance', 'disposition', 'deferredFrom', 'sourceIds', 'contradicts'])
       || !string(item.claimId)
       || !STABLE_ID.test(item.claimId)
       || claimIds.has(item.claimId)
@@ -300,6 +425,9 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || !member(item.kind, CLAIM_KINDS)
       || !member(item.importance, CLAIM_IMPORTANCE)
       || !member(item.disposition, CLAIM_DISPOSITIONS)
+      || (item.deferredFrom !== undefined
+        && (item.kind !== 'external' || item.disposition !== 'deferred'
+          || !member(item.deferredFrom, ['supported', 'qualified'] as const)))
       || !uniqueStrings(item.sourceIds, id => STABLE_ID.test(id) && sourceIds.has(id))
       || (item.contradicts !== undefined
         && (!uniqueStrings(item.contradicts, id => STABLE_ID.test(id) && id !== item.claimId)
@@ -310,7 +438,13 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
         || !item.sourceIds.some(sourceId => sourceChecks.get(sourceId)?.status === 'reachable'))
     if (unsupportable) {
       repairedAnyClaim = true
-      repairedClaims.push({ ...item, disposition: 'deferred' })
+      repairedClaims.push({ ...item, disposition: 'deferred', deferredFrom: item.disposition })
+    } else if (item.kind === 'external' && item.disposition === 'deferred'
+      && item.deferredFrom !== undefined
+      && item.sourceIds.some(sourceId => sourceChecks.get(sourceId)?.status === 'reachable')) {
+      repairedAnyClaim = true
+      const { deferredFrom, ...restored } = item
+      repairedClaims.push({ ...restored, disposition: deferredFrom })
     } else {
       repairedClaims.push(item)
     }
@@ -375,6 +509,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   if (!(state.finalArtifactSha256 === null
     || (string(state.finalArtifactSha256) && SHA256.test(state.finalArtifactSha256)))) return undefined
   const completed = state.phase === 'completed' || state.phase === 'completed-with-limits'
+  if (completed && repairedAnyClaim) return undefined
   if (completed) {
     const verification = record(state.verification)
     if (state.finalArtifactSha256 === null

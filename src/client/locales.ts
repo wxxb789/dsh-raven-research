@@ -68,8 +68,7 @@ export const en: Record<RavenCardKey, string> = {
     'Auto lets the main agent mention one useful Raven option only when relevant, without tutorials, repetition, or approval gates. Off suppresses these optional hints; Task behavior is unchanged.',
   sourceVerification: 'Source verification',
   sourceVerificationHint:
-    'Whether recorded Sources are re-fetched to confirm their excerpts. Structural only makes every Source '
-    + 'unverifiable, so a Checkpoint carrying Sources is refused rather than published unchecked.',
+    'Whether web Sources are re-fetched to confirm their excerpts. Structural only makes web Sources unverifiable; local, llm-wiki, and MCP Sources still verify against their recorded Markdown representations.',
   sourceNetworkPolicy: 'Source network policy',
   sourceNetworkPolicyHint:
     'Public only refuses local/private destinations before fetching. It reduces SSRF exposure but cannot stop DNS '
@@ -149,8 +148,7 @@ export const zh: Record<RavenCardKey, string> = {
   guidanceHint: '自动模式仅在相关时让主 Agent 简短提示一项 Raven 能力，不会变成教程、重复提示或审批流程。关闭后不再提供此类可选提示，Task 行为不变。',
   sourceVerification: 'Source 校验方式',
   sourceVerificationHint:
-    '是否重新抓取已登记的 Source 以核对其原文摘录。选择「仅结构校验」后任何 Source 都无法被确认，'
-    + '携带 Source 的 Checkpoint 会被拒绝，而不是未经核对就发布。',
+    '是否重新抓取 Web Source 以核对摘录。选择「仅结构校验」后 Web Source 无法被确认；Local、llm-wiki 和 MCP Source 仍会根据已记录的 Markdown representation 校验。',
   sourceNetworkPolicy: 'Source 网络策略',
   sourceNetworkPolicyHint:
     '「仅公共网络」会在抓取前拒绝本机或私有地址，可降低 SSRF 暴露，但无法阻止 provider 内部的 DNS rebinding。'

@@ -144,7 +144,11 @@ describe('llm-wiki emission', () => {
 
     const raw = pageAt(exported, /^wiki\/raw\/articles\/a1-vendor-a-durability-[a-f0-9]{8}\.md$/)
     const fields = frontmatter(raw.content)
-    expect(fields.source_url).toBe('https://vendor-a.test/durability')
+    expect(fields.source_url).toBe('"https://vendor-a.test/durability"')
+    expect(fields.source_origin).toBe('web')
+    expect(fields.source_uri).toBe('"https://vendor-a.test/durability"')
+    expect(fields.representation).toBe('converted')
+    expect(fields.representation_produced_by).toBe('"web_fetch"')
     expect(fields.ingested).toBe('2026-08-16')
     // Raven stores the verified excerpt, never a full page capture, and says so.
     expect(fields.capture).toBe('excerpt-only')
@@ -153,6 +157,48 @@ describe('llm-wiki emission', () => {
     // llm-wiki drift detection requires the digest to cover exactly the body.
     expect(fields.sha256).toBe(createHash('sha256').update(body(raw.content)).digest('hex'))
     expect(body(raw.content)).toContain('durable before acknowledgement')
+  })
+
+  it('keeps a local Original Resource distinct from its Markdown representation', async () => {
+    const localVerifier: SourceVerifier = {
+      verify: async sources => sources.map(source => ({ sourceId: source.sourceId, status: 'reachable', checkedAt: now() })),
+    }
+    const engine = createRavenEngine({ now, sourceVerifier: localVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start', outcome: 'general-writing', grounding: 'none', request: 'Record local source provenance.',
+      sourcePolicy: { localRoots: ['file:///workspace'] },
+    }, { sessionId: 'wiki-local-provenance', signal })
+    const draft = await engine.dispatch(started.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read', summary: 'Local provenance recorded.',
+      artifact: 'Local evidence [@LOCAL1].',
+      sources: [{
+        sourceId: 'LOCAL1', title: 'Local notes\n## forged', locator: 'Heading', excerpt: 'An exact local excerpt.',
+        resource: { origin: 'local', uri: 'file:///workspace/notes.md', mediaType: 'text/markdown' },
+        representation: { format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read', inspectionCallId: 'inspect-wiki-local', markdown: '# Notes\n\nAn exact local excerpt.' },
+      }],
+      claims: [{
+        claimId: 'LOCAL-C1', text: 'Local evidence.', kind: 'external', importance: 'material',
+        disposition: 'supported', sourceIds: ['LOCAL1'],
+      }],
+    }, { sessionId: 'wiki-local-provenance', signal })
+    const exported = await engine.dispatch(draft.state, {
+      action: 'export', taskId: started.state.taskId, title: 'Local Provenance',
+    }, { sessionId: 'wiki-local-provenance', signal })
+    const raw = pageAt(exported, /^wiki\/raw\/articles\/local1-local-notes-forged-[a-f0-9]{8}\.md$/)
+    const fields = frontmatter(raw.content)
+
+    expect(fields.source_origin).toBe('local')
+    expect(fields.source_uri).toBe('"file:///workspace/notes.md"')
+    expect(fields.source_media_type).toBe('"text/markdown"')
+    expect(fields.representation).toBe('original')
+    expect(fields.representation_produced_by).toBe('"read"')
+    expect(fields.inspection_call_id).toBe('"inspect-wiki-local"')
+    expect(fields.inspection_sha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(body(raw.content)).toContain('# Local notes \\#\\# forged')
+    expect(body(raw.content)).not.toContain('\n## forged')
+    expect(body(raw.content)).toContain(String.raw`Inspection call: inspect\-wiki\-local`)
+    expect(body(raw.content)).toContain(String.raw`Original resource: file:///workspace/notes\.md`)
+    expect(body(raw.content)).toContain('Markdown representation: original full Markdown by read')
   })
 
   it('emits an appendable log entry rather than rewriting the log', async () => {
@@ -266,7 +312,7 @@ describe('llm-wiki emission', () => {
     const fields = frontmatter(raw.content)
     expect(fields.verification).toBe('unverified')
     expect(fields.verified_at).toBeUndefined()
-    expect(body(raw.content)).toContain('NOT confirmed against the retrieved body')
+    expect(body(raw.content)).toContain("NOT confirmed against the Source's Markdown representation")
     // The digest still covers exactly the body, so llm-wiki drift detection works.
     expect(fields.sha256).toBe(createHash('sha256').update(body(raw.content)).digest('hex'))
   })

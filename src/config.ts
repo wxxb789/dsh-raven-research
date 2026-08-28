@@ -128,11 +128,11 @@ export const Config: z<RavenConfig> = z.object({
     .union([z.const('remote'), z.const('structural-only')])
     .default('remote')
     .description(
-      'Whether recorded Sources are re-fetched to confirm their excerpts. '
-      + '"structural-only" keeps every check local, which means no Source can be confirmed: '
-      + 'a Checkpoint that records Sources is refused with the policy named, instead of '
-      + 'publishing evidence nobody inspected. Set it only for a deployment that cannot reach '
-      + 'the network, where the honest outcome is a clear refusal rather than a link error per Source.',
+      'Whether web Sources are re-fetched to confirm their excerpts. '
+      + '"structural-only" withholds remote web checks, so web Sources remain unavailable rather than '
+      + 'publishing evidence nobody inspected. Local, llm-wiki, and MCP Sources still verify against their '
+      + 'recorded Markdown representations because that check performs no retrieval. Set it only for a '
+      + 'deployment that cannot reach the network.',
     ),
   sourceNetworkPolicy: z
     .union(SOURCE_NETWORK_POLICIES.map(value => z.const(value)))

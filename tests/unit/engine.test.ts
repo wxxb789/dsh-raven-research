@@ -873,6 +873,8 @@ describe('Raven task engine', () => {
     const wire = (sourceId: string, suffix: string, sourceFamily?: string) => ({
       sourceId,
       url: `https://outlet-${suffix}.test/story`,
+      resource: { origin: 'web' as const, uri: `https://outlet-${suffix}.test/story` },
+      representation: { format: 'markdown' as const, derivation: 'converted' as const, coverage: 'unknown' as const, producedBy: 'web_fetch' },
       title: `Outlet ${suffix}`,
       locator: 'Body',
       excerpt: 'the agency reported the figure',
@@ -921,6 +923,8 @@ describe('Raven task engine', () => {
     const rendered = renderArtifact('Claim [@ESC1].', [{
       sourceId: 'ESC1',
       url: 'https://example.test/escape',
+      resource: { origin: 'web', uri: 'https://example.test/escape' },
+      representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
       title: '<img src=x> [unsafe]',
       locator: '> injected blockquote',
       excerpt: 'safe excerpt',
@@ -1431,6 +1435,29 @@ describe('Raven task engine', () => {
     }, { sessionId: 'session-code-urls', signal })).rejects.toThrow('unregistered external URL')
   })
 
+  it('rejects unregistered raw links for every supported Source origin', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Validate raw links across supported Source origins.',
+    }, { sessionId: 'session-source-links', signal })
+
+    for (const rawUrl of [
+      'file:///workspace/docs/unregistered.md',
+      'llm-wiki://docs/unregistered',
+      'mcp://trusted/unregistered',
+    ]) {
+      await expect(engine.dispatch(started.state, {
+        action: 'checkpoint',
+        taskId: started.state.taskId,
+        stage: 'draft',
+        summary: 'A draft containing an unregistered raw Source link.',
+        artifact: `The claim rests on ${rawUrl} which was never registered.`,
+      }, { sessionId: 'session-source-links', signal })).rejects.toThrow('unregistered external URL')
+    }
+  })
+
   it('lets a registered Source authorize its own fragment and trailing slash', async () => {
     const engine = createRavenEngine({ now, sourceVerifier })
     const started = await engine.dispatch(null, {
@@ -1601,6 +1628,8 @@ describe('Raven task engine', () => {
     const rendered = renderArtifact('The record [@AMP1].', [{
       sourceId: 'AMP1',
       url: 'https://example.test/ampersand',
+      resource: { origin: 'web', uri: 'https://example.test/ampersand' },
+      representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
       title: 'Ways & Means Committee',
       locator: 'Section 1 & 2',
       excerpt: 'excerpt',
@@ -1623,5 +1652,151 @@ describe('Raven task engine', () => {
     expect(rendered.match(/&amp;/g)).toHaveLength(3)
     // The Sources list renders the locator through the same escape.
     expect(rendered).toContain('Section 1 &amp; 2')
+  })
+
+  it('preserves original local Markdown and verifies it through the unified Source seam', async () => {
+    let received: readonly SourceCheckRequest[] = []
+    const verifier: SourceVerifier = {
+      verify: async (sources) => {
+        received = sources
+        return sources.map(source => ({ sourceId: source.sourceId, status: 'reachable' as const, checkedAt: now() }))
+      },
+    }
+    const engine = createRavenEngine({ now, sourceVerifier: verifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Use one local Markdown source.',
+      sourcePolicy: { localRoots: ['file:///workspace/docs'] },
+    }, { sessionId: 'session-local-markdown', signal })
+    const markdown = '# Guide\n\nKeep **Markdown** unchanged.'
+    const checkpoint = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'read',
+      summary: 'Grounded in a local Markdown file.',
+      artifact: 'The guide requires Markdown preservation [@LOCAL1].',
+      sources: [{
+        sourceId: 'LOCAL1',
+        title: 'Local guide',
+        locator: 'Keep Markdown',
+        excerpt: 'Keep **Markdown** unchanged.',
+        role: 'user-provided',
+        resource: { origin: 'local', uri: 'file:///workspace/docs/guide.md', mediaType: 'text/markdown' },
+        representation: { format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read', inspectionCallId: 'inspect-local', markdown },
+      }],
+      claims: [{
+        claimId: 'LOCAL-C1',
+        text: 'The guide requires Markdown preservation.',
+        kind: 'external',
+        importance: 'material',
+        disposition: 'supported',
+        sourceIds: ['LOCAL1'],
+      }],
+    }, { sessionId: 'session-local-markdown', signal })
+
+    expect(checkpoint.status).toBe('active')
+    expect(checkpoint.state.schemaVersion).toBe(2)
+    expect(checkpoint.state.sources[0]?.representation?.markdown).toBe(markdown)
+    expect(received[0]?.resource).toEqual({ origin: 'local', uri: 'file:///workspace/docs/guide.md', mediaType: 'text/markdown' })
+    expect(checkpoint.renderedArtifact).toContain('local; original full Markdown by read')
+  })
+
+  it('steers Source Policy on the same Task and immediately defers newly excluded support', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start',
+      outcome: 'research',
+      request: 'Use only the requested site.',
+      sourcePolicy: { allowedWebHosts: ['EXAMPLE.TEST'], preferPrimary: true },
+    }, { sessionId: 'session-policy-steer', signal })
+    expect(started.state.sourcePolicy.allowedWebHosts).toEqual(['example.test'])
+    expect(started.state.sourcePolicy.preferPrimary).toBe(true)
+
+    const checkpoint = await engine.dispatch(started.state, {
+      action: 'checkpoint',
+      taskId: started.state.taskId,
+      stage: 'read',
+      summary: 'Allowed evidence.',
+      artifact: 'The allowed record states the result [@POLICY1].',
+      sources: [{
+        sourceId: 'POLICY1',
+        url: 'https://sub.example.test/record',
+        title: 'Allowed record',
+        locator: 'Result',
+        excerpt: 'the result',
+        role: 'primary',
+      }],
+      claims: [{
+        claimId: 'POLICY-C1', text: 'The allowed record states the result.', kind: 'external',
+        importance: 'material', disposition: 'supported', sourceIds: ['POLICY1'],
+      }],
+    }, { sessionId: 'session-policy-steer', signal })
+    const steered = await engine.dispatch(checkpoint.state, {
+      action: 'steer',
+      taskId: started.state.taskId,
+      correction: 'Block that site and keep the Task.',
+      sourcePolicy: { allowedWebHosts: [], blockedWebHosts: ['example.test'] },
+    }, { sessionId: 'session-policy-steer', signal })
+
+    expect(steered.state.taskId).toBe(started.state.taskId)
+    expect(steered.state.sources[0]?.check).toMatchObject({ status: 'unavailable', detail: expect.stringContaining('Task Source Policy') })
+    expect(steered.state.claims[0]).toMatchObject({ disposition: 'deferred', deferredFrom: 'supported' })
+    expect(steered.state.limitations.some(item => item.sourceId === 'POLICY1')).toBe(true)
+    expect(steered.state.steering[0]?.sourcePolicy?.blockedWebHosts).toEqual(['example.test'])
+
+    const relaxed = await engine.dispatch(steered.state, {
+      action: 'steer',
+      taskId: started.state.taskId,
+      correction: 'Allow the site again.',
+      sourcePolicy: { blockedWebHosts: [] },
+    }, { sessionId: 'session-policy-steer', signal })
+    expect(relaxed.state.sources[0]?.check.status).toBe('unchecked')
+    expect(relaxed.state.claims[0]).toMatchObject({ disposition: 'deferred', deferredFrom: 'supported' })
+
+    const reverified = await engine.dispatch(relaxed.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'verify',
+      summary: 'Allowed evidence reverified.',
+      artifact: 'The allowed record states the result [@POLICY1].',
+    }, { sessionId: 'session-policy-steer', signal })
+    expect(reverified.state.sources[0]?.check.status).toBe('reachable')
+    expect(reverified.state.claims[0]?.disposition).toBe('supported')
+    expect(reverified.state.claims[0]?.deferredFrom).toBeUndefined()
+    expect(reverified.state.limitations.some(item => item.sourceId === 'POLICY1')).toBe(false)
+
+    const completed = await engine.dispatch(reverified.state, {
+      action: 'complete', taskId: started.state.taskId, artifact: reverified.state.latestArtifact,
+    }, { sessionId: 'session-policy-steer', signal })
+    expect(completed.status).toBe('completed')
+  })
+
+  it('keeps policy-excluded MCP material out of the verifier and records the limitation', async () => {
+    const verify = vi.fn(async (sources: readonly SourceCheckRequest[]) => sources.map(source => ({
+      sourceId: source.sourceId, status: 'reachable' as const, checkedAt: now(),
+    })))
+    const engine = createRavenEngine({ now, sourceVerifier: { verify } })
+    const started = await engine.dispatch(null, {
+      action: 'start', outcome: 'research', request: 'Use one MCP source.',
+      sourcePolicy: { includedMcpSources: ['trusted'], excludedMcpSources: ['blocked'] },
+    }, { sessionId: 'session-mcp-policy', signal })
+    const result = await engine.dispatch(started.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read', summary: 'Excluded MCP material.',
+      artifact: 'The MCP page states the result [@MCP1].',
+      sources: [{
+        sourceId: 'MCP1', title: 'MCP page', locator: 'resource body', excerpt: 'states the result',
+        resource: { origin: 'mcp', uri: 'mcp://blocked/page', sourceName: 'blocked', mediaType: 'text/plain' },
+        representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'mcp__blocked__read', inspectionCallId: 'inspect-mcp', markdown: 'The page states the result.' },
+      }],
+      claims: [{
+        claimId: 'MCP-C1', text: 'The MCP page states the result.', kind: 'external', importance: 'material',
+        disposition: 'supported', sourceIds: ['MCP1'],
+      }],
+    }, { sessionId: 'session-mcp-policy', signal })
+
+    expect(result.status).toBe('needs-revision')
+    expect(verify).toHaveBeenCalledWith([], signal, expect.objectContaining({ sessionId: 'session-mcp-policy' }))
+    expect(result.state.sources[0]?.check.status).toBe('unavailable')
+    expect(result.state.claims[0]?.disposition).toBe('deferred')
+    expect(result.state.limitations[0]?.detail).toContain('Source Policy')
   })
 })

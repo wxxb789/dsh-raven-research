@@ -32,9 +32,25 @@ One candidate rendering of the same writing instruction, produced by one model r
 
 The canonical line shape of a stored Artifact. Raven owns it rather than the executor, because Completion compares Artifact bytes: if each writer laid out its own text, one model's line-wrapping habits would decide whether a final Artifact matches its Checkpoint. Under the default layout each sentence occupies its own line, which makes a line the smallest edit unit — a revision then reads as the sentences that changed rather than as rewritten paragraphs. A Prose Layout never alters meaning and never reflows document structure.
 
+## Source Origin
+
+The place a Source entered Raven from. Raven currently recognizes exactly four Source Origins: **Web**, **Local**, **llm-wiki**, and **MCP**. Origin changes how the Original Resource is reopened, never how Claims refer to the Source.
+
+## Original Resource
+
+The item outside Raven that a Source identifies: a web page, local file, llm-wiki page, or MCP resource. Its identity and media type remain distinct from every representation Raven derives from it.
+
+## Markdown Representation
+
+The canonical semantic material Raven inspects and verifies. It is either original Markdown preserved as written or Markdown derived from an Original Resource with the producer named. A derived representation never replaces or impersonates its Original Resource.
+
 ## Source
 
-An external item that Raven has actually inspected and can identify again. A Source records a stable identity and enough location information to revisit the relevant material. A search result or remembered citation is only a lead until inspected.
+An external item that Raven has actually inspected and can identify again. A Source binds one Original Resource to its Markdown Representation, locator, excerpt, verification state, and stable identity. Claims link to that Source identity without depending on its Source Origin. A search result or remembered citation is only a Lead until inspected.
+
+## Source Policy
+
+The current Raven Task's steerable rules for admitting and preferring Sources. It may allow or block web sites, prefer primary Sources, scope local folders and llm-wikis, and include or exclude named MCP sources. Source Policy belongs to the Task rather than the deployment and may change through a Steering Revision without restarting the Task.
 
 ## Claim
 

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { decodeRavenTaskState, RAVEN_SCHEMA_VERSION } from '../../src/codec.js'
 import { createRavenEngine } from '../../src/engine.js'
 import { RAVEN_LIMITS, type RavenTaskState, type SourceVerifier } from '../../src/domain.js'
+import { sourceInspectionSha256 } from '../../src/source.js'
 
 const now = () => '2026-08-16T16:00:00.000Z'
 const sourceVerifier: SourceVerifier = { verify: async () => [] }
@@ -38,7 +39,10 @@ describe('Raven Task snapshot codec', () => {
   it('round-trips a complete schema-v1 state through JSON', async () => {
     const state = await validState()
     const roundTrip: unknown = JSON.parse(JSON.stringify(state))
-    expect(decodeRavenTaskState(roundTrip)).toEqual(state)
+    expect(decodeRavenTaskState(roundTrip)).toEqual({ ...state, schemaVersion: 2, sourcePolicy: {
+      allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
+      includedMcpSources: [], excludedMcpSources: [],
+    } })
   })
 
   it('rejects an unknown schema version', async () => {
@@ -67,6 +71,26 @@ describe('Raven Task snapshot codec', () => {
     expect(decodeRavenTaskState({
       ...state,
       sources: [{ sourceId: 'BROKEN' }],
+    })).toBeUndefined()
+  })
+
+  it('rejects a null Source check without throwing', async () => {
+    const state = await validState()
+    expect(decodeRavenTaskState({
+      ...state,
+      schemaVersion: 2,
+      sources: [{
+        sourceId: 'LOCAL',
+        url: 'file:///workspace/source.md',
+        resource: { origin: 'local', uri: 'file:///workspace/source.md' },
+        representation: null,
+        title: 'A Source',
+        locator: 'Section 1',
+        excerpt: 'an excerpt',
+        role: 'primary',
+        inspectedAt: now(),
+        check: null,
+      }],
     })).toBeUndefined()
   })
 
@@ -217,7 +241,14 @@ describe('Raven Task snapshot codec', () => {
     for (const state of emitted) {
       const replayed: unknown = JSON.parse(JSON.stringify(state))
       // Not just "defined": the codec must return the SAME Task, not a shell.
-      expect(decodeRavenTaskState(replayed)).toEqual(state)
+      expect(decodeRavenTaskState(replayed)).toEqual({ ...state, schemaVersion: 2, sourcePolicy: {
+        allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
+        includedMcpSources: [], excludedMcpSources: [],
+      }, sources: state.sources.map(source => ({
+        ...source,
+        resource: { origin: 'web', uri: source.url },
+        representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
+      })) })
     }
   })
 
@@ -317,25 +348,89 @@ describe('Raven Task snapshot codec', () => {
     })).toBeUndefined()
   })
 
-  it('keeps a migration seam for the next schema bump', async () => {
+  it('migrates schema-v1 web sources without losing provenance', async () => {
     const state = await validState()
-    // A14: the current build accepts only version 1, but an unknown OLDER version
-    // now routes through the migration table instead of being rejected inline, so
-    // the next bump has somewhere to live rather than silently dropping Tasks.
-    expect(RAVEN_SCHEMA_VERSION).toBe(1)
-    expect(decodeRavenTaskState({ ...state, schemaVersion: 0 })).toBeUndefined()
-    expect(decodeRavenTaskState({ ...state, schemaVersion: 2 })).toBeUndefined()
-    expect(decodeRavenTaskState({ ...state, schemaVersion: 'one' })).toBeUndefined()
+    const v1 = {
+      ...state,
+      schemaVersion: 1,
+      sources: [{
+        sourceId: 'S1',
+        url: 'HTTPS://EXAMPLE.TEST:443/source',
+        title: 'A Source',
+        locator: 'Section 1',
+        excerpt: 'an excerpt',
+        role: 'primary',
+        inspectedAt: now(),
+        check: { status: 'reachable', checkedAt: now(), statusCode: 200, resolvedUrl: 'https://example.test/source' },
+      }],
+    }
+    const decoded = decodeRavenTaskState(v1)
+    expect(RAVEN_SCHEMA_VERSION).toBe(2)
+    expect(decoded?.schemaVersion).toBe(2)
+    expect(decoded?.sourcePolicy).toEqual({
+      allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
+      includedMcpSources: [], excludedMcpSources: [],
+    })
+    expect(decoded?.sources[0]).toMatchObject({
+      url: 'https://example.test/source',
+      resource: { origin: 'web', uri: 'https://example.test/source' },
+      representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
+      check: { status: 'reachable', statusCode: 200 },
+    })
   })
 
-  // ---- D10: decode rejection on corrupted durable state ----
-  //
-  // The codec is the last line of defence for durable state: plugin.ts's replay
-  // trusts whatever it returns. Every case below is a snapshot that a corrupted
-  // store, a truncated write, or a hostile `tool/result.meta` could present, and
-  // each test names the invariant it protects. The requirement throughout is that
-  // the codec DECIDES — rejects, or degrades exactly the way A1 chose — rather
-  // than throwing, because a throw inside replay takes down the whole session
+  it('accepts local original Markdown and a non-web unavailable source with no representation', async () => {
+    const state = await validState()
+    const base = { ...state, schemaVersion: 2, sourcePolicy: {
+      allowedWebHosts: [], blockedWebHosts: [], preferPrimary: true, localRoots: ['file:///workspace'],
+      llmWikiRoots: [], includedMcpSources: ['docs'], excludedMcpSources: [],
+    } }
+    const decoded = decodeRavenTaskState({ ...base, sources: [
+      {
+        sourceId: 'LOCAL', url: 'file:///workspace/readme.md', title: 'Readme', locator: 'Intro', excerpt: 'Hello',
+        role: 'user-provided', inspectedAt: now(), resource: { origin: 'local', uri: 'file:///workspace/readme.md', mediaType: 'text/markdown' },
+        representation: { format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'local_read', inspectionCallId: 'inspect-local', markdown: '# Hello' },
+        inspectionSha256: sourceInspectionSha256(
+          { origin: 'local', uri: 'file:///workspace/readme.md', mediaType: 'text/markdown' },
+          { format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'local_read', inspectionCallId: 'inspect-local', markdown: '# Hello' },
+        ),
+        check: { status: 'reachable', checkedAt: now() },
+      },
+      {
+        sourceId: 'MCP', url: 'mcp://docs/item', title: 'MCP item', locator: 'resource', excerpt: 'Unavailable',
+        role: 'secondary', inspectedAt: now(), resource: { origin: 'mcp', uri: 'mcp://docs/item', sourceName: 'docs' },
+        representation: null, check: { status: 'unavailable', checkedAt: now(), detail: 'Tool unavailable' },
+      },
+    ] })
+    expect(decoded?.sources).toHaveLength(2)
+  })
+
+  it('rejects invalid origins, identity mismatches, and corrupt source policies', async () => {
+    const state = await validState()
+    const source = {
+      sourceId: 'S1', url: 'file:///workspace/a.md', title: 'A Source', locator: 'Section 1', excerpt: 'text',
+      role: 'primary', inspectedAt: now(), resource: { origin: 'local', uri: 'file:///workspace/a.md' },
+      representation: null, check: { status: 'unavailable', checkedAt: now(), detail: 'Unreadable' },
+    }
+    const policy = { allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [], includedMcpSources: [], excludedMcpSources: [] }
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 2, sourcePolicy: policy, sources: [{ ...source, resource: { origin: 'git', uri: source.url } }] })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 2, sourcePolicy: policy, sources: [{ ...source, resource: { origin: 'local', uri: 'file:///workspace/b.md' } }] })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 2, sourcePolicy: { ...policy, localRoots: ['file:///workspace', 'file:///workspace'] }, sources: [] })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 2, sourcePolicy: { ...policy, allowedWebHosts: ['example.test'], blockedWebHosts: ['example.test'] }, sources: [] })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 2, sourcePolicy: { ...policy, allowedWebHosts: ['HTTPS://EXAMPLE.TEST/path'] }, sources: [] })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 2, sourcePolicy: { ...policy, localRoots: ['file:///workspace/../secret'] }, sources: [] })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 2, sourcePolicy: policy, sources: [
+      source,
+      { ...source, sourceId: 'S2', resource: { origin: 'llm-wiki', uri: source.url, sourceName: 'wiki' } },
+    ] })).toBeUndefined()
+  })
+
+  it('keeps migration bounded to known older schemas', async () => {
+    const state = await validState()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 0 })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 3 })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 'one' })).toBeUndefined()
+  })
   // rather than one unreadable snapshot.
 
   it('protects counter identity: rejects a negative, fractional, or non-finite ordinal', async () => {
@@ -496,6 +591,8 @@ describe('Raven Task snapshot codec', () => {
     const sources = (count: number) => Array.from({ length: count }, (_value, index) => ({
       sourceId: `S${index}`,
       url: `https://example.test/source-${index}`,
+      resource: { origin: 'web', uri: `https://example.test/source-${index}` },
+      representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
       title: 'A Source',
       locator: 'Section 1',
       excerpt: 'an excerpt',

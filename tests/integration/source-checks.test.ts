@@ -472,6 +472,21 @@ describe('Source identity across a redirect', () => {
     expect(checkpoint.issues.join(' ')).toContain('different host')
   })
 
+  it('reports cross-host identity even when the redirected response is 404', async () => {
+    const tool = mount({
+      fetch: async () => ({
+        url: 'https://elsewhere.test/missing',
+        statusCode: 404,
+        body: { kind: 'text' as const, content: 'not found' },
+        truncated: false,
+      }),
+    })
+    const { checkpoint } = await checkOne(tool, 'cross-host-404-session', 'the passage that is really there')
+    expect(checkStatus(checkpoint)).toBe('failed')
+    expect(checkpoint.issues.join(' ')).toContain('different host')
+    expect(checkpoint.issues.join(' ')).not.toContain('not served at this URL')
+  })
+
   it('still rejects a non-default port that genuinely differs', async () => {
     const tool = mount({
       fetch: async () => ({
@@ -496,7 +511,7 @@ describe('Deployment preconditions', () => {
       web: { fetch: async () => { throw new Error('no usable web provider is registered') }, fetchProviders: new Map() },
       warn: message => warnings.push(message),
     })
-    expect(warnings.join(' ')).toContain('cannot verify any Source')
+    expect(warnings.join(' ')).toContain('cannot verify web Sources')
 
     const agent = { id: 'no-provider-session', session: { events: [] } }
     await expect(tool.execute({

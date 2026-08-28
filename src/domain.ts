@@ -11,6 +11,13 @@ export const RAVEN_LIMITS = {
   sourceExcerptChars: 20_000,
   sourceFamilyChars: 512,
   sourceAsOfChars: 128,
+  sourceMediaTypeChars: 256,
+  sourceNameChars: 512,
+  sourceProducedByChars: 512,
+  sourceInspectionCallIdChars: 512,
+  sourceMarkdownChars: 40_000,
+  sourcePolicyItems: 256,
+  sourcePolicyStringChars: 4_000,
   claimTextChars: 10_000,
   limitationDetailChars: 4_000,
   sources: 256,
@@ -56,6 +63,48 @@ export const SOURCE_ROLES = ['primary', 'secondary', 'dataset', 'user-provided']
 
 export type SourceRole = typeof SOURCE_ROLES[number]
 
+export const SOURCE_ORIGINS = ['web', 'local', 'llm-wiki', 'mcp'] as const
+
+export type SourceOrigin = typeof SOURCE_ORIGINS[number]
+
+export interface RavenSourceResource {
+  readonly origin: SourceOrigin
+  readonly uri: string
+  readonly mediaType?: string
+  readonly sourceName?: string
+}
+
+export interface RavenSourceRepresentation {
+  readonly format: 'markdown'
+  readonly derivation: 'original' | 'converted'
+  /** Whether Markdown covers the whole Original Resource, an exact segment, or an unprovable tool projection. */
+  readonly coverage: 'full' | 'segment' | 'unknown'
+  readonly producedBy: string
+  /** Harness tool call whose result supplied this Markdown. Required for non-web Sources. */
+  readonly inspectionCallId?: string
+  readonly markdown?: string
+}
+
+export const EMPTY_SOURCE_POLICY: RavenSourcePolicy = {
+  allowedWebHosts: [],
+  blockedWebHosts: [],
+  preferPrimary: false,
+  localRoots: [],
+  llmWikiRoots: [],
+  includedMcpSources: [],
+  excludedMcpSources: [],
+}
+
+export interface RavenSourcePolicy {
+  readonly allowedWebHosts: readonly string[]
+  readonly blockedWebHosts: readonly string[]
+  readonly preferPrimary: boolean
+  readonly localRoots: readonly string[]
+  readonly llmWikiRoots: readonly string[]
+  readonly includedMcpSources: readonly string[]
+  readonly excludedMcpSources: readonly string[]
+}
+
 export const CLAIM_KINDS = ['external', 'analysis'] as const
 
 export type ClaimKind = typeof CLAIM_KINDS[number]
@@ -74,7 +123,12 @@ export type RavenLimitationKind = typeof LIMITATION_KINDS[number]
 
 export interface RavenSourceRecord {
   readonly sourceId: string
+  /** @deprecated Compatibility alias for resource.uri. */
   readonly url: string
+  readonly resource: RavenSourceResource
+  readonly representation: RavenSourceRepresentation | null
+  /** Persisted after a trusted SourceVerifier attests this exact non-web representation. */
+  readonly inspectionSha256?: string
   readonly title: string
   readonly locator: string
   readonly excerpt: string
@@ -101,6 +155,8 @@ export interface RavenClaimRecord {
   readonly kind: ClaimKind
   readonly importance: ClaimImportance
   readonly disposition: ClaimDisposition
+  /** Original supported state when Raven temporarily deferred this Claim after Source verification failed. */
+  readonly deferredFrom?: Extract<ClaimDisposition, 'supported' | 'qualified'>
   readonly sourceIds: readonly string[]
   /** Claim IDs this Claim genuinely conflicts with; disagreement is preserved, never silently resolved. */
   readonly contradicts?: readonly string[]
@@ -110,6 +166,7 @@ export interface RavenSteeringRevision {
   readonly revision: number
   readonly correction: string
   readonly createdAt: string
+  readonly sourcePolicy?: RavenSourcePolicy
 }
 
 export interface RavenLimitation {
@@ -207,7 +264,7 @@ export interface RavenDraftRouteOutcome {
 
 export interface RavenVerificationReceipt {
   readonly verifiedAt: string
-  readonly mode: 'remote' | 'structural-only'
+  readonly mode: 'remote' | 'source' | 'structural-only'
   readonly checked: number
   readonly reachable: number
   readonly failed: number
@@ -218,12 +275,13 @@ export interface RavenVerificationReceipt {
 export type RavenTaskPhase = 'active' | 'stopped' | 'completed' | 'completed-with-limits'
 
 export interface RavenTaskState {
-  readonly schemaVersion: 1
+  readonly schemaVersion: 2
   readonly taskId: string
   readonly ordinal: number
   readonly outcome: RavenOutcome
   readonly request: string
   readonly grounding: GroundingPolicy
+  readonly sourcePolicy: RavenSourcePolicy
   readonly phase: RavenTaskPhase
   readonly revision: number
   readonly steeringRevision: number
@@ -244,6 +302,9 @@ export interface RavenTaskState {
 export interface SourceCheckRequest {
   readonly sourceId: string
   readonly url: string
+  readonly resource: RavenSourceResource
+  readonly representation: RavenSourceRepresentation | null
+  readonly inspectionSha256?: string
   readonly locator: string
   readonly excerpt: string
 }
@@ -304,6 +365,7 @@ export interface SourceVerifier {
   verify(
     sources: readonly SourceCheckRequest[],
     signal: AbortSignal,
+    execution?: RavenExecution,
   ): Promise<readonly SourceCheckResult[]>
 }
 
@@ -395,6 +457,8 @@ export class RavenTypeError extends TypeError {
 export interface RavenExecution {
   readonly sessionId: string
   readonly signal: AbortSignal
+  /** Current owning session events, used only to attest prior ordinary tool inspections. */
+  readonly inspectionEvents?: readonly unknown[]
 }
 
 /** One llm-wiki file Raven renders for the agent to write. */

@@ -5,17 +5,20 @@ import { settleWithAbort } from './abort.js'
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { layoutProse, proseLayoutReport, type ProseLayoutOptions, type ProseLayoutReport } from './prose.js'
 import { formatDraftRoute } from './route.js'
+import { sourceInspectionSha256 } from './source.js'
 import { renderWikiPages } from './wiki.js'
 
 import {
   CLAIM_DISPOSITIONS,
   CLAIM_IMPORTANCE,
   CLAIM_KINDS,
+  EMPTY_SOURCE_POLICY,
   GROUNDING_POLICIES,
   LIMITATION_KINDS,
   OUTCOMES,
   RAVEN_LIMITS,
   RAVEN_STAGES,
+  SOURCE_ORIGINS,
   SOURCE_ROLES,
   type ClaimDisposition,
   type ClaimImportance,
@@ -35,11 +38,15 @@ import {
   type RavenLimitationKind,
   type RavenOutcome,
   type RavenSourceCheck,
+  type RavenSourcePolicy,
   type RavenSourceRecord,
+  type RavenSourceRepresentation,
+  type RavenSourceResource,
   type RavenStage,
   type RavenTaskState,
   type RavenVerificationReceipt,
   type SourceCheckResult,
+  type SourceOrigin,
   type SourceRole,
   type SourceSearcher,
   type SourceVerifier,
@@ -120,11 +127,11 @@ interface RavenEngine {
  * send one action's field to another, so the two must never drift apart.
  */
 export const ACTION_FIELDS: Record<string, readonly string[]> = {
-  start: ['action', 'outcome', 'request', 'grounding'],
+  start: ['action', 'outcome', 'request', 'grounding', 'sourcePolicy'],
   discover: ['action', 'taskId', 'queries'],
   draft: ['action', 'taskId', 'instruction', 'routes'],
   checkpoint: ['action', 'taskId', 'stage', 'summary', 'artifact', 'sources', 'claims', 'failures'],
-  steer: ['action', 'taskId', 'correction'],
+  steer: ['action', 'taskId', 'correction', 'sourcePolicy'],
   complete: ['action', 'taskId', 'artifact'],
   status: ['action', 'taskId'],
   stop: ['action', 'taskId', 'reason'],
@@ -278,10 +285,224 @@ function requireActiveTask(previous: RavenTaskState | null, requestedTaskId: unk
   return state
 }
 
-function canonicalUrl(value: unknown): string {
-  const input = requiredText(value, 'source.url')
-  if (input.length > 2048) throw new RavenTypeError('limit-exceeded', 'source.url is too long')
-  return canonicalSourceUrl(input)
+function canonicalUri(value: unknown, label: string, origin: SourceOrigin): string {
+  const input = boundedText(value, label, RAVEN_LIMITS.sourceLocatorChars)
+  if (origin === 'web') return canonicalSourceUrl(input)
+  let parsed: URL
+  try {
+    parsed = new URL(input)
+  } catch {
+    throw new RavenTypeError('invalid-value', label + ' must be an absolute URI')
+  }
+  if (parsed.username !== '' || parsed.password !== '') {
+    throw new RavenTypeError('invalid-value', label + ' must not contain credentials')
+  }
+  const allowedSchemes: Record<Exclude<SourceOrigin, 'web'>, readonly string[]> = {
+    local: ['file:'],
+    'llm-wiki': ['file:', 'llm-wiki:'],
+    mcp: ['mcp:'],
+  }
+  if (!allowedSchemes[origin].includes(parsed.protocol)) {
+    throw new RavenTypeError('invalid-value', label + ' has a scheme incompatible with Source origin ' + origin)
+  }
+  return parsed.href
+}
+
+function parseRepresentation(
+  value: unknown,
+  resource: RavenSourceResource,
+): RavenSourceRepresentation | null {
+  if (value === null) {
+    if (resource.origin === 'web') {
+      throw new RavenTypeError('invalid-value', 'a web Source must name its Markdown conversion provenance')
+    }
+    return null
+  }
+  const input = record(value, 'source.representation')
+  assertOnlyKeys(input, ['format', 'derivation', 'coverage', 'producedBy', 'inspectionCallId', 'markdown'], 'source.representation')
+  if (input.format !== 'markdown') {
+    throw new RavenTypeError('invalid-value', 'source.representation.format must be markdown')
+  }
+  const derivation = member(input.derivation, ['original', 'converted'] as const, 'source.representation.derivation')
+  const coverage = member(input.coverage, ['full', 'segment', 'unknown'] as const, 'source.representation.coverage')
+  const producedBy = boundedText(input.producedBy, 'source.representation.producedBy', RAVEN_LIMITS.sourceProducedByChars)
+  const inspectionCallId = optionalBoundedText(input.inspectionCallId, 'source.representation.inspectionCallId', RAVEN_LIMITS.sourceInspectionCallIdChars)
+  const markdown = input.markdown
+  if (markdown !== undefined && typeof markdown !== 'string') {
+    throw new RavenTypeError('invalid-value', 'source.representation.markdown must be a string')
+  }
+  if (typeof markdown === 'string' && markdown.length > RAVEN_LIMITS.sourceMarkdownChars) {
+    throw new RavenTypeError('limit-exceeded', 'source.representation.markdown must be at most ' + RAVEN_LIMITS.sourceMarkdownChars + ' characters')
+  }
+  if (resource.origin !== 'web' && markdown === undefined) {
+    throw new RavenTypeError('invalid-value', 'a non-web Markdown representation must include its exact markdown bytes')
+  }
+  if (resource.origin !== 'web' && inspectionCallId === undefined) {
+    throw new RavenTypeError('invalid-value', 'a non-web Markdown representation must name its Harness inspectionCallId')
+  }
+  if (resource.origin === 'web' && coverage !== 'unknown') {
+    throw new RavenTypeError('invalid-value', 'web representation coverage is determined by re-fetch and must be unknown at registration')
+  }
+  if (resource.origin === 'web' && inspectionCallId !== undefined) {
+    throw new RavenTypeError('invalid-value', 'web Sources are independently re-fetched and must not claim an inspectionCallId')
+  }
+  const mediaType = resource.mediaType?.split(';', 1)[0]?.trim().toLowerCase()
+  if (derivation === 'original' && mediaType !== 'text/markdown') {
+    throw new RavenTypeError('invalid-value', 'an original Markdown representation requires resource.mediaType=text/markdown')
+  }
+  return {
+    format: 'markdown',
+    derivation,
+    coverage,
+    producedBy,
+    ...(inspectionCallId === undefined ? {} : { inspectionCallId }),
+    ...(markdown === undefined ? {} : { markdown }),
+  }
+}
+
+function parseSourceResource(input: Record<string, unknown>): {
+  resource: RavenSourceResource
+  representation: RavenSourceRepresentation | null
+  url: string
+} {
+  if (input.resource === undefined) {
+    const url = canonicalUri(input.url, 'source.url', 'web')
+    return {
+      url,
+      resource: { origin: 'web', uri: url },
+      representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
+    }
+  }
+  if (!Object.hasOwn(input, 'representation')) {
+    throw new RavenTypeError('invalid-value', 'a unified Source must provide representation (or null on conversion failure)')
+  }
+  const raw = record(input.resource, 'source.resource')
+  assertOnlyKeys(raw, ['origin', 'uri', 'mediaType', 'sourceName'], 'source.resource')
+  const origin = member<SourceOrigin>(raw.origin, SOURCE_ORIGINS, 'source.resource.origin')
+  const uri = canonicalUri(raw.uri, 'source.resource.uri', origin)
+  const mediaType = optionalBoundedText(raw.mediaType, 'source.resource.mediaType', RAVEN_LIMITS.sourceMediaTypeChars)
+  const sourceName = optionalBoundedText(raw.sourceName, 'source.resource.sourceName', RAVEN_LIMITS.sourceNameChars)
+  if ((origin === 'llm-wiki' || origin === 'mcp') && sourceName === undefined) {
+    throw new RavenTypeError('invalid-value', 'source.resource.sourceName is required for ' + origin + ' Sources')
+  }
+  if ((origin === 'web' || origin === 'local') && sourceName !== undefined) {
+    throw new RavenTypeError('invalid-value', 'source.resource.sourceName is not valid for ' + origin + ' Sources')
+  }
+  if (origin === 'mcp' && new URL(uri).hostname !== sourceName) {
+    throw new RavenTypeError('invalid-value', 'an MCP resource URI authority must equal source.resource.sourceName')
+  }
+  if (origin === 'llm-wiki' && new URL(uri).protocol === 'llm-wiki:' && new URL(uri).hostname !== sourceName) {
+    throw new RavenTypeError('invalid-value', 'an llm-wiki URI authority must equal source.resource.sourceName')
+  }
+  const url = input.url === undefined ? uri : canonicalUri(input.url, 'source.url', origin)
+  if (url !== uri) throw new RavenError('evidence-conflict', 'source.url must equal source.resource.uri')
+  const resource: RavenSourceResource = {
+    origin,
+    uri,
+    ...(mediaType === undefined ? {} : { mediaType }),
+    ...(sourceName === undefined ? {} : { sourceName }),
+  }
+  return { resource, representation: parseRepresentation(input.representation, resource), url }
+}
+
+const SOURCE_POLICY_KEYS = [
+  'allowedWebHosts', 'blockedWebHosts', 'preferPrimary', 'localRoots', 'llmWikiRoots',
+  'includedMcpSources', 'excludedMcpSources',
+] as const
+
+function policyStrings(value: unknown, label: string, transform: (value: string) => string = value => value): string[] {
+  if (!Array.isArray(value)) throw new RavenTypeError('invalid-value', label + ' must be an array')
+  if (value.length > RAVEN_LIMITS.sourcePolicyItems) {
+    throw new RavenTypeError('limit-exceeded', label + ' may contain at most ' + RAVEN_LIMITS.sourcePolicyItems + ' items')
+  }
+  const parsed = value.map((item, index) => transform(boundedText(item, label + '[' + index + ']', RAVEN_LIMITS.sourcePolicyStringChars)))
+  if (new Set(parsed).size !== parsed.length) throw new RavenTypeError('invalid-value', label + ' must not contain duplicates')
+  return parsed
+}
+
+function policyHost(value: string): string {
+  const host = value.toLowerCase()
+  let parsed: URL
+  try {
+    parsed = new URL('https://' + host)
+  } catch {
+    throw new RavenTypeError('invalid-value', 'invalid Source Policy web host: ' + JSON.stringify(value))
+  }
+  if (parsed.hostname !== host || parsed.port !== '' || parsed.pathname !== '/' || parsed.search !== '' || parsed.hash !== '') {
+    throw new RavenTypeError('invalid-value', 'Source Policy web hosts must be bare host names: ' + JSON.stringify(value))
+  }
+  return host
+}
+
+function policyRoot(origin: 'local' | 'llm-wiki'): (value: string) => string {
+  return value => canonicalUri(value, 'Source Policy root', origin)
+}
+
+function parseSourcePolicy(value: unknown, base: RavenSourcePolicy, label = 'sourcePolicy'): RavenSourcePolicy {
+  if (value === undefined) return base
+  const input = record(value, label)
+  assertOnlyKeys(input, SOURCE_POLICY_KEYS, label)
+  const next: RavenSourcePolicy = {
+    allowedWebHosts: input.allowedWebHosts === undefined ? base.allowedWebHosts : policyStrings(input.allowedWebHosts, label + '.allowedWebHosts', policyHost),
+    blockedWebHosts: input.blockedWebHosts === undefined ? base.blockedWebHosts : policyStrings(input.blockedWebHosts, label + '.blockedWebHosts', policyHost),
+    preferPrimary: input.preferPrimary === undefined ? base.preferPrimary : (() => {
+      if (typeof input.preferPrimary !== 'boolean') throw new RavenTypeError('invalid-value', label + '.preferPrimary must be a boolean')
+      return input.preferPrimary
+    })(),
+    localRoots: input.localRoots === undefined ? base.localRoots : policyStrings(input.localRoots, label + '.localRoots', policyRoot('local')),
+    llmWikiRoots: input.llmWikiRoots === undefined ? base.llmWikiRoots : policyStrings(input.llmWikiRoots, label + '.llmWikiRoots', policyRoot('llm-wiki')),
+    includedMcpSources: input.includedMcpSources === undefined ? base.includedMcpSources : policyStrings(input.includedMcpSources, label + '.includedMcpSources'),
+    excludedMcpSources: input.excludedMcpSources === undefined ? base.excludedMcpSources : policyStrings(input.excludedMcpSources, label + '.excludedMcpSources'),
+  }
+  if (next.allowedWebHosts.some(host => next.blockedWebHosts.includes(host))) {
+    throw new RavenTypeError('invalid-value', 'sourcePolicy cannot both allow and block the same web host')
+  }
+  if (next.includedMcpSources.some(name => next.excludedMcpSources.includes(name))) {
+    throw new RavenTypeError('invalid-value', 'sourcePolicy cannot both include and exclude the same MCP source')
+  }
+  return next
+}
+
+function hostMatches(host: string, rule: string): boolean {
+  return host === rule || host.endsWith('.' + rule)
+}
+
+function uriWithin(uri: string, roots: readonly string[]): boolean {
+  return roots.some((root) => {
+    if (uri === root) return true
+    const prefix = root.endsWith('/') ? root : root + '/'
+    return uri.startsWith(prefix)
+  })
+}
+
+function sourcePolicyViolation(source: RavenSourceRecord, policy: RavenSourcePolicy): string | undefined {
+  const { origin, uri, sourceName } = source.resource
+  if (origin === 'web') {
+    const host = new URL(uri).hostname.toLowerCase()
+    if (policy.blockedWebHosts.some(rule => hostMatches(host, rule))) return 'web host ' + host + ' is blocked'
+    if (policy.allowedWebHosts.length > 0 && !policy.allowedWebHosts.some(rule => hostMatches(host, rule))) {
+      return 'web host ' + host + ' is outside allowedWebHosts'
+    }
+  }
+  if (origin === 'local') {
+    if (policy.localRoots.length === 0) return 'no localRoots are included by this Task'
+    if (!uriWithin(uri, policy.localRoots)) return 'local resource is outside localRoots'
+  }
+  if (origin === 'llm-wiki') {
+    if (policy.llmWikiRoots.length === 0) return 'no llmWikiRoots are included by this Task'
+    if (!uriWithin(uri, policy.llmWikiRoots)) return 'llm-wiki resource is outside llmWikiRoots'
+  }
+  if (origin === 'mcp') {
+    if (sourceName === undefined) return 'MCP resource has no sourceName'
+    if (policy.includedMcpSources.length === 0 && policy.excludedMcpSources.length === 0) {
+      return 'no MCP sources are included by this Task'
+    }
+    if (policy.excludedMcpSources.includes(sourceName)) return 'MCP source ' + sourceName + ' is excluded'
+    if (policy.includedMcpSources.length > 0 && !policy.includedMcpSources.includes(sourceName)) {
+      return 'MCP source ' + sourceName + ' is outside includedMcpSources'
+    }
+  }
+  return undefined
 }
 
 function stableId(value: unknown, label: string): string {
@@ -292,33 +513,42 @@ function stableId(value: unknown, label: string): string {
   return id
 }
 
+function sourceIdentity(resource: RavenSourceResource): string {
+  return resource.uri
+}
+
 function parseSources(
   value: unknown,
   existing: readonly RavenSourceRecord[],
   inspectedAt: string,
 ): RavenSourceRecord[] {
   const byId = new Map(existing.map(source => [source.sourceId, source]))
-  const idByUrl = new Map(existing.map(source => [source.url, source.sourceId]))
+  const idByIdentity = new Map(existing.map(source => [sourceIdentity(source.resource), source.sourceId]))
   for (const raw of optionalArray(value, 'sources')) {
     const input = record(raw, 'source')
     assertOnlyKeys(input, [
-      'sourceId', 'url', 'title', 'locator', 'excerpt', 'role', 'sourceFamily', 'asOf',
+      'sourceId', 'url', 'resource', 'representation', 'title', 'locator', 'excerpt', 'role', 'sourceFamily', 'asOf',
     ], 'source')
     const sourceId = stableId(input.sourceId, 'source.sourceId')
-    const url = canonicalUrl(input.url)
-    const otherId = idByUrl.get(url)
+    const { resource, representation, url } = parseSourceResource(input)
+    const identity = sourceIdentity(resource)
+    const otherId = idByIdentity.get(identity)
     if (otherId !== undefined && otherId !== sourceId) {
-      throw new RavenError('evidence-conflict', `source URL ${url} is already registered as ${otherId}`)
+      throw new RavenError('evidence-conflict', `source resource ${resource.origin}:${resource.uri} is already registered as ${otherId}`)
     }
     const current = byId.get(sourceId)
-    if (current !== undefined && current.url !== url) {
-      throw new RavenError('evidence-conflict', `source ID ${sourceId} is already bound to ${current.url}`)
+    if (current !== undefined
+      && (sourceIdentity(current.resource) !== identity
+        || JSON.stringify(current.resource) !== JSON.stringify(resource))) {
+      throw new RavenError('evidence-conflict', `source ID ${sourceId} is already bound to ${current.resource.origin}:${current.resource.uri}`)
     }
     const sourceFamily = optionalBoundedText(input.sourceFamily, 'source.sourceFamily', RAVEN_LIMITS.sourceFamilyChars)
     const asOf = optionalBoundedText(input.asOf, 'source.asOf', RAVEN_LIMITS.sourceAsOfChars)
     const next: RavenSourceRecord = {
       sourceId,
       url,
+      resource,
+      representation,
       title: boundedText(input.title, 'source.title', RAVEN_LIMITS.sourceTitleChars),
       locator: boundedText(input.locator, 'source.locator', RAVEN_LIMITS.sourceLocatorChars),
       excerpt: boundedText(input.excerpt, 'source.excerpt', RAVEN_LIMITS.sourceExcerptChars),
@@ -332,6 +562,8 @@ function parseSources(
     }
     if (current !== undefined) {
       const sameEvidence = current.url === next.url
+        && JSON.stringify(current.resource) === JSON.stringify(next.resource)
+        && JSON.stringify(current.representation) === JSON.stringify(next.representation)
         && current.title === next.title
         && current.locator === next.locator
         && current.excerpt === next.excerpt
@@ -371,7 +603,7 @@ function parseSources(
     } else {
       byId.set(sourceId, next)
     }
-    idByUrl.set(url, sourceId)
+    idByIdentity.set(identity, sourceId)
   }
   if (byId.size > RAVEN_LIMITS.sources) {
     throw new RavenError('limit-exceeded', `Raven Task may retain at most ${RAVEN_LIMITS.sources} Sources`)
@@ -576,17 +808,28 @@ function propagateSourceChecks(
 ): { claims: RavenClaimRecord[]; limitations: RavenLimitation[]; droppedLimitations: number } {
   const checkById = new Map(sources.map(source => [source.sourceId, source.check]))
   const propagatedClaims = claims.map((claim): RavenClaimRecord => {
-    if (claim.kind !== 'external'
-      || (claim.disposition !== 'supported' && claim.disposition !== 'qualified')) return claim
+    if (claim.kind !== 'external') return claim
     const hasUsableSupport = claim.sourceIds.some(sourceId => checkById.get(sourceId)?.status === 'reachable')
-    return hasUsableSupport ? claim : { ...claim, disposition: 'deferred' }
+    if (claim.disposition === 'deferred' && claim.deferredFrom !== undefined && hasUsableSupport) {
+      const { deferredFrom, ...restored } = claim
+      return { ...restored, disposition: deferredFrom }
+    }
+    if ((claim.disposition === 'supported' || claim.disposition === 'qualified') && !hasUsableSupport) {
+      return { ...claim, disposition: 'deferred', deferredFrom: claim.disposition }
+    }
+    return claim
   })
   // Total on purpose. This runs on the `complete` failure path, where throwing at
   // the Limitation cap converted an actionable "this Source is broken" result into
   // a contextless throw AND lost the Claim deferrals computed in the same pass —
   // the deferrals being the more valuable half. A cap now drops the record and
   // says so; it never costs the propagation.
-  const alreadyRecorded = new Set(limitations
+  const activeLimitations = limitations.filter((item) => {
+    if (item.kind !== 'source' || item.sourceId === undefined) return true
+    const generated = item.detail.startsWith(`Source ${item.sourceId} failed verification:`)
+    return !generated || checkById.get(item.sourceId)?.status !== 'reachable'
+  })
+  const alreadyRecorded = new Set(activeLimitations
     .filter(item => item.kind === 'source' && item.sourceId !== undefined)
     .map(item => item.sourceId))
   const additions = sources
@@ -598,7 +841,7 @@ function propagateSourceChecks(
       sourceId: source.sourceId,
       detail: `Source ${source.sourceId} failed verification: ${source.check.status === 'unchecked' ? 'unchecked' : source.check.detail ?? source.check.status}`,
     }))
-  const appended = appendLimitations(limitations, additions, createdAt)
+  const appended = appendLimitations(activeLimitations, additions, createdAt)
   return {
     claims: propagatedClaims,
     limitations: appended.limitations,
@@ -706,7 +949,7 @@ function validateArtifactCitations(
     if (!known.has(sourceId)) throw new RavenError('evidence-conflict', `artifact cites unknown source ${sourceId}`)
   }
   const knownUrls = new Set(sources.map(source => source.url))
-  for (const match of citationScannableText(artifact).matchAll(/https?:\/\/[^\s<>\]]+/g)) {
+  for (const match of citationScannableText(artifact).matchAll(/(?:https?|file|llm-wiki|mcp):\/\/[^\s<>\]]+/g)) {
     const rawUrl = match[0].replace(/[),.;!?]+$/, '')
     let url: URL
     try {
@@ -798,21 +1041,23 @@ function validatedVerifierResults(
       }
       statusCode = result.statusCode as number
     }
-    let resolvedUrl: string | undefined
-    if (result.resolvedUrl !== undefined) resolvedUrl = canonicalUrl(result.resolvedUrl)
-    const detail = optionalBoundedText(result.detail, 'source verifier result.detail', RAVEN_LIMITS.limitationDetailChars)
-    if (status !== 'unavailable' && (statusCode === undefined || resolvedUrl === undefined)) {
-      throw new Error(`source verifier protocol omitted HTTP identity for ${sourceId}`)
-    }
-    if (status === 'reachable' && (statusCode === undefined || statusCode < 200 || statusCode >= 400)) {
-      throw new Error(`source verifier protocol marked non-success HTTP status reachable for ${sourceId}`)
-    }
     const requested = requestedById.get(sourceId)
-    if (status === 'reachable'
-      && resolvedUrl !== undefined
-      && requested !== undefined
-      && !sameSourceIdentity(requested.url, resolvedUrl)) {
-      throw new Error(`source verifier protocol marked a cross-host redirect reachable for ${sourceId}`)
+    if (requested === undefined) throw new Error(`source verifier protocol lost request for ${sourceId}`)
+    let resolvedUrl: string | undefined
+    if (result.resolvedUrl !== undefined) resolvedUrl = canonicalSourceUrl(requiredText(result.resolvedUrl, 'source verifier result.resolvedUrl'))
+    const detail = optionalBoundedText(result.detail, 'source verifier result.detail', RAVEN_LIMITS.limitationDetailChars)
+    if (requested.resource.origin === 'web') {
+      if (status !== 'unavailable' && (statusCode === undefined || resolvedUrl === undefined)) {
+        throw new Error(`source verifier protocol omitted HTTP identity for ${sourceId}`)
+      }
+      if (status === 'reachable' && (statusCode === undefined || statusCode < 200 || statusCode >= 400)) {
+        throw new Error(`source verifier protocol marked non-success HTTP status reachable for ${sourceId}`)
+      }
+      if (status === 'reachable' && resolvedUrl !== undefined && !sameSourceIdentity(requested.url, resolvedUrl)) {
+        throw new Error(`source verifier protocol marked a cross-host redirect reachable for ${sourceId}`)
+      }
+    } else if (statusCode !== undefined || resolvedUrl !== undefined) {
+      throw new Error(`source verifier protocol returned HTTP identity for non-web source ${sourceId}`)
     }
     if (status !== 'reachable' && detail === undefined) {
       throw new Error(`source verifier protocol omitted failure detail for ${sourceId}`)
@@ -835,20 +1080,35 @@ async function checkSources(
   verifier: SourceVerifier,
   allSources: readonly RavenSourceRecord[],
   selected: readonly RavenSourceRecord[],
+  policy: RavenSourcePolicy,
   artifactSha256: string,
   checkedAt: string,
-  signal: AbortSignal,
+  execution: RavenExecution,
 ): Promise<{ sources: RavenSourceRecord[]; receipt: RavenVerificationReceipt }> {
+  const signal = execution.signal
   let observed: readonly SourceCheckResult[]
+  const allowed = selected.filter(source => sourcePolicyViolation(source, policy) === undefined)
+  const policyResults: SourceCheckResult[] = selected.flatMap((source) => {
+    const violation = sourcePolicyViolation(source, policy)
+    return violation === undefined ? [] : [{
+      sourceId: source.sourceId,
+      status: 'unavailable' as const,
+      checkedAt,
+      detail: `Task Source Policy excludes ${source.resource.origin} resource ${source.resource.uri}: ${violation}`,
+    }]
+  })
   try {
-    const raw: unknown = await settleWithAbort(verifier.verify(selected.map(source => ({
+    const raw: unknown = await settleWithAbort(verifier.verify(allowed.map(source => ({
       sourceId: source.sourceId,
       url: source.url,
+      resource: source.resource,
+      representation: source.representation,
+      ...(source.inspectionSha256 === undefined ? {} : { inspectionSha256: source.inspectionSha256 }),
       locator: source.locator,
       excerpt: source.excerpt,
-    })), signal), signal)
+    })), signal, execution), signal)
     try {
-      observed = validatedVerifierResults(selected, raw)
+      observed = [...policyResults, ...validatedVerifierResults(allowed, raw)]
     } catch (error) {
       throw new RavenError('verifier-protocol', `source verifier protocol error: ${compactError(error)}`, { cause: error })
     }
@@ -858,12 +1118,12 @@ async function checkSources(
     const detail = message.includes('source verifier protocol')
       ? message
       : `source verifier unavailable: ${message}`
-    observed = selected.map(source => ({
+    observed = [...policyResults, ...allowed.map(source => ({
       sourceId: source.sourceId,
       status: 'unavailable' as const,
       checkedAt,
       detail,
-    }))
+    }))]
   }
   signal.throwIfAborted()
   const byId = new Map(observed.map(result => [result.sourceId, result]))
@@ -880,7 +1140,16 @@ async function checkSources(
           ...(result.resolvedUrl === undefined ? {} : { resolvedUrl: result.resolvedUrl }),
           ...(result.detail === undefined ? {} : { detail: result.detail }),
         }
-    return { ...source, check }
+    const inspectionSha256 = source.resource.origin !== 'web'
+      && source.representation !== null
+      && result?.status === 'reachable'
+      ? sourceInspectionSha256(source.resource, source.representation)
+      : source.inspectionSha256
+    return {
+      ...source,
+      ...(inspectionSha256 === undefined ? {} : { inspectionSha256 }),
+      check,
+    }
   })
   const checks = sources.filter(source => selectedIds.has(source.sourceId)).map(source => source.check)
   const reachable = checks.filter(check => check.status === 'reachable').length
@@ -890,7 +1159,9 @@ async function checkSources(
     sources,
     receipt: {
       verifiedAt: checkedAt,
-      mode: selected.length > 0 && reachable + failed > 0 ? 'remote' : 'structural-only',
+      mode: selected.some(source => source.resource.origin !== 'web')
+        ? 'source'
+        : selected.length > 0 && reachable + failed > 0 ? 'remote' : 'structural-only',
       checked: selected.length,
       reachable,
       failed,
@@ -1063,6 +1334,11 @@ function markdownText(value: string): string {
     .trim()
 }
 
+function sourceProvenance(source: RavenSourceRecord): string {
+  if (source.representation === null) return `${source.resource.origin}; no Markdown representation`
+  return `${source.resource.origin}; ${source.representation.derivation} ${source.representation.coverage} Markdown by ${source.representation.producedBy}`
+}
+
 export function renderArtifact(
   artifact: string,
   sources: readonly RavenSourceRecord[],
@@ -1084,7 +1360,7 @@ export function renderArtifact(
     const lines = used.map((sourceId) => {
       const source = byId.get(sourceId)
       if (source === undefined) throw new Error(`source ${sourceId} disappeared during rendering`)
-      return `- [${sourceId}] [${markdownText(source.title)}](${source.url.replaceAll(')', '%29')}) — ${markdownText(source.locator)}`
+      return `- [${sourceId}] [${markdownText(source.title)}](${source.url.replaceAll(')', '%29')}) — ${markdownText(source.locator)}; ${markdownText(sourceProvenance(source))}`
     })
     sections.push(`## Sources\n${lines.join('\n')}`)
   }
@@ -1200,15 +1476,17 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         if (grounding === 'none' && defaultGrounding(outcome) === 'required') {
           throw new RavenError('invalid-value', `a ${outcome} Task cannot disable its evidence floor; use grounding=optional or start a general-writing Task`)
         }
+        const sourcePolicy = parseSourcePolicy(args.sourcePolicy, EMPTY_SOURCE_POLICY)
         const ordinal = (previous?.ordinal ?? 0) + 1
         const at = options.now()
         const state: RavenTaskState = {
-          schemaVersion: 1,
+          schemaVersion: 2,
           taskId: taskId(execution.sessionId, ordinal),
           ordinal,
           outcome,
           request,
           grounding,
+          sourcePolicy,
           phase: 'active',
           revision: 1,
           steeringRevision: 0,
@@ -1520,11 +1798,42 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         }
         const at = options.now()
         const steeringRevision = state.steeringRevision + 1
+        const sourcePolicy = parseSourcePolicy(args.sourcePolicy, state.sourcePolicy)
+        const sources = args.sourcePolicy === undefined
+          ? state.sources
+          : state.sources.map((source): RavenSourceRecord => {
+              const violation = sourcePolicyViolation(source, sourcePolicy)
+              if (violation === undefined) {
+                const wasPolicyExcluded = source.check.status === 'unavailable'
+                  && source.check.detail?.startsWith('Task Source Policy excludes ') === true
+                return wasPolicyExcluded ? { ...source, check: { status: 'unchecked' } } : source
+              }
+              return {
+                    ...source,
+                    check: {
+                      status: 'unavailable',
+                      checkedAt: at,
+                      detail: `Task Source Policy excludes ${source.resource.origin} resource ${source.resource.uri}: ${violation}`,
+                    },
+                  }
+            })
+        const propagated = args.sourcePolicy === undefined
+          ? { claims: [...state.claims], limitations: [...state.limitations], droppedLimitations: 0 }
+          : propagateSourceChecks(state.claims, state.limitations, sources, at)
         const next: RavenTaskState = {
           ...state,
           revision: state.revision + 1,
           steeringRevision,
-          steering: [...state.steering, { revision: steeringRevision, correction, createdAt: at }],
+          steering: [...state.steering, {
+            revision: steeringRevision,
+            correction,
+            createdAt: at,
+            ...(args.sourcePolicy === undefined ? {} : { sourcePolicy }),
+          }],
+          sourcePolicy,
+          sources,
+          claims: propagated.claims,
+          limitations: propagated.limitations,
           verification: null,
           finalArtifactSha256: null,
           updatedAt: at,
@@ -1533,7 +1842,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           status: 'active',
           state: next,
           message: `Applied Steering Revision ${steeringRevision} to Raven Task ${state.taskId}; continue the same Task.`,
-          issues: [],
+          issues: limitationCapIssue(propagated.droppedLimitations),
         }
       }
 
@@ -1557,9 +1866,10 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           options.sourceVerifier,
           parsedSources,
           relevant,
+          state.sourcePolicy,
           artifactSha256,
           at,
-          execution.signal,
+          execution,
         )
         const unverified = verified.sources.filter(source => relevant.some(candidate => candidate.sourceId === source.sourceId)
           && source.check.status !== 'reachable')
@@ -1601,6 +1911,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           }
         }
         const sources = verified.sources
+        const propagated = propagateSourceChecks(claims, limitations, sources, at)
         const revision = state.revision + 1
         const admitted = admitCheckpoint(state, {
           checkpointId: checkpointId(state.taskId, revision),
@@ -1620,8 +1931,8 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           revision,
           checkpoints: admitted.checkpoints,
           sources,
-          claims,
-          limitations,
+          claims: propagated.claims,
+          limitations: propagated.limitations,
           latestArtifact: artifact,
           verification: null,
           finalArtifactSha256: null,
@@ -1633,9 +1944,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           message: `Published Raven Checkpoint ${admitted.checkpoints.at(-1)?.ordinal ?? 0} for ${state.taskId}; the Task remains active.`,
           issues: [
             ...admitted.issues,
-            ...limitationCapIssue(parsedLimitations.dropped),
+            ...limitationCapIssue(parsedLimitations.dropped + propagated.droppedLimitations),
           ],
-          renderedArtifact: renderArtifact(artifact, sources, claims),
+          renderedArtifact: renderArtifact(artifact, sources, propagated.claims),
           ...(stored.report.changed
             ? {
                 relaidArtifact: {
@@ -1699,9 +2010,10 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           options.sourceVerifier,
           state.sources,
           relevant,
+          state.sourcePolicy,
           artifactSha256,
           at,
-          execution.signal,
+          execution,
         )
         const unusable = verified.sources.filter(source => relevant.some(candidate => candidate.sourceId === source.sourceId)
           && source.check.status !== 'reachable')
@@ -1736,8 +2048,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           }
         }
 
-        const hasDeferredClaims = state.claims.some(claim => claim.disposition === 'deferred')
-        const phase = verified.receipt.unavailable > 0 || state.limitations.length > 0 || hasDeferredClaims
+        const propagated = propagateSourceChecks(state.claims, state.limitations, verified.sources, at)
+        const hasDeferredClaims = propagated.claims.some(claim => claim.disposition === 'deferred')
+        const phase = verified.receipt.unavailable > 0 || propagated.limitations.length > 0 || hasDeferredClaims
           ? 'completed-with-limits'
           : 'completed'
         const revision = state.revision + 1
@@ -1758,6 +2071,8 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           revision,
           checkpoints: admitted.checkpoints,
           sources: verified.sources,
+          claims: propagated.claims,
+          limitations: propagated.limitations,
           latestArtifact: artifact,
           verification: verified.receipt,
           finalArtifactSha256: artifactSha256,
@@ -1773,13 +2088,13 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             ? admitted.issues
             : [
                 ...admitted.issues,
-                ...state.limitations.map(item => item.detail),
+                ...propagated.limitations.map(item => item.detail),
                 ...(verified.receipt.unavailable === 0
                   ? []
                   : [`${verified.receipt.unavailable} Source reference(s) could not be remotely verified`]),
                 ...(hasDeferredClaims ? ['one or more Claims remain deferred'] : []),
               ],
-          renderedArtifact: renderArtifact(artifact, verified.sources, state.claims),
+          renderedArtifact: renderArtifact(artifact, verified.sources, propagated.claims),
         }
       }
 

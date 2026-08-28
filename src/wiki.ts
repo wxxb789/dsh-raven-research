@@ -53,6 +53,16 @@ function page(frontmatter: readonly string[], body: string): string {
   return `---\n${frontmatter.join('\n')}\n---\n${body}`
 }
 
+function markdownText(value: string): string {
+  return value
+    .replace(/([\\`*_[\]{}()#+.!|-])/g, '\\$1')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll(/\s+/g, ' ')
+    .trim()
+}
+
 function blockquote(value: string): string {
   return value.split('\n').map(line => `> ${line}`).join('\n')
 }
@@ -91,40 +101,57 @@ function materialExternal(claims: readonly RavenClaimRecord[]): RavenClaimRecord
 }
 
 function renderRawPage(source: RavenSourceRecord, state: RavenTaskState, at: string): RavenWikiPage {
+  const representation = source.representation === null
+    ? 'unavailable'
+    : `${source.representation.derivation} ${source.representation.coverage} Markdown by ${source.representation.producedBy}`
   const lines = [
-    `# ${source.title}`,
+    `# ${markdownText(source.title)}`,
     '',
     blockquote(source.excerpt),
     '',
-    `- Locator: ${source.locator}`,
+    `- Locator: ${markdownText(source.locator)}`,
     `- Role: ${source.role}`,
+    `- Source origin: ${source.resource.origin}`,
+    `- Original resource: ${markdownText(source.resource.uri)}`,
+    `- Markdown representation: ${markdownText(representation)}`,
+    ...(source.representation?.inspectionCallId === undefined
+      ? []
+      : [`- Inspection call: ${markdownText(source.representation.inspectionCallId)}`]),
     `- Inspected: ${source.inspectedAt}`,
   ]
-  if (source.asOf !== undefined) lines.push(`- As of: ${source.asOf}`)
+  if (source.asOf !== undefined) lines.push(`- As of: ${markdownText(source.asOf)}`)
   if (source.check.status === 'unchecked') {
-    lines.push('- Verification: unverified (Raven never reopened this URL)')
+    lines.push('- Verification: unverified (Raven never checked this excerpt against its Markdown representation)')
   } else {
     lines.push(`- Verification: ${source.check.status} at ${source.check.checkedAt}`)
-    if (source.check.resolvedUrl !== undefined) lines.push(`- Resolved URL: ${source.check.resolvedUrl}`)
-    if (source.check.detail !== undefined) lines.push(`- Detail: ${source.check.detail}`)
+    if (source.check.resolvedUrl !== undefined) lines.push(`- Resolved URL: ${markdownText(source.check.resolvedUrl)}`)
+    if (source.check.detail !== undefined) lines.push(`- Detail: ${markdownText(source.check.detail)}`)
   }
   lines.push(
     '',
     source.check.status === 'reachable'
-      ? `Recorded by Raven Task ${state.taskId}. Excerpt verified against the retrieved body; this page is not a full-page capture.`
-      : `Recorded by Raven Task ${state.taskId}. The excerpt below was NOT confirmed against the retrieved body; do not treat it as verified fact.`,
+      ? `Recorded by Raven Task ${state.taskId}. Excerpt verified against the Source's Markdown representation; this page is not a full-resource capture.`
+      : `Recorded by Raven Task ${state.taskId}. The excerpt below was NOT confirmed against the Source's Markdown representation; do not treat it as verified fact.`,
     '',
   )
   const body = lines.join('\n')
 
   const frontmatter = [
-    `source_url: ${source.url}`,
+    `source_url: ${yamlString(source.url)}`,
+    `source_origin: ${source.resource.origin}`,
+    `source_uri: ${yamlString(source.resource.uri)}`,
+    `representation: ${source.representation?.derivation ?? 'unavailable'}`,
+    `representation_produced_by: ${yamlString(source.representation?.producedBy ?? 'unavailable')}`,
     `ingested: ${at.slice(0, 10)}`,
     `sha256: ${digest(body)}`,
     'capture: excerpt-only',
     `locator: ${yamlString(source.locator)}`,
     `source_role: ${source.role}`,
   ]
+  if (source.representation?.inspectionCallId !== undefined) frontmatter.push(`inspection_call_id: ${yamlString(source.representation.inspectionCallId)}`)
+  if (source.inspectionSha256 !== undefined) frontmatter.push(`inspection_sha256: ${source.inspectionSha256.slice('sha256:'.length)}`)
+  if (source.resource.mediaType !== undefined) frontmatter.push(`source_media_type: ${yamlString(source.resource.mediaType)}`)
+  if (source.resource.sourceName !== undefined) frontmatter.push(`source_name: ${yamlString(source.resource.sourceName)}`)
   if (source.sourceFamily !== undefined) frontmatter.push(`source_family: ${yamlString(source.sourceFamily)}`)
   if (source.asOf !== undefined) frontmatter.push(`as_of: ${yamlString(source.asOf)}`)
   // An unchecked Source must declare itself unverified rather than simply omitting
@@ -184,7 +211,15 @@ limitations or deferred claims is at most \`medium\`; an unfinished artifact is 
 
 \`\`\`yaml
 ---
-source_url: https://example.com/article
+source_url: https://example.com/article  # legacy compatibility alias for source_uri
+source_origin: web | local | llm-wiki | mcp
+source_uri: "identity of the Original Resource"
+source_media_type: "optional original media type"
+source_name: "required for llm-wiki and MCP"
+representation: original | converted | unavailable
+representation_produced_by: "Harness tool or converter"
+inspection_call_id: "owning session tool receipt for non-web Markdown"
+inspection_sha256: <digest binding Original Resource, Markdown, producer, and call id>
 ingested: YYYY-MM-DD
 sha256: <hex digest of the body below the frontmatter>
 capture: excerpt-only
@@ -196,14 +231,15 @@ verified_at: <timestamp>
 ---
 \`\`\`
 
-\`verification: unverified\` means Raven never reopened \`source_url\`, so the excerpt on that
-page carries no verification receipt at all and \`verified_at\` is absent. It is an explicit
+\`verification: unverified\` means Raven never checked the excerpt against the Source's Markdown
+representation, so the page carries no verification receipt at all and \`verified_at\` is absent. It is an explicit
 negative marker rather than an omission, so an unverified excerpt cannot read as a verified
 capture.
 
 \`capture: excerpt-only\` means the page stores the verified excerpt and its verification
-receipt rather than a full page capture. \`sha256\` therefore detects drift in what was
-stored, not in the upstream document. Re-verify against \`source_url\` when currency matters.
+receipt rather than a full Original Resource or Markdown representation. \`sha256\` therefore
+detects drift in what was stored, not in the Original Resource. Re-inspect \`source_uri\` and
+produce a fresh Markdown representation when currency matters.
 
 \`source_family\` is the originating record and institutional lineage, never the host.
 Several outlets republishing one wire item are one family and are not independent
