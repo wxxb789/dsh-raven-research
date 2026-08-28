@@ -313,6 +313,22 @@ try {
   assert.doesNotMatch(consumerLock, new RegExp(escapeRegExp(root), 'i'), 'consumer lockfile references the source repository')
   assert.doesNotMatch(consumerLock, new RegExp(escapeRegExp(temporary), 'i'), 'consumer lockfile references its machine-specific temp root')
 
+  const packedBaseRoot = join(temporary, 'packed-base')
+  const packedBase = join(packedBaseRoot, 'ptc')
+  const packedInstallerHome = join(temporary, 'installer-home')
+  await mkdir(packedBase, { recursive: true })
+  await writeFile(join(packedBase, 'agent.cordis.yml'), '- id: persona\n  name: packed-test-persona\n')
+  const packedInstaller = await runProcess(pnpmCommand, [
+    ...pnpmPrefix, 'exec', 'dsh-raven-install-preset',
+    '--base-root', packedBaseRoot, '--dry-run',
+  ], {
+    cwd: consumer,
+    timeoutMs: 30_000,
+    capture: true,
+    env: { ...isolatedPnpmEnv(), DSH_CHECKOUT: '', DSH_HOME: packedInstallerHome },
+  })
+  assert.match(packedInstaller.stdout, /would install/, 'packed installer did not compose the supplied PTC base')
+
   await writeFile(join(consumer, 'verify.mjs'), `
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'

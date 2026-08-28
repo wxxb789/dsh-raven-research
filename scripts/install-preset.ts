@@ -68,7 +68,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /** Preset id, and therefore the directory name under the user preset root. */
@@ -215,16 +215,39 @@ interface PackageManifest {
   readonly files?: unknown
 }
 
+function errorCode(error: unknown): unknown {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined
+}
+
+function missingPath(error: unknown): boolean {
+  return errorCode(error) === 'ENOENT' || errorCode(error) === 'ENOTDIR'
+}
+
+async function readPackageManifest(file: string): Promise<PackageManifest> {
+  const text = await readFile(file, 'utf8')
+  try {
+    return JSON.parse(text) as PackageManifest
+  } catch (error) {
+    throw new Error(`invalid package manifest at ${file}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /** Return package-declared directories instead of assuming where a package keeps assets. */
 async function declaredDirectories(manifestFile: string): Promise<string[]> {
-  const manifest = JSON.parse(await readFile(manifestFile, 'utf8')) as PackageManifest
+  const manifest = await readPackageManifest(manifestFile)
   if (!Array.isArray(manifest.files)) return []
   const packageRoot = dirname(manifestFile)
   const directories: string[] = []
   for (const entry of manifest.files) {
     if (typeof entry !== 'string' || /[*?![\]{}]/.test(entry)) continue
     const candidate = join(packageRoot, entry)
-    if ((await stat(candidate).catch(() => undefined))?.isDirectory() === true) directories.push(candidate)
+    try {
+      if ((await stat(candidate)).isDirectory()) directories.push(candidate)
+    } catch (error) {
+      if (!missingPath(error)) throw error
+    }
   }
   return directories
 }
@@ -235,11 +258,11 @@ async function findPackageManifest(root: string, packageName: string): Promise<s
   for (let index = 0; index < queue.length; index += 1) {
     const dir = queue[index]
     if (dir === undefined) continue
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+    const entries = await readdir(dir, { withFileTypes: true })
     for (const entry of entries) {
       if (entry.isFile() && entry.name === 'package.json') {
         const file = join(dir, entry.name)
-        const manifest = JSON.parse(await readFile(file, 'utf8').catch(() => '{}')) as PackageManifest
+        const manifest = await readPackageManifest(file)
         if (manifest.name === packageName) return file
       }
     }
@@ -251,19 +274,37 @@ async function findPackageManifest(root: string, packageName: string): Promise<s
   return undefined
 }
 
-/** Discover every package-owned shipped preset root available to this install. */
-async function discoverShippedPresetRoots(): Promise<string[]> {
+/** Discover package-owned preset roots whose paths survive deployment upgrades. */
+async function discoverShippedPresetRoots(home: string, snapshot: boolean): Promise<string[]> {
   const manifests = new Set<string>()
-  try {
-    manifests.add(createRequire(import.meta.url).resolve(`${AGENT_PRESETS_PACKAGE}/package.json`))
-  } catch {
-    // A source checkout supplied below is the other supported owner.
-  }
   const checkout = process.env.DSH_CHECKOUT
   if (checkout !== undefined && checkout.trim().length > 0) {
-    const manifest = await findPackageManifest(resolve(checkout), AGENT_PRESETS_PACKAGE)
-    if (manifest !== undefined) manifests.add(manifest)
+    const checkoutRoot = resolve(checkout)
+    const manifest = await findPackageManifest(checkoutRoot, AGENT_PRESETS_PACKAGE)
+    if (manifest === undefined) {
+      throw new Error(`${AGENT_PRESETS_PACKAGE} package manifest not found under DSH_CHECKOUT=${checkoutRoot}`)
+    }
+    manifests.add(manifest)
   }
+
+  const stableManifest = join(
+    home, 'profiles', 'node_modules', ...AGENT_PRESETS_PACKAGE.split('/'), 'package.json',
+  )
+  try {
+    const manifest = await readPackageManifest(stableManifest)
+    if (manifest.name === AGENT_PRESETS_PACKAGE) manifests.add(stableManifest)
+  } catch (error) {
+    if (!missingPath(error)) throw error
+  }
+
+  try {
+    const resolvedManifest = createRequire(import.meta.url).resolve(`${AGENT_PRESETS_PACKAGE}/package.json`)
+    const virtualStore = `${sep}node_modules${sep}.pnpm${sep}`
+    if (snapshot || !resolvedManifest.includes(virtualStore)) manifests.add(resolvedManifest)
+  } catch (error) {
+    if (errorCode(error) !== 'MODULE_NOT_FOUND') throw error
+  }
+
   const roots = (await Promise.all([...manifests].map(declaredDirectories))).flat()
   return [...new Set(roots)]
 }
@@ -299,8 +340,9 @@ async function readFirstBase(
     const file = join(dir, COMPOSITION_FILE)
     try {
       return { dir, file, text: await readFile(file, 'utf8') }
-    } catch {
-      continue
+    } catch (error) {
+      if (missingPath(error)) continue
+      throw error
     }
   }
   return undefined
@@ -310,12 +352,14 @@ async function resolveBase(
   base: string,
   baseRoots: readonly string[],
   root: string,
+  home: string,
+  snapshot: boolean,
 ): Promise<{ dir: string, file: string, text: string }> {
   const candidates = baseCandidates(base, baseRoots, root)
   const direct = await readFirstBase(candidates)
   if (direct !== undefined) return direct
 
-  const shippedCandidates = (await discoverShippedPresetRoots()).map(dir => join(dir, base))
+  const shippedCandidates = (await discoverShippedPresetRoots(home, snapshot)).map(dir => join(dir, base))
   candidates.push(...shippedCandidates)
   const shipped = await readFirstBase(shippedCandidates)
   if (shipped !== undefined) return shipped
@@ -526,6 +570,12 @@ export function recordedBaseDigest(text: string): string | undefined {
   return /^# base digest: sha256:([0-9a-f]{64})$/m.exec(text)?.[1]
 }
 
+function needsLegacyDefaultMigration(text: string, base: string): boolean {
+  return base === DEFAULT_BASE
+    && /^# base preset: code$/m.test(text)
+    && /^# This is NOT a snapshot\./m.test(text)
+}
+
 /**
  * Whether a base composition's text contains Raven's own row.
  *
@@ -641,7 +691,8 @@ export function describeSource(snapshot: boolean, base: string, file: string): s
 async function main(): Promise<void> {
   const { base, baseRoots, force, dryRun, snapshot } = parseArguments(process.argv.slice(2))
   const source = shippedPreset()
-  const root = join(harnessHome(), USER_PRESET_DIR)
+  const home = harnessHome()
+  const root = join(home, USER_PRESET_DIR)
   const destination = join(root, PRESET_ID)
 
   const fragment = await Promise.all([
@@ -654,7 +705,12 @@ async function main(): Promise<void> {
     ),
   )
 
-  const resolved = await resolveBase(base, baseRoots, root)
+  const resolved = await resolveBase(base, baseRoots, root, home, snapshot).catch(error =>
+    fail(
+      `failed to resolve base preset "${base}"`,
+      error instanceof Error ? error.message : String(error),
+    ),
+  )
 
   const composition = snapshot
     ? compose(base, resolved.file, resolved.text, fragment[0])
@@ -702,8 +758,14 @@ async function main(): Promise<void> {
   }
 
   if (installed !== undefined && !force) {
+    const previous = await readFile(join(destination, COMPOSITION_FILE), 'utf8').catch(() => '')
     console.error(`raven: ${destination} already exists and differs from what this run would write.`)
-    console.error('raven: refusing to overwrite a modified copy. Re-run with --force to replace it.')
+    if (needsLegacyDefaultMigration(previous, base)) {
+      console.error('raven: it was generated against removed base "code".')
+      console.error('raven: review any local edits, then run `npx dsh-raven-install-preset --force` to migrate it to "ptc".')
+    } else {
+      console.error('raven: refusing to overwrite a modified copy. Re-run with --force to replace it.')
+    }
     process.exit(1)
   }
 

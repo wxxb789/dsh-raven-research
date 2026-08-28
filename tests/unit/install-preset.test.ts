@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -90,6 +90,17 @@ async function writeBase(root: string, id: string): Promise<string> {
   await mkdir(join(root, id), { recursive: true })
   await writeFile(join(root, id, 'agent.cordis.yml'), text)
   return text
+}
+
+async function writePresetOwner(packageRoot: string, id = 'ptc'): Promise<string> {
+  const presets = join(packageRoot, 'presets')
+  await mkdir(packageRoot, { recursive: true })
+  await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-agent-presets',
+    files: ['presets'],
+  }))
+  await writeBase(presets, id)
+  return presets
 }
 
 /**
@@ -399,6 +410,63 @@ describe('installer end to end', () => {
     expect(result.code).toBe(0)
     expect(result.stdout).toContain(join(shippedRoot, 'ptc', 'agent.cordis.yml'))
     expect(await readFile(join(shippedRoot, 'ptc', 'agent.cordis.yml'), 'utf8')).toBe(baseText)
+  }, 30000)
+
+  it('persists the stable deployment package link instead of a pnpm virtual-store target', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
+    const packageRoot = join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-agent-presets')
+    const shippedRoot = await writePresetOwner(packageRoot)
+    const installed = join(home, '.agent-presets', 'raven', 'agent.cordis.yml')
+
+    const result = await install([], { DSH_HOME: home })
+    expect(result.code).toBe(0)
+    const parsed = readLive(await readFile(installed, 'utf8'))
+    expect(parsed.path).toBe(pathToFileURL(join(shippedRoot, 'ptc', 'agent.cordis.yml')).href)
+    expect(parsed.path).not.toContain('/.pnpm/')
+  }, 30000)
+
+  it('fails closed when a discovered package manifest is malformed', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
+    const checkout = await mkdtemp(join(tmpdir(), 'raven-checkout-'))
+    const manifest = join(checkout, 'relocated', 'agent-presets', 'package.json')
+    await mkdir(dirname(manifest), { recursive: true })
+    await writeFile(manifest, '{ not json')
+
+    const result = await install(['--dry-run'], { DSH_HOME: home, DSH_CHECKOUT: checkout })
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain('invalid package manifest')
+    expect(result.stderr).toContain(manifest)
+    await expect(stat(join(home, '.agent-presets', 'raven'))).rejects.toThrow()
+  }, 30000)
+
+  it('gives legacy live installs an explicit code-to-ptc migration', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
+    const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
+    const ptcText = await writeBase(roots, 'ptc')
+    const destination = join(home, '.agent-presets', 'raven')
+    const compositionFile = join(destination, 'agent.cordis.yml')
+    await mkdir(destination, { recursive: true })
+    const legacy = composeLive(
+      'code',
+      join(roots, 'code', 'agent.cordis.yml'),
+      ptcText,
+      ravenRow(),
+    )
+    await writeFile(compositionFile, legacy)
+    await writeFile(join(destination, 'preset.yml'), composeMetadata('name: Raven\ndescription: Test.\n', 'code'))
+
+    const refused = await install(['--base-root', roots], { DSH_HOME: home })
+    expect(refused.code).not.toBe(0)
+    expect(refused.stderr).toContain('generated against removed base "code"')
+    expect(refused.stderr).toContain('dsh-raven-install-preset --force')
+    expect(await readFile(compositionFile, 'utf8')).toBe(legacy)
+
+    const migrated = await install(['--base-root', roots, '--force'], { DSH_HOME: home })
+    expect(migrated.code).toBe(0)
+    const current = await readFile(compositionFile, 'utf8')
+    expect(current).toContain('# base preset: ptc')
+    expect(current).toContain('- id: inherited-ptc')
+    expect(current).not.toContain('- id: inherited-code')
   }, 30000)
 
   it('installs a live include over a WRITABLE base, and leaves it untouched', async () => {

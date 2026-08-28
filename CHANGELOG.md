@@ -22,9 +22,12 @@ tested compatibility family.
   client now consumes Cordis and the official slot observable face directly.
 - Moved Raven prompt guidance after the target's PTC-only rule using the
   exported sparse order table rather than a copied numeric order.
-- Changed the default inherited base preset from `code` to `ptc`, and discover
-  shipped preset roots through `dsh-agent-presets` package manifests rather
-  than a fixed Harness source-tree path.
+- Changed the default inherited base preset from `code` to `ptc`, with an explicit
+  one-time `--force` migration for legacy generated live presets. Shipped roots come
+  from source manifests or the deployment-stable DSH package link rather than a
+  prunable pnpm virtual-store target or fixed Harness source-tree path. Discovery now
+  preserves malformed-manifest and unexpected filesystem failures instead of reporting
+  them as missing presets.
 - Made client bare-import handling generic, then validate emitted requests against the
   target module table; bundle identity and source resolution consume manifest/path-map
   authorities instead of duplicated lists.

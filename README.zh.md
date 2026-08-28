@@ -324,7 +324,14 @@ pnpm add /path/to/dsh-raven-research-<version>.tgz
 pnpm 以完整性哈希标识本地 tarball，因此即便版本号没变也会识别到新字节；若部署仍在用旧构建，执行
 `pnpm install --force`。
 
-默认（实时）安装在 Harness 升级后**无需**重新同步 —— 这正是实时继承的意义所在。仅当你是使用 `--snapshot` 安装时才需要重新运行安装器：
+实时安装通常无需在 Harness 升级后重新同步。本次发布有一个明确例外：旧 Raven 生成文件仍继承已移除的 `code` base，
+必须迁移到 `ptc`。先检查生成 preset 中是否有本地编辑，再运行：
+
+```bash
+npx dsh-raven-install-preset --force
+```
+
+安装器会识别旧生成头部并打印同一迁移命令，不会直接覆盖。`--snapshot` 安装在每次 base 变化后仍需执行其专用同步：
 
 ```bash
 npx dsh-raven-install-preset --snapshot --force

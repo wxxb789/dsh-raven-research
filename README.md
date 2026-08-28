@@ -367,8 +367,16 @@ pnpm add /path/to/dsh-raven-research-<version>.tgz
 pnpm keys a local tarball by its integrity hash, so new bytes are picked up even when the version string is
 unchanged; if a deployment still serves the old build, run `pnpm install --force`.
 
-A default (live) install needs **no** re-sync after a Harness upgrade — that is the point of it. Re-run the
-installer only if you installed with `--snapshot`:
+A live install normally needs no re-sync after a Harness upgrade. This release has one explicit exception: older
+Raven installs generated against the removed `code` base must move to `ptc`. Review any local edits in the generated
+preset, then run:
+
+```bash
+npx dsh-raven-install-preset --force
+```
+
+The installer recognizes that legacy generated header and prints the same migration command without overwriting.
+A `--snapshot` install still needs its snapshot-specific re-sync after every base change:
 
 ```bash
 npx dsh-raven-install-preset --snapshot --force

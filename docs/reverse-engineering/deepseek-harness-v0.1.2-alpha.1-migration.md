@@ -611,7 +611,7 @@ Do **not** treat these as required migrations unless the plugin directly impleme
 - [x] The client bundle wrapper id equals package `name`; baseline externals stay implicit, the build generically preserves bare requests, and `test:dsh` checks every emitted request against the target module table.
 - [x] `settings.plugin.item` renders after an authenticated target boot.
 - [x] No Raven-specific Session event is written through first-party persistence.
-- [x] Target preset values use `ptc`; shipped roots come from package manifests and no stored default names the removed `code` preset.
+- [x] Target preset values use `ptc`; live includes prefer the deployment-stable DSH package link, legacy generated `code` installs receive an explicit one-time `--force` migration, and discovery fails closed on malformed manifests or unexpected filesystem errors.
 - [x] The official `cd5ef814` Host gate passes, including Loader/PTC replay, prompt bounds, client module-table requests, target preset discovery, and standing mount.
 - [x] Packed external install passes through the configured mirror.
 - [x] Authenticated browser boot, card render, save, reset, and page reload smoke pass.
