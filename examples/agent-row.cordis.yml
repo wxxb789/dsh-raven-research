@@ -12,7 +12,7 @@
 # drift silently from the original.
 #
 # `role: agent` registers `raven_task`, the system-prompt section, the pre-step
-# Task context, and the `tools/code-dispatch-log` waterfall — and deliberately
+# Task context, and the `tools/ptc-dispatch-log` waterfall — and deliberately
 # NOT the settings namespace.
 #
 # That omission IS the isolation, not an oversight. A settings namespace is

@@ -11,7 +11,7 @@ Early checkpoints you can steer mid-run · citations verified against the bytes 
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.1-rc.2](https://img.shields.io/badge/harness-0.1.1--rc.2-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Harness 0.1.2-alpha.1](https://img.shields.io/badge/harness-0.1.2--alpha.1-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -24,7 +24,7 @@ English · [中文](README.zh.md)
 </div>
 
 > [!IMPORTANT]
-> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.1-rc.2`, which is itself an RC and ships
+> **v1 developer preview.** Pinned and tested against DeepSeek Harness `0.1.2-alpha.1`, which is an alpha prerelease and ships
 > breaking changes. Not published to npm yet — [install from a checkout](#install).
 
 ## TL;DR
@@ -83,7 +83,7 @@ external/destructive/sensitive side effect.
 - **Contextual guidance.** `guidance: auto` lets the main agent briefly surface one useful Raven option only when the
   current context calls for it — redirecting the work, changing source constraints, pausing/resuming, or preserving a
   result — without tutorials or approval gates. `guidance: off` suppresses those hints; Task behavior is unchanged.
-- **Session-replayable Task book.** Direct calls and Code Mode `run_code` calls persist snapshots through Harness-owned
+- **Session-replayable Task book.** Direct calls and PTC mode `run_code` calls persist snapshots through Harness-owned
   session records, subject to the documented nested-log spill limit — see [One Task book, two durability paths](#one-task-book-two-durability-paths).
 - **One sentence per line.** Every stored Artifact is normalized so each sentence occupies its own line, making a
   **line** the smallest edit unit: a revision diffs as the sentences that actually changed instead of as whole
@@ -111,10 +111,10 @@ you never edit a Harness checkout or a shipped preset.
 
 | Requirement | Version |
 | --- | --- |
-| DeepSeek Harness | `0.1.1-rc.2` (checkout `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`) — see [Version pinning and peer dependencies](#version-pinning-and-peer-dependencies) |
+| DeepSeek Harness | `0.1.2-alpha.1` (checkout `cd5ef8148158c3a752a658978873241fdf8e2bbc`) — see [Version pinning and peer dependencies](#version-pinning-and-peer-dependencies) |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
-| Peer dependencies | Nine `@deepseek-ai/*` packages — the cordis framework, the schema library, and seven Harness Service Definitions (`cordis`, `dsh-agent`, `dsh-llm`, `dsh-session`, `dsh-settings`, `dsh-system-prompt`, `dsh-tools`, `dsh-web`, `schemastery`) — supplied by the Harness deployment, never bundled |
+| Peer dependencies | Eleven `@deepseek-ai/*` packages — the Cordis framework, schema library, Harness Service Definitions, preset owner, and settings-page owner — supplied by the Harness deployment, never bundled |
 
 ### 1. Build and pack
 
@@ -139,7 +139,7 @@ is published, the equivalent dependency is `dsh-raven-research@0.1.0`.
 
 ### 3. Raven is isolated to its own mode
 
-**Raven contributes nothing until a session is started in Raven mode.** In `code` mode, in any other mode, and on
+**Raven contributes nothing until a session is started in Raven mode.** In PTC mode, in any other mode, and on
 every settings page, this package is invisible: no `raven_task` in the tool catalog, no system-prompt section, no
 pre-step Task context, and no settings card. Choosing the mode is the act of asking for Raven, and it is the only
 way to get it.
@@ -148,12 +148,12 @@ That is why installing Raven is **one** step — step 4, the mode — and not tw
 
 | Role | Mounted by | Registers | Isolated? |
 | --- | --- | --- | --- |
-| `role: agent` | the `raven` agent preset, step 4 | `raven_task`, its system-prompt section, the pre-step Task context, and the `tools/code-dispatch-log` waterfall | yes — scoped to the mode |
+| `role: agent` | the `raven` agent preset, step 4 | `raven_task`, its system-prompt section, the pre-step Task context, and the `tools/ptc-dispatch-log` waterfall | yes — scoped to the mode |
 | `role: host` | nothing, by default | the `raven-research` settings namespace (the Settings → Plugins card) and the mount-time capability warning | **no** — a settings page is global |
 
-The `tools/code-dispatch-log` waterfall does **not** need the host plane: event admission extends up the scope
-chain and that event is scoped to `dispatch.agent`, so an agent-scoped listener still receives its own agent's Code
-Mode sub-dispatches. Nothing the agent half needs is process-wide.
+The `tools/ptc-dispatch-log` waterfall does **not** need the host plane: event admission extends up the scope
+chain and that event is scoped to `dispatch.agent`, so an agent-scoped listener still receives its own agent's PTC mode
+sub-dispatches. Nothing the agent half needs is process-wide.
 
 The settings namespace is the one surface that cannot be isolated, because a settings page is a *global* surface: a
 card served from the host plane is visible from every mode, and a card served from inside the preset would appear
@@ -184,7 +184,7 @@ schema defaults stay commented until you change them:
 > [!WARNING]
 > **This breaks isolation, deliberately.** The card is a global page; mounting the host row makes Raven visible
 > from *every* mode's Settings, including modes that will never offer `raven_task`. Do this only if editing YAML is
-> worse for you than a Raven card appearing in `code` mode.
+> worse for you than a Raven card appearing in PTC mode.
 
 `dsh plugin add` will NOT do this for you. Raven declares no `dsh.bundle`, and the CLI says so when you install
 it — *installed as a plain dependency, not a profile layer*. That absence is the isolation; mounting the row is a
@@ -228,14 +228,14 @@ npx dsh-raven-install-preset
 That writes `$DSH_HOME/.agent-presets/raven` (`$DSH_HOME` defaults to `~/.dsh`), the user preset root
 `@deepseek-ai/dsh-agent-presets` already scans.
 
-**The mode INHERITS your deployment's own `code` preset, live.** A preset's `agent.cordis.yml` is the *whole*
+**The mode INHERITS your deployment's own `ptc` preset, live.** A preset's `agent.cordis.yml` is the *whole*
 agent composition — persona, tools, shell, compaction — not an overlay on a default, so a preset containing only
 Raven's row would boot an agent with no persona, no tools and no shell. The installer therefore:
 
-1. resolves a base preset — `--base <id>`, defaulting to `code` — by looking in `$DSH_HOME/.agent-presets`, then
-   each `--base-root <dir>` you pass, then `$DSH_CHECKOUT/apps/cli/config/agent-presets` when `DSH_CHECKOUT` is
-   set. If none of them carries it, the installer **fails naming every location it tried** and tells you to pass
-   `--base-root` pointing at your deployment's `config/agent-presets`, rather than inventing a composition;
+1. resolves a base preset — `--base <id>`, defaulting to `ptc` — by looking in `$DSH_HOME/.agent-presets`, then
+   each `--base-root <dir>` you pass, then the shipped directories declared by the installed
+   `@deepseek-ai/dsh-agent-presets` package or the package found through `$DSH_CHECKOUT`. If none carries it,
+   the installer **fails naming every location it tried** and asks for an explicit `--base-root`;
 2. writes `raven/agent.cordis.yml` as a ~2 KB composition of **two top-level sibling rows**: one
    `cordis:include` row whose `path` is that base composition, and beside it, at the same level of the same
    document, one `dsh-raven-research` row with `config: { role: agent }`. That second row is the whole
@@ -245,12 +245,12 @@ Raven's row would boot an agent with no persona, no tools and no shell. The inst
 
 ```yaml
 # $DSH_HOME/.agent-presets/raven/agent.cordis.yml — the whole file, minus its header
-- id: inherited-code
+- id: inherited-ptc
   name: cordis:include
   config:
     # a file:// URL: the include resolves this with new URL(path, baseUrl) then
     # fileURLToPath, and a bare Windows path like Q:\… parses as a URL *scheme*
-    path: file:///path/to/your/config/agent-presets/code/agent.cordis.yml
+    path: file:///path/to/the/package-declared/preset/root/ptc/agent.cordis.yml
 
 # Raven's row is a SIBLING of the include above — never inside its `patches` list.
 - id: raven-research
@@ -367,8 +367,16 @@ pnpm add /path/to/dsh-raven-research-<version>.tgz
 pnpm keys a local tarball by its integrity hash, so new bytes are picked up even when the version string is
 unchanged; if a deployment still serves the old build, run `pnpm install --force`.
 
-A default (live) install needs **no** re-sync after a Harness upgrade — that is the point of it. Re-run the
-installer only if you installed with `--snapshot`:
+A live install normally needs no re-sync after a Harness upgrade. This release has one explicit exception: older
+Raven installs generated against the removed `code` base must move to `ptc`. Review any local edits in the generated
+preset, then run:
+
+```bash
+npx dsh-raven-install-preset --force
+```
+
+The installer recognizes that legacy generated header and prints the same migration command without overwriting.
+A `--snapshot` install still needs its snapshot-specific re-sync after every base change:
 
 ```bash
 npx dsh-raven-install-preset --snapshot --force
@@ -377,7 +385,7 @@ npx dsh-raven-install-preset --snapshot --force
 Two things to check before upgrading:
 
 - **Harness pin.** Compare `dshRaven.harnessVersion` in `package.json` with the Harness you actually run. Raven is
-  pinned to one RC and does not claim compatibility with untested versions.
+  pinned to one prerelease and does not claim compatibility with untested versions.
 - **Base.** A live install tracks the upgraded base automatically. A `--snapshot` install does not: upgrading the
   *Harness* is exactly the case that leaves the copy inlined into `raven/agent.cordis.yml` stale, and running the
   installer without `--force` reports that before changing anything.
@@ -408,7 +416,7 @@ Two things to check before upgrading:
 3. Optional: drop the `raven-research` section from the user's `settings.yaml`, if you ever opted into the card.
 
 Every Raven registration — the `raven_task` tool, the prompt section, the `agent/pre-step` listener, the
-`tools/code-dispatch-log` listener, the settings section, and the browser card — is disposer-backed and owned by its
+`tools/ptc-dispatch-log` listener, the settings section, and the browser card — is disposer-backed and owned by its
 Cordis fiber, so unloading removes all of it and leaves no orphaned tool or prompt text (`pnpm test:dsh` exercises
 exactly that disposal path against a real Harness Loader). Restart the Harness if your deployment does not reload
 the composition on change.
@@ -527,7 +535,7 @@ and `apply`) and keeps `apply` thin. On the host plane it registers:
 - one `raven_task` model tool through `ctx.tools`;
 - one compact static section through `ctx.systemPrompt`;
 - one `agent/pre-step` listener that puts the live Task book in front of the model before each step;
-- one `tools/code-dispatch-log` listener that keeps a Code Mode Task step durable (see below); and
+- one `tools/ptc-dispatch-log` listener that keeps a PTC mode Task step durable (see below); and
 - the `raven-research` settings section, gated behind `ctx.inject` so a deployment without a settings service simply
   never runs that wiring.
 
@@ -551,30 +559,25 @@ it from the durable records carried by the owning Harness sessions rather than f
 
 - A **direct tool call** carries the Task record as durable result metadata (`tool/result.meta`, kind
   `dsh-raven-research/task-state`).
-- A call made **inside a Code Mode `run_code` program** is a nested sub-call with no result card, so the Harness
+- A call made **inside a PTC mode `run_code` program** is a nested sub-call with no result card, so the Harness
   computes no presentation metadata for it. Raven attaches the same record to the durable copy of that sub-dispatch
-  instead, through the `tools/code-dispatch-log` waterfall, as an HTML comment on the Harness-owned
+  instead, through the `tools/ptc-dispatch-log` waterfall, as an HTML comment on the Harness-owned
   `tool/code-dispatch` event.
 
 > [!IMPORTANT]
-> Raven writes **no plugin-owned session event type**. The Harness persistence read path refuses to interpret any
-> stored log containing an event type it does not know unless the writer marked that event `ignorable`, and
-> `Session.append` gives an out-of-repo plugin no way to set that marker — so a single Code Mode Task step written
-> under a plugin-owned type would make the entire session unloadable. Riding a known event type keeps the session
-> loadable by construction. If a deployment's spill policy replaces an oversized log copy, that one step is simply
-> not restored; the session still loads, and the next direct call republishes the whole record.
+> Raven writes **no plugin-owned session event type**. The Harness persistence read path accepts only its generated
+> known-event set and exposes no event-name registration seam to out-of-repo plugins. A private event would therefore
+> make the session unloadable; riding the existing `tool/code-dispatch` event keeps it loadable by construction. If a
+> spill policy replaces an oversized log copy, that one step is simply not restored, and the next direct call
+> republishes the whole record.
 
-The latest successfully persisted snapshot restores the book when a session resumes. A spilled nested Code Mode log
+The latest successfully persisted snapshot restores the book when a session resumes. A spilled nested PTC mode log
 can omit that one step; the session still loads, and a later direct state-changing call republishes a full snapshot.
 
-Code Mode is the Harness feature whose preset alias in the UI is **PTC mode**, so a deployment running that preset is
-exactly the one this path serves. Raven does not restate that contract locally: `src/plugin.ts` imports
-`CodeDispatchEventData` and `CodeDispatchLog` from `@deepseek-ai/dsh-tools` and pins the event key to the official
-augmented `SessionEventMap`, so an upstream rename or reshape is a **compile error** here rather than a Task step that
-quietly stops being restored. `pnpm test:dsh` closes the other half: it composes the official `run_code` tool over an
-in-process code runtime and runs a real program that calls `raven_task`, so the real bridge runs the real waterfall
-and appends the real `tool/code-dispatch` event — and it asserts the upstream declarations themselves, naming what to
-restate if they ever move.
+Raven derives the fields it reads from the official augmented `SessionEventMap['tool/code-dispatch']` instead of
+copying a payload shape. Because the published compile package predates `PtcDispatchLog`, `pnpm test:dsh` closes the
+runtime half against the exact target checkout: it composes the official `run_code`, executes a real `raven_task`
+sub-call through `tools/ptc-dispatch-log`, and verifies the resulting `tool/code-dispatch` replay.
 
 ### One Task per detected Agent Team
 
@@ -696,7 +699,7 @@ card declining to offer an action whose effect would be silence, and it is repor
 Three honest requirements. The card only appears in a deployment that composes
 `@deepseek-ai/dsh-client-ui-settings-plugins` — the Harness web app bundle does. It injects the browser `locale` and
 `settingsSchema` services, so a client shell without them runs none of this wiring. And the keyed
-`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.1-rc.2`; `0.1.0-rc.6` is still
+`settings.plugin.item` slot it targets is the contract as declared by Harness `0.1.2-alpha.1`; `0.1.0-rc.6` is still
 the newest version published to npm and declares the older list-shaped slot, so Raven vendors the newer shape —
 together with the locale registration signature, the schema service, the describe face, and the card chrome it
 mirrors — and `scripts/verify-dsh.ts` asserts all of them against the Harness checkout under test, which turns any
@@ -875,8 +878,8 @@ difference is worth understanding before reading it as drift.
 "peerDependencies": { "@deepseek-ai/dsh-tools": "*", ... },
 "devDependencies":  { "@deepseek-ai/dsh-tools": "0.1.0-rc.6", ... },
 "dshRaven": {
-  "harnessVersion": "0.1.1-rc.2",
-  "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e"
+  "harnessVersion": "0.1.2-alpha.1",
+  "harnessCommit": "cd5ef8148158c3a752a658978873241fdf8e2bbc"
 }
 ```
 
@@ -896,17 +899,16 @@ pin is absent or malformed. **Read the pin, not the ranges, to know what this bu
 against.**
 
 **The `@deepseek-ai/*` devDependencies are at `0.1.0-rc.6` while the pin says
-`0.1.1-rc.2`, and that gap is expected.** Those devDependencies are the newest Service
+`0.1.2-alpha.1`, and that gap is expected.** Those devDependencies are the newest Service
 Definition packages *published to npm*; the pin targets the *Harness release*, which
 moves ahead of them. The two numbers describe different things and are not required to
-match. Where the gap actually matters — the client slot contract, whose shape changed
-between them — Raven vendors the newer shape in `src/client/slot-contract.ts` and
-`scripts/verify-dsh.ts` asserts it against the pinned checkout, so the drift breaks the
-release gate instead of silently producing a card that never renders. Dependabot is
-configured to ignore `@deepseek-ai/*` so an automated bump cannot move that seam while
-leaving the pin claiming a compatibility that no longer holds.
+match. Where the gap matters, Raven keeps the targeted client shape isolated in
+`src/client/slot-contract.ts`; bundle tests exercise it, and `test:dsh` checks every
+emitted client request against the target's own module table. Authenticated card
+interaction remains an explicit release smoke, never an inferred source-text pass.
+Dependabot ignores `@deepseek-ai/*` so it cannot move the compile seam without the pin.
 
-The honest consequence of `*`: a pre-1.0 RC that reshapes a seam gives **no install-time
+The honest consequence of `*`: a pre-1.0 prerelease that reshapes a seam gives **no install-time
 signal**. The pin plus `pnpm run test:dsh` against a matching checkout is the only thing
 that catches it, which is why that gate is mandatory before a release — see
 [CONTRIBUTING.md](./CONTRIBUTING.md).
@@ -915,12 +917,12 @@ that catches it, which is why that gate is mandatory before a release — see
 
 Raven v1 is pinned and tested against:
 
-- DeepSeek Harness `0.1.1-rc.2`;
-- Harness checkout commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`;
+- DeepSeek Harness `0.1.2-alpha.1`;
+- Harness checkout commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`;
 - Node.js `^22.19.0 || >=24.0.0`; and
 - pnpm `11.21.0`.
 
-DeepSeek Harness is currently an RC and ships breaking changes. Raven does not claim compatibility with untested
+DeepSeek Harness is currently an alpha prerelease and ships breaking changes. Raven does not claim compatibility with untested
 Harness versions.
 
 ## Development
@@ -963,7 +965,7 @@ pnpm check:release
 - returns Draft Variants as candidates only, and reports an unconfigured or unknown route instead of substituting one;
 - inserts exactly one host-plane row from the bundle patch, and registers the settings card under its namespace key;
 - shares one active Task across a detected Agent Team and refuses a teammate's competing Task;
-- restores persisted Code Mode Task snapshots without writing a plugin-owned session event type, while keeping the documented spill limit explicit;
+- restores persisted PTC mode Task snapshots without writing a plugin-owned session event type, while keeping the documented spill limit explicit;
 - injects contextual guidance in `auto`, suppresses it completely in `off`, and preserves the same progressive workflow;
 - exposes a useful intermediate research Artifact before final verification;
 - refines the same Task after a mid-run user correction;
@@ -1010,7 +1012,7 @@ membership — including a failing probe — every Agent owns an independent Tas
 **Does it work without web access?**
 Yes. A grounded Task may use local files, llm-wiki pages, or MCP resources without web access when its Source Policy names those inputs and ordinary Harness tools produce Markdown. Web Claims remain unavailable without a web provider. Any Source lacking verified Markdown is deferred, and a grounding-required Task with zero valid Claims stays active rather than being labeled complete.
 
-**Does it work in Code Mode (`run_code`)?**
+**Does it work in PTC mode (`run_code`)?**
 Yes — see [One Task book, two durability paths](#one-task-book-two-durability-paths).
 
 **How is this different from a "deep research" pipeline?**
@@ -1024,7 +1026,7 @@ No. Raven verifies a bounded excerpt against canonical Markdown and preserves it
 Not yet. Build and pack from a checkout — see [Install](#install).
 
 **Which DeepSeek Harness versions are supported?**
-Only the pinned RC listed under [Compatibility](#compatibility).
+Only the pinned prerelease listed under [Compatibility](#compatibility).
 
 **How do I remove it cleanly?**
 Drop one preset row and one dependency — see [Uninstall](#uninstall). Raven leaves no database, cache, or files
@@ -1040,7 +1042,7 @@ behind.
   classifier.
 - Without a composed Harness `web` capability, web Claims stay deferred; explicitly scoped local, llm-wiki, and MCP Sources remain available through their recorded Markdown.
 - The latest successfully persisted Task snapshot is replayable from the owning Harness session records, including
-  multiple stopped or completed Task identities and later resume of an older Task. An oversized nested Code Mode log
+  multiple stopped or completed Task identities and later resume of an older Task. An oversized nested PTC mode log
   can omit that one step; a later direct mutation republishes a full snapshot. Cross-session projects, reusable corpora,
   and spaced-repetition storage are out of scope; `export` is the supported way to keep work.
 - Raven renders Task progress through ordinary tool results and chat; its only browser surface is the settings card,

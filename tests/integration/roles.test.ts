@@ -76,7 +76,7 @@ function mount(entry?: Record<string, unknown>): Mount {
     get() { return undefined },
     on(event: string, listener: unknown) {
       state.events.push(event)
-      if (event === 'tools/code-dispatch-log') state.shapeLog = listener as DispatchLogListener
+      if (event === 'tools/ptc-dispatch-log') state.shapeLog = listener as DispatchLogListener
       return vi.fn()
     },
     logger(_label: string) {
@@ -120,8 +120,9 @@ describe('Raven mount roles', () => {
     const agent = mount({ role: 'agent' })
     try {
       expect(agent.tools.map(definition => definition.name)).toEqual(['raven_task'])
-      expect(agent.sections).toEqual([expect.objectContaining({ name: 'tool:raven-task', order: 116 })])
-      expect(agent.events).toEqual(['tools/code-dispatch-log', 'agent/pre-step'])
+      expect(agent.sections).toEqual([expect.objectContaining({ name: 'tool:raven-task' })])
+      expect(Number.isFinite(agent.sections[0]?.order)).toBe(true)
+      expect(agent.events).toEqual(['tools/ptc-dispatch-log', 'agent/pre-step'])
       // The settings namespace belongs to the long-lived host plane, never to a
       // preset row that exists only while one session is alive.
       expect(agent.registrations).toHaveLength(0)
@@ -138,7 +139,7 @@ describe('Raven mount roles', () => {
       expect(shape(both)).toEqual({
         tools: ['raven_task'],
         sections: ['tool:raven-task'],
-        events: ['tools/code-dispatch-log', 'agent/pre-step'],
+        events: ['tools/ptc-dispatch-log', 'agent/pre-step'],
         namespaces: 1,
       })
     } finally {
@@ -194,7 +195,7 @@ describe('Raven mount roles', () => {
     }
   })
 
-  it('keeps the Code Mode durability seam on an agent-role mount', async () => {
+  it('keeps the PTC mode durability seam on an agent-role mount', async () => {
     // Event admission extends UP the scope chain, so a listener registered inside an
     // agent scope receives the sub-dispatches of its OWN agent. The durability seam
     // therefore does not need the host plane, and this walks the same listener path
@@ -204,7 +205,7 @@ describe('Raven mount roles', () => {
       const tool = agent.tool
       const shapeLog = agent.shapeLog
       if (tool === undefined || shapeLog === undefined) {
-        throw new Error('an agent-role mount did not register its Code Mode durability path')
+        throw new Error('an agent-role mount did not register its PTC mode durability path')
       }
 
       const events: unknown[] = []

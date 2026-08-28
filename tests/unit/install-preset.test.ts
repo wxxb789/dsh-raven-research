@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -92,6 +92,17 @@ async function writeBase(root: string, id: string): Promise<string> {
   return text
 }
 
+async function writePresetOwner(packageRoot: string, id = 'ptc'): Promise<string> {
+  const presets = join(packageRoot, 'presets')
+  await mkdir(packageRoot, { recursive: true })
+  await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-agent-presets',
+    files: ['presets'],
+  }))
+  await writeBase(presets, id)
+  return presets
+}
+
 /**
  * Read the generated live composition the way its CONTRACT reads: the include
  * row's path, and the patch list as `applyEntryPatches` destructures it.
@@ -137,12 +148,12 @@ function readLive(text: string): {
 }
 
 describe('installer arguments', () => {
-  it('defaults the base to code, because Raven assumes run_code', () => {
-    // The Code Mode durability seam records a Task step taken from inside a
-    // `run_code` program. Under a base presenting no Code Mode it has nothing
-    // to record, so `code` is the base this package is written against.
+  it('defaults the base to ptc, because Raven assumes run_code', () => {
+    // The PTC mode durability seam records a Task step taken from inside a
+    // `run_code` program. Under a base presenting no PTC mode it has nothing
+    // to record, so `ptc` is the base this package is written against.
     expect(parseArguments([])).toEqual({
-      base: 'code',
+      base: 'ptc',
       baseRoots: [],
       force: false,
       dryRun: false,
@@ -177,33 +188,33 @@ describe('installer arguments', () => {
 })
 
 describe('base resolution', () => {
-  it('looks in the user preset root, then each --base-root, then the checkout', () => {
-    process.env.DSH_CHECKOUT = absolute('Q', 'checkout')
-    try {
-      const candidates = baseCandidates('code', [absolute('X', 'roots')], absolute('Y', '.agent-presets'))
-      expect(candidates).toHaveLength(3)
-      expect(candidates[0]).toBe(join(absolute('Y', '.agent-presets'), 'code'))
-      expect(candidates[1]).toBe(join(absolute('X', 'roots'), 'code'))
-      expect(candidates[2]).toBe(join(absolute('Q', 'checkout'), 'apps', 'cli', 'config', 'agent-presets', 'code'))
-    } finally {
-      delete process.env.DSH_CHECKOUT
-    }
+  it('looks in the user root, operator roots, then package-declared shipped roots', () => {
+    const shipped = absolute('Q', 'published-presets')
+    const candidates = baseCandidates(
+      'ptc',
+      [absolute('X', 'roots'), shipped],
+      absolute('Y', '.agent-presets'),
+    )
+    expect(candidates).toEqual([
+      join(absolute('Y', '.agent-presets'), 'ptc'),
+      join(absolute('X', 'roots'), 'ptc'),
+      join(shipped, 'ptc'),
+    ])
   })
 
-  it('omits the checkout candidate when DSH_CHECKOUT is unset', () => {
-    delete process.env.DSH_CHECKOUT
-    expect(baseCandidates('code', [], absolute('Y', '.agent-presets'))).toHaveLength(1)
+  it('uses only the user root when no additional roots are supplied', () => {
+    expect(baseCandidates('ptc', [], absolute('Y', '.agent-presets'))).toHaveLength(1)
   })
 
   it('names every location tried when nothing carries the base', () => {
-    const message = baseNotFound('code', [absolute('A', 'code'), absolute('B', 'code')]).join('\n')
+    const message = baseNotFound('ptc', [absolute('A', 'ptc'), absolute('B', 'ptc')]).join('\n')
     // The operator is the only one who knows where this deployment keeps its
     // presets, so the failure has to be actionable rather than merely true.
-    expect(message).toContain('base preset "code" not found')
-    expect(message).toContain(join(absolute('A', 'code'), 'agent.cordis.yml'))
-    expect(message).toContain(join(absolute('B', 'code'), 'agent.cordis.yml'))
+    expect(message).toContain('base preset "ptc" not found')
+    expect(message).toContain(join(absolute('A', 'ptc'), 'agent.cordis.yml'))
+    expect(message).toContain(join(absolute('B', 'ptc'), 'agent.cordis.yml'))
     expect(message).toContain('--base-root')
-    expect(message).toContain('config/agent-presets')
+    expect(message).toContain('preset roots')
   })
 })
 
@@ -212,13 +223,13 @@ describe('include path', () => {
     // The include resolves `path` with new URL(path, baseUrl) then fileURLToPath.
     // 'Q:\\x\\y.yml' is not relative-resolved: 'Q:' IS the scheme, so the result is
     // 'q:\\x\\y.yml' and fileURLToPath throws ERR_INVALID_URL_SCHEME.
-    const windows = join('Q:', 'presets', 'code', 'agent.cordis.yml')
+    const windows = join('Q:', 'presets', 'ptc', 'agent.cordis.yml')
     expect(includePath(windows)).toBe(pathToFileURL(windows).href)
     expect(includePath(windows).startsWith('file:///')).toBe(true)
   })
 
   it('survives the include\'s own resolution', () => {
-    const file = absolute('Q', 'presets', 'code', 'agent.cordis.yml')
+    const file = absolute('Q', 'presets', 'ptc', 'agent.cordis.yml')
     const baseUrl = pathToFileURL(absolute('Q', 'home', '.agent-presets', 'raven', 'agent.cordis.yml')).href
     // What the include does, in the order it does it.
     expect(fileURLToPath(new URL(includePath(file), baseUrl))).toBe(file)
@@ -229,28 +240,28 @@ describe('include path', () => {
   // the path relative to the base. On POSIX the same string is an ordinary
   // relative path and there is nothing to assert.
   it.skipIf(process.platform !== 'win32')('rejects a bare drive-letter path', () => {
-    const windows = join('Q:', 'presets', 'code', 'agent.cordis.yml')
+    const windows = join('Q:', 'presets', 'ptc', 'agent.cordis.yml')
     const baseUrl = pathToFileURL(join('Q:', 'home', '.agent-presets', 'raven', 'agent.cordis.yml')).href
     expect(() => fileURLToPath(new URL(windows, baseUrl))).toThrow(/scheme/i)
   })
 
   it('round-trips a path containing spaces', () => {
-    const spaced = absolute('Q', 'my presets', 'code', 'agent.cordis.yml')
+    const spaced = absolute('Q', 'my presets', 'ptc', 'agent.cordis.yml')
     const baseUrl = pathToFileURL(absolute('Q', 'home', 'raven', 'agent.cordis.yml')).href
     expect(fileURLToPath(new URL(includePath(spaced), baseUrl))).toBe(spaced)
   })
 })
 
 describe('live composition', () => {
-  const file = join('C:', 'presets', 'code', 'agent.cordis.yml')
+  const file = join('C:', 'presets', 'ptc', 'agent.cordis.yml')
   const baseText = ['# a base comment', '- id: persona', '  name: base-persona', ''].join('\n')
-  const live = composeLive('code', file, baseText, ravenRow())
+  const live = composeLive('ptc', file, baseText, ravenRow())
 
   it('mounts the include and Raven as SIBLING rows, in that order', () => {
     const parsed = readLive(live)
     // Order matters for reading and for prompt assembly: the base first, Raven
     // after it, which is also what the snapshot mode produces.
-    expect(parsed.ids).toEqual(['inherited-code', 'raven-research'])
+    expect(parsed.ids).toEqual(['inherited-ptc', 'raven-research'])
     expect(parsed.names).toEqual(['cordis:include', 'dsh-raven-research'])
     expect(parsed.path).toBe(pathToFileURL(file).href)
   })
@@ -281,13 +292,13 @@ describe('live composition', () => {
   })
 
   it('describes the relationship differently in each mode', () => {
-    expect(describeSource(false, 'code', file)).toContain('LIVE')
-    expect(describeSource(true, 'code', file)).toContain('SNAPSHOT')
+    expect(describeSource(false, 'ptc', file)).toContain('LIVE')
+    expect(describeSource(true, 'ptc', file)).toContain('SNAPSHOT')
   })
 })
 
 describe('base-change detection', () => {
-  const file = join('C:', 'presets', 'code', 'agent.cordis.yml')
+  const file = join('C:', 'presets', 'ptc', 'agent.cordis.yml')
 
   it('recognises a base that carries Raven\'s row, and an ordinary one', () => {
     expect(baseCarriesRavenRow('- id: persona\n  name: base-persona\n')).toBe(false)
@@ -334,7 +345,7 @@ describe('base-change detection', () => {
 describe('snapshot composition', () => {
   const baseText = ['# a base comment', '- id: persona', '  name: base-persona', ''].join('\n')
   const rowText = ['- id: raven-research', '  name: dsh-raven-research', '  config:', '    role: agent', ''].join('\n')
-  const composed = compose('code', join('C:', 'presets', 'code', 'agent.cordis.yml'), baseText, rowText)
+  const composed = compose('ptc', join('C:', 'presets', 'ptc', 'agent.cordis.yml'), baseText, rowText)
 
   it('keeps the base text verbatim, comments included', () => {
     // Concatenation, not a parse: re-serialising the base would throw away the
@@ -353,22 +364,22 @@ describe('snapshot composition', () => {
   })
 
   it('records the base id, its source path and a digest of its bytes', () => {
-    expect(composed).toContain('# base preset: code')
-    expect(composed).toContain('# base source: C:/presets/code/agent.cordis.yml')
+    expect(composed).toContain('# base preset: ptc')
+    expect(composed).toContain('# base source: C:/presets/ptc/agent.cordis.yml')
     expect(recordedBaseDigest(composed)).toBe(digestText(baseText))
   })
 
   it('names the base in the installed roster description, on that line', () => {
-    const metadata = composeMetadata('name: Raven\ndescription: 深度研究。\n', 'code')
+    const metadata = composeMetadata('name: Raven\ndescription: 深度研究。\n', 'ptc')
     // The suffix lands on the description LINE, not merely somewhere in the file.
-    expect(metadata).toContain('description: 深度研究。（组合自 code 基础 preset）')
+    expect(metadata).toContain('description: 深度研究。（组合自 ptc 基础 preset）')
     expect(metadata).toContain('name: Raven')
     // Idempotent: a second pass must not append the suffix twice.
-    expect(composeMetadata(metadata, 'code')).toBe(metadata)
+    expect(composeMetadata(metadata, 'ptc')).toBe(metadata)
   })
 
   it('digests the COMPOSED result, so a changed base is not up to date', () => {
-    const other = compose('code', 'x', `${baseText}# changed\n`, rowText)
+    const other = compose('ptc', 'x', `${baseText}# changed\n`, rowText)
     expect(digestComposed(composed, 'm')).not.toBe(digestComposed(other, 'm'))
   })
 })
@@ -378,16 +389,91 @@ describe('installer end to end', () => {
     const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
     const result = await install([], { DSH_HOME: home })
     expect(result.code).not.toBe(0)
-    expect(result.stderr).toContain('base preset "code" not found')
-    expect(result.stderr).toContain(join(home, '.agent-presets', 'code', 'agent.cordis.yml'))
+    expect(result.stderr).toContain('base preset "ptc" not found')
+    expect(result.stderr).toContain(join(home, '.agent-presets', 'ptc', 'agent.cordis.yml'))
     expect(result.stderr).toContain('--base-root')
   })
+
+  it('discovers shipped presets from their package manifest after a layout move', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
+    const checkout = await mkdtemp(join(tmpdir(), 'raven-checkout-'))
+    const packageRoot = join(checkout, 'relocated', 'agent-presets')
+    const shippedRoot = join(packageRoot, 'shipped-assets')
+    await mkdir(packageRoot, { recursive: true })
+    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-agent-presets',
+      files: ['shipped-assets'],
+    }))
+    const baseText = await writeBase(shippedRoot, 'ptc')
+
+    const result = await install(['--dry-run'], { DSH_HOME: home, DSH_CHECKOUT: checkout })
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain(join(shippedRoot, 'ptc', 'agent.cordis.yml'))
+    expect(await readFile(join(shippedRoot, 'ptc', 'agent.cordis.yml'), 'utf8')).toBe(baseText)
+  }, 30000)
+
+  it('persists the stable deployment package link instead of a pnpm virtual-store target', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
+    const packageRoot = join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-agent-presets')
+    const shippedRoot = await writePresetOwner(packageRoot)
+    const installed = join(home, '.agent-presets', 'raven', 'agent.cordis.yml')
+
+    const result = await install([], { DSH_HOME: home })
+    expect(result.code).toBe(0)
+    const parsed = readLive(await readFile(installed, 'utf8'))
+    expect(parsed.path).toBe(pathToFileURL(join(shippedRoot, 'ptc', 'agent.cordis.yml')).href)
+    expect(parsed.path).not.toContain('/.pnpm/')
+  }, 30000)
+
+  it('fails closed when a discovered package manifest is malformed', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
+    const checkout = await mkdtemp(join(tmpdir(), 'raven-checkout-'))
+    const manifest = join(checkout, 'relocated', 'agent-presets', 'package.json')
+    await mkdir(dirname(manifest), { recursive: true })
+    await writeFile(manifest, '{ not json')
+
+    const result = await install(['--dry-run'], { DSH_HOME: home, DSH_CHECKOUT: checkout })
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain('invalid package manifest')
+    expect(result.stderr).toContain(manifest)
+    await expect(stat(join(home, '.agent-presets', 'raven'))).rejects.toThrow()
+  }, 30000)
+
+  it('gives legacy live installs an explicit code-to-ptc migration', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
+    const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
+    const ptcText = await writeBase(roots, 'ptc')
+    const destination = join(home, '.agent-presets', 'raven')
+    const compositionFile = join(destination, 'agent.cordis.yml')
+    await mkdir(destination, { recursive: true })
+    const legacy = composeLive(
+      'code',
+      join(roots, 'code', 'agent.cordis.yml'),
+      ptcText,
+      ravenRow(),
+    )
+    await writeFile(compositionFile, legacy)
+    await writeFile(join(destination, 'preset.yml'), composeMetadata('name: Raven\ndescription: Test.\n', 'code'))
+
+    const refused = await install(['--base-root', roots], { DSH_HOME: home })
+    expect(refused.code).not.toBe(0)
+    expect(refused.stderr).toContain('generated against removed base "code"')
+    expect(refused.stderr).toContain('dsh-raven-install-preset --force')
+    expect(await readFile(compositionFile, 'utf8')).toBe(legacy)
+
+    const migrated = await install(['--base-root', roots, '--force'], { DSH_HOME: home })
+    expect(migrated.code).toBe(0)
+    const current = await readFile(compositionFile, 'utf8')
+    expect(current).toContain('# base preset: ptc')
+    expect(current).toContain('- id: inherited-ptc')
+    expect(current).not.toContain('- id: inherited-code')
+  }, 30000)
 
   it('installs a live include over a WRITABLE base, and leaves it untouched', async () => {
     const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
     const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
-    const baseText = await writeBase(roots, 'code')
-    const base = join(roots, 'code', 'agent.cordis.yml')
+    const baseText = await writeBase(roots, 'ptc')
+    const base = join(roots, 'ptc', 'agent.cordis.yml')
     const before = await stat(base)
     const installed = join(home, '.agent-presets', 'raven', 'agent.cordis.yml')
 
@@ -418,8 +504,8 @@ describe('installer end to end', () => {
   it('reports a changed base as expected, and keeps the mode up to date', async () => {
     const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
     const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
-    await writeBase(roots, 'code')
-    const base = join(roots, 'code', 'agent.cordis.yml')
+    await writeBase(roots, 'ptc')
+    const base = join(roots, 'ptc', 'agent.cordis.yml')
     await install(['--base-root', roots], { DSH_HOME: home })
 
     // A Harness upgrade: the base moved on. Live inheritance already has it, so
@@ -436,8 +522,8 @@ describe('installer end to end', () => {
   it('warns when the base has been written into with Raven\'s row', async () => {
     const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
     const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
-    await writeBase(roots, 'code')
-    const base = join(roots, 'code', 'agent.cordis.yml')
+    await writeBase(roots, 'ptc')
+    const base = join(roots, 'ptc', 'agent.cordis.yml')
     await install(['--base-root', roots], { DSH_HOME: home })
 
     // The failure detection exists for: a PATCHED composition written back over
@@ -453,8 +539,8 @@ describe('installer end to end', () => {
   it('warns on a FIRST install against an already-damaged base', async () => {
     const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
     const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
-    const baseText = await writeBase(roots, 'code')
-    const base = join(roots, 'code', 'agent.cordis.yml')
+    const baseText = await writeBase(roots, 'ptc')
+    const base = join(roots, 'ptc', 'agent.cordis.yml')
     // Damage that predates any install: there is no recorded digest to compare
     // against, so a check gated on a digest MISMATCH would stay silent here —
     // which is exactly the run where an operator most needs to be told.
@@ -475,7 +561,7 @@ describe('installer end to end', () => {
   it('composes a copy under --snapshot, and --force re-syncs it', async () => {
     const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
     const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
-    const baseText = await writeBase(roots, 'code')
+    const baseText = await writeBase(roots, 'ptc')
     const installed = join(home, '.agent-presets', 'raven', 'agent.cordis.yml')
 
     const first = await install(['--base-root', roots, '--snapshot'], { DSH_HOME: home })
@@ -492,7 +578,7 @@ describe('installer end to end', () => {
     expect(second.stdout).toContain('already up to date')
 
     // A base that moved on: the snapshot did NOT pick it up, and says so.
-    await writeFile(join(roots, 'code', 'agent.cordis.yml'), `${baseText}# a new base row\n`)
+    await writeFile(join(roots, 'ptc', 'agent.cordis.yml'), `${baseText}# a new base row\n`)
     const stale = await install(['--base-root', roots, '--snapshot'], { DSH_HOME: home })
     expect(stale.code).not.toBe(0)
     expect(stale.stdout + stale.stderr).toContain('did NOT pick the change up')
@@ -506,8 +592,8 @@ describe('installer end to end', () => {
   it('changes nothing under --dry-run, in either mode', async () => {
     const home = await mkdtemp(join(tmpdir(), 'raven-home-'))
     const roots = await mkdtemp(join(tmpdir(), 'raven-base-'))
-    const baseText = await writeBase(roots, 'code')
-    const base = join(roots, 'code', 'agent.cordis.yml')
+    const baseText = await writeBase(roots, 'ptc')
+    const base = join(roots, 'ptc', 'agent.cordis.yml')
 
     const live = await install(['--base-root', roots, '--dry-run'], { DSH_HOME: home })
     expect(live.code).toBe(0)

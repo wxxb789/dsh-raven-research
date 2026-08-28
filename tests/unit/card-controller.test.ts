@@ -12,30 +12,6 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
-// `@deepseek-ai/dsh-client-runtime/client` ships as the BROWSER artifact: it
-// registers itself with the shell's module loader on `window` at evaluation
-// time, so importing it under Node throws before a single line of Raven runs.
-// The store it hands back is a three-method snapshot holder, and the controller
-// is what this file tests — so the store is supplied here rather than faked
-// shell, module table and all, which would test the shell instead.
-vi.mock('@deepseek-ai/dsh-client-runtime/client', () => ({
-  createSnapshotStore: (initial: unknown) => {
-    let current = initial
-    const listeners = new Set<() => void>()
-    return {
-      getSnapshot: () => current,
-      set: (next: unknown) => {
-        current = next
-        for (const listener of listeners) listener()
-      },
-      subscribe: (listener: () => void) => {
-        listeners.add(listener)
-        return () => listeners.delete(listener)
-      },
-    }
-  },
-}))
-
 import { RavenCardController } from '../../src/client/controller.js'
 
 import type { RavenCardState } from '../../src/client/card-state.js'
@@ -192,6 +168,31 @@ describe('RavenCardController', () => {
     test.face.discard()
     expect(test.snapshot().dirty).toBe(false)
     expect(test.writes).toHaveLength(0)
+  })
+
+  it('notifies every subscriber, isolates failures, and honors unsubscribe', () => {
+    const test = harness()
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const broken = vi.fn(() => { throw new Error('subscriber failed') })
+    const healthy = vi.fn()
+    const unsubscribeBroken = test.face.hooks.ravenCard.subscribe(broken)
+    const unsubscribeHealthy = test.face.hooks.ravenCard.subscribe(healthy)
+    try {
+      test.face.toggle()
+      expect(test.snapshot().open).toBe(true)
+      expect(broken).toHaveBeenCalledTimes(1)
+      expect(healthy).toHaveBeenCalledTimes(1)
+      expect(reported).toHaveBeenCalledTimes(1)
+
+      unsubscribeHealthy()
+      test.face.toggle()
+      expect(test.snapshot().open).toBe(false)
+      expect(broken).toHaveBeenCalledTimes(2)
+      expect(healthy).toHaveBeenCalledTimes(1)
+    } finally {
+      unsubscribeBroken()
+      reported.mockRestore()
+    }
   })
 
   it('releases both subscriptions on dispose', () => {

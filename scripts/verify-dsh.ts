@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+import { parseConfigFileTextToJson } from 'typescript'
 
 import { runProcess } from './process.js'
 
@@ -16,7 +18,11 @@ const ravenManifest = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8'),
 ) as {
   name: string
-  dsh?: { bundle?: { patch?: string } }
+  devDependencies?: Record<string, string>
+  dsh?: {
+    bundle?: { patch?: string }
+    client?: { external?: unknown }
+  }
   dshRaven?: { harnessVersion?: unknown; harnessCommit?: unknown }
 }
 const EXPECTED_VERSION = ravenManifest.dshRaven?.harnessVersion
@@ -75,7 +81,77 @@ assert.equal(
   + ' Commit, stash, or run `git -C ' + root + ' restore .` before rerunning.',
 )
 
-const source = (path: string) => pathToFileURL(join(root, path)).href
+const targetConfigFile = join(root, 'tsconfig.base.json')
+const parsedTargetConfig = parseConfigFileTextToJson(
+  targetConfigFile,
+  await readFile(targetConfigFile, 'utf8'),
+)
+if (parsedTargetConfig.error !== undefined) {
+  throw new Error(`cannot parse Harness TypeScript path map at ${targetConfigFile}`)
+}
+const sourcePaths = (parsedTargetConfig.config as {
+  compilerOptions?: { paths?: Record<string, unknown> }
+}).compilerOptions?.paths ?? {}
+const sourceDirectory = (packageName: string): string => {
+  const candidates = sourcePaths[packageName]
+  const mapped = Array.isArray(candidates) ? candidates[0] : undefined
+  if (typeof mapped !== 'string') {
+    throw new Error(`Harness TypeScript path map has no source entry for ${packageName}`)
+  }
+  return join(root, mapped)
+}
+const source = (packageName: string): string => pathToFileURL(
+  join(sourceDirectory(packageName), 'index.ts'),
+).href
+const checkoutPackageManifest = async (packageName: string): Promise<{
+  name?: string
+  devDependencies?: Record<string, string>
+}> => {
+  let directory = sourceDirectory(packageName)
+  while (true) {
+    const parsed = await readFile(join(directory, 'package.json'), 'utf8')
+      .then(text => JSON.parse(text) as { name?: string; devDependencies?: Record<string, string> })
+      .catch(() => undefined)
+    if (parsed?.name === packageName) return parsed
+    const parent = dirname(directory)
+    if (parent === directory || !parent.startsWith(root)) {
+      throw new Error(`cannot locate package manifest for ${packageName}`)
+    }
+    directory = parent
+  }
+}
+const major = (specifier: string): string | undefined => /(?:^|[^0-9])(\d+)\./.exec(specifier)?.[1]
+const targetClientWeb = await checkoutPackageManifest('@deepseek-ai/dsh-client-web')
+assert.equal(
+  major(ravenManifest.devDependencies?.react ?? ''),
+  major(targetClientWeb.devDependencies?.react ?? ''),
+  'Raven React development major differs from the target shell package',
+)
+const targetPlatform = await import(pathToFileURL(
+  join(sourceDirectory('@deepseek-ai/dsh-client-web'), 'platform.ts'),
+).href) as {
+  PLATFORM_MODULES: readonly string[]
+  PRELOADED_CLIENT_EXTERNALS: readonly string[]
+}
+const declaredClientExternals = Array.isArray(ravenManifest.dsh?.client?.external)
+  ? ravenManifest.dsh.client.external.filter((value): value is string => typeof value === 'string')
+  : []
+const targetClientModules = new Set([
+  ...targetPlatform.PLATFORM_MODULES,
+  ...targetPlatform.PRELOADED_CLIENT_EXTERNALS,
+  ...declaredClientExternals,
+])
+const clientArtifact = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+const clientRequests = [...clientArtifact.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g)]
+  .map(match => match[1])
+  .filter((value): value is string => value !== undefined)
+assert.ok(clientRequests.length > 0, 'Raven client artifact emits no module-table requests')
+for (const specifier of clientRequests) {
+  assert.ok(
+    targetClientModules.has(specifier),
+    `Raven client requires ${JSON.stringify(specifier)}, which the target module table cannot answer`,
+  )
+}
 const ravenUrl = new URL('../lib/index.js', import.meta.url).href
 const [
   { Context },
@@ -87,13 +163,13 @@ const [
   IncludeModule,
   Raven,
 ] = await Promise.all([
-  import(source('vendor/cordis/src/index.ts')),
-  import(source('packages/core/system-prompt/src/index.ts')),
-  import(source('packages/core/tools/src/index.ts')),
-  import(source('packages/web/web/src/index.ts')),
-  import(source('packages/settings/settings-file/src/index.ts')),
-  import(source('vendor/loader/src/index.ts')),
-  import(source('vendor/include/src/index.ts')),
+  import(source('@deepseek-ai/cordis')),
+  import(source('@deepseek-ai/dsh-system-prompt')),
+  import(source('@deepseek-ai/dsh-tools')),
+  import(source('@deepseek-ai/dsh-web')),
+  import(source('@deepseek-ai/dsh-settings-file')),
+  import(source('@deepseek-ai/cordis-plugin-loader')),
+  import(source('@deepseek-ai/cordis-plugin-include')),
   import(ravenUrl),
 ])
 assert.equal('default' in Raven, false, 'Loader metadata must remain on named exports')
@@ -273,7 +349,7 @@ try {
 
   // Task state has two publication paths because the registry gives a nested
   // sub-call no result card: a direct call carries the record as result metadata,
-  // and a Code Mode dispatch carries it on the durable copy of the sub-dispatch.
+  // and a PTC mode dispatch carries it on the durable copy of the sub-dispatch.
   const direct = await run({ action: 'status', taskId })
   assert.notEqual(direct.meta, undefined, 'a direct call must publish Task state as durable result metadata')
   assert.equal(appended.length, 0, 'a direct call must not duplicate the record its tool result already carries')
@@ -284,18 +360,18 @@ try {
     arguments: { action: 'status', taskId },
     agent,
     signal,
-    parent: Symbol('raven-code-mode'),
+    parent: Symbol('raven-ptc-mode'),
   })
   assert.equal(nested.isError, false)
   assert.equal(nested.meta, undefined, 'the registry computes no presentation metadata for a nested sub-call')
-  // The Harness persistence read path refuses a stored log carrying an event type
-  // it does not know unless the writer marked it ignorable, and `Session.append`
-  // gives a plugin no way to set that marker. Raven therefore appends no event of
-  // its own: one Code Mode step must never make a whole session unloadable.
+  // The Harness persistence read path accepts only generated known event types,
+  // and exposes no registration seam for plugin-owned names. Raven therefore
+  // appends no event of its own: one PTC mode step must never make a whole session
+  // unloadable.
   assert.equal(appended.length, 0, 'Raven must not append a plugin-owned session event type')
 
-  // The record rides the `tools/code-dispatch-log` waterfall instead, on the known
-  // `tool/code-dispatch` event the Code Mode bridge appends. Both halves are driven
+  // The record rides the `tools/ptc-dispatch-log` waterfall instead, on the known
+  // `tool/code-dispatch` event the PTC mode bridge appends. Both halves are driven
   // by the REAL bridge below rather than fabricated here: a gate that hand-builds
   // the waterfall payload AND the settle event restates the same literals the
   // plugin does, so an official rename would pass it.
@@ -373,19 +449,19 @@ try {
   assert.match(offlineCheckpoint, /structural-only/)
 
   // ---------------------------------------------------------------------------
-  // Code Mode durability, driven through the REAL bridge.
+  // PTC mode durability, driven through the REAL bridge.
   //
   // The Harness feature whose UI alias is "PTC mode" is what puts Raven inside a
   // `run_code` program, and it is the one path where a Task step has no result
   // card to ride. Rather than fabricating both sides, this composes the official
-  // `run_code` tool (tools `mode: 'code'`) over an in-process `CodeRuntime` fake —
+  // `run_code` tool (tools `mode: 'ptc'`) over an in-process `CodeRuntime` fake —
   // the same role the Harness's own `code-mode.spec.ts` uses — and lets the REAL
-  // bridge run the REAL `tools/code-dispatch-log` waterfall and append the REAL
+  // bridge run the REAL `tools/ptc-dispatch-log` waterfall and append the REAL
   // `tool/code-dispatch` event. The fake stands in only for the sandboxed
   // execution backend (the published worker runtime needs a built `worker.cjs`
   // this source-loaded composition has no cheap way to produce); every line of
-  // Code Mode logic Raven depends on is the Harness's own.
-  const { CodeRuntime } = await import(source('packages/code-runtime/code-runtime/src/index.ts')) as {
+  // PTC mode logic Raven depends on is the Harness's own.
+  const { CodeRuntime } = await import(source('@deepseek-ai/dsh-code-runtime')) as {
     CodeRuntime: new (ctx: unknown) => { run(request: unknown): Promise<unknown> }
   }
   const ToolsModuleNs = ToolsModule as { default: unknown; RUN_CODE_NAME: string }
@@ -398,15 +474,35 @@ try {
       return this.behavior(request as { bindings: Array<{ functions: Record<string, (a: unknown) => Promise<unknown>> }> })
     }
   }
-  const codeCtx = new Context()
+  const ptcCtx = new Context()
   try {
-    await codeCtx.plugin(SystemPromptModule.default)
-    await codeCtx.plugin(ToolsModuleNs.default, { mode: 'code' })
-    await codeCtx.plugin(BridgeRuntime)
-    await codeCtx.plugin(Raven)
+    await ptcCtx.plugin(SystemPromptModule.default)
+    await ptcCtx.plugin(ToolsModuleNs.default, { mode: 'ptc' })
+    await ptcCtx.plugin(BridgeRuntime)
+    await ptcCtx.plugin(Raven)
+    const firstPartyOrder = (SystemPromptModule as {
+      FIRST_PARTY_SECTION_ORDER: { FILE_REFERENCE: number }
+    }).FIRST_PARTY_SECTION_ORDER
+    ptcCtx.systemPrompt.section({
+      name: 'test:raven-upper-bound',
+      order: firstPartyOrder.FILE_REFERENCE,
+      text: 'upper bound sentinel',
+    })
+    const ptcPrompt = await ptcCtx.systemPrompt.assemble()
+    const sectionNames = ptcPrompt.sections.map((section: { name: string }) => section.name)
+    const ptcOnlyIndex = sectionNames.indexOf('tools:ptc-only')
+    const ravenIndex = sectionNames.indexOf('tool:raven-task')
+    const upperBoundIndex = sectionNames.indexOf('test:raven-upper-bound')
+    assert.notEqual(ptcOnlyIndex, -1, 'the PTC composition omitted its direct-call rule')
+    assert.notEqual(ravenIndex, -1, 'the PTC composition omitted Raven tool guidance')
+    assert.notEqual(upperBoundIndex, -1, 'the prompt-order upper-bound sentinel is missing')
+    assert.ok(
+      ptcOnlyIndex < ravenIndex && ravenIndex < upperBoundIndex,
+      'Raven tool guidance must stay between PTC-only and file-reference prompt order',
+    )
     const bridgeEvents: Array<{ type: string; seq: number; time: number; data: unknown }> = []
     const bridgeAgent = {
-      id: 'raven-dsh-code-mode',
+      id: 'raven-dsh-ptc-mode',
       session: {
         header: { cwd: compositionRoot },
         events: [] as unknown[],
@@ -415,7 +511,7 @@ try {
         },
       },
     }
-    const runtime = codeCtx.codeRuntime as BridgeRuntime
+    const runtime = ptcCtx.codeRuntime as BridgeRuntime
     // The program a model would write: one `raven_task` call from inside `run_code`.
     runtime.behavior = async request => ({
       logs: [],
@@ -423,17 +519,17 @@ try {
         action: 'start',
         outcome: 'research',
         // This composition deliberately mounts no `web` capability — it exists to drive
-        // the Code Mode bridge, not the verification seam — and the engine now refuses to
+        // the PTC mode bridge, not the verification seam — and the engine now refuses to
         // start a grounding-REQUIRED Task where no Source could ever be confirmed. What is
         // under test here is durability of a Task step taken from inside `run_code`, which
         // is independent of the evidence floor, so the Task is started at the floor this
         // composition can actually honour.
         grounding: 'optional',
-        request: 'Verify Code Mode durability through the real bridge.',
+        request: 'Verify PTC mode durability through the real bridge.',
       }),
     })
-    const ran = await codeCtx.tools.execute({
-      callId: 'raven-dsh-code-mode-1',
+    const ran = await ptcCtx.tools.execute({
+      callId: 'raven-dsh-ptc-mode-1',
       name: ToolsModuleNs.RUN_CODE_NAME,
       arguments: { code: '// driven by the gate runtime', description: 'Start a Raven Task from a program' },
       agent: bridgeAgent,
@@ -441,76 +537,49 @@ try {
     })
     assert.equal(ran.isError, false, 'the official run_code bridge must dispatch raven_task from inside a program')
     const settle = bridgeEvents.find(event => event.type === 'tool/code-dispatch')
-    assert.ok(settle, 'the Code Mode bridge no longer appends tool/code-dispatch; Raven restores no Code Mode step from a reloaded session')
-    const settleData = settle.data as { name?: string; subCallId?: string; content?: Array<{ type: string; text?: string }> }
+    assert.ok(settle, 'the PTC mode bridge no longer appends tool/code-dispatch; Raven restores no PTC mode step from a reloaded session')
+    const settleData = settle.data as {
+      name?: string
+      subCallId?: string
+      isError?: boolean
+      content?: Array<{ type: string; text?: string }>
+    }
     assert.equal(settleData.name, 'raven_task', 'the settle event no longer carries the dispatched tool name; readDispatchTaskState() keys on it')
+    assert.equal(typeof settleData.subCallId, 'string', 'the settle event no longer carries its PTC sub-call identity')
+    assert.equal(settleData.isError, false, 'the successful PTC settle event must retain its failure marker')
     const logged = settleData.content ?? []
-    assert.equal(logged.length, 2, 'the real tools/code-dispatch-log waterfall did not attach the Task record next to the rendered content')
+    assert.equal(logged.length, 2, 'the real tools/ptc-dispatch-log waterfall did not attach the Task record next to the rendered content')
     assert.ok(
       String(logged[1]?.text).startsWith('<!-- dsh-raven-research/task-state '),
       'the durable log copy no longer carries the Raven Task record',
     )
-    const codeTaskId = /(rvn-[a-f0-9]{12}-\d+)/.exec(JSON.stringify(logged))?.[1]
-    assert.ok(codeTaskId, 'the logged record must name the Task the program started')
+    const ptcTaskId = /(rvn-[a-f0-9]{12}-\d+)/.exec(JSON.stringify(logged))?.[1]
+    assert.ok(ptcTaskId, 'the logged record must name the Task the program started')
     // A resumed session rebuilds that step from the REAL appended event alone.
-    // The call carries a `parent` token because this composition is `mode: 'code'`:
+    // The call carries a `parent` token because this composition is `mode: 'ptc'`:
     // there, only a transport sub-dispatch may execute a native tool name, and a
     // model-direct call is denied as UNKNOWN_TOOL before any policy runs — which is
-    // exactly the shape a resumed Code Mode session replays anyway.
-    const resumed = await codeCtx.tools.execute({
-      callId: 'raven-dsh-code-mode-2',
+    // exactly the shape a resumed PTC mode session replays anyway.
+    const resumed = await ptcCtx.tools.execute({
+      callId: 'raven-dsh-ptc-mode-2',
       name: 'raven_task',
       arguments: { action: 'status' },
-      agent: { id: 'raven-dsh-code-mode-resumed', session: { events: [settle] } },
+      agent: { id: 'raven-dsh-ptc-mode-resumed', session: { events: [settle] } },
       signal,
-      parent: Symbol('raven-dsh-code-mode-resume'),
+      parent: Symbol('raven-dsh-ptc-mode-resume'),
     })
-    assert.equal(resumed.isError, false, 'a Code Mode Task step must survive a session reload')
+    assert.equal(resumed.isError, false, 'a PTC mode Task step must survive a session reload')
     assert.ok(
-      textOf(resumed as { content: Array<{ type: string; text?: string }> }).includes(codeTaskId),
+      textOf(resumed as { content: Array<{ type: string; text?: string }> }).includes(ptcTaskId),
       'the restored Task must be the one the program worked on',
     )
   } finally {
-    await codeCtx.fiber.dispose()
+    await ptcCtx.fiber.dispose()
   }
 
-  // The official Code Mode contract Raven now INHERITS by type, asserted against
-  // the checkout under test. `src/plugin.ts` imports `CodeDispatchEventData`,
-  // `CodeDispatchLog`, and the augmented `SessionEventMap` key set, so a rename
-  // already breaks the build — these keep the DECLARATIONS those imports resolve
-  // to from being reshaped underneath a published copy that still typechecks.
-  const dispatchTypes = await readFile(join(root, 'packages/core/tools/src/types.ts'), 'utf8')
-  assert.match(
-    dispatchTypes,
-    /declare module '@deepseek-ai\/dsh-session\/types' \{[\s\S]*?interface SessionEventMap \{[\s\S]*?'tool\/code-dispatch': CodeDispatchEventData/,
-    "'tool/code-dispatch' is no longer declared into SessionEventMap as CodeDispatchEventData; CODE_DISPATCH_EVENT in src/plugin.ts must be restated against the new key",
-  )
-  assert.match(
-    dispatchTypes,
-    /export interface CodeDispatchStartEventData \{[\s\S]*?\bsubCallId: CallId[\s\S]*?\bname: string/,
-    'CodeDispatchStartEventData no longer carries subCallId and name; the Raven dispatch reader and log listener key on both',
-  )
-  assert.match(
-    dispatchTypes,
-    /export interface CodeDispatchEventData extends CodeDispatchStartEventData \{[\s\S]*?\bisError: boolean[\s\S]*?\bcontent: ContentBlock\[\]/,
-    'CodeDispatchEventData no longer carries isError and content; readDispatchTaskState() in src/plugin.ts reads content off it',
-  )
-  const toolsIndex = await readFile(join(root, 'packages/core/tools/src/index.ts'), 'utf8')
-  assert.match(
-    toolsIndex,
-    /'tools\/code-dispatch-log'\(this: Scoped<ToolRuntime>, dispatch: CodeDispatchLog, next: \(\) => Promise<ContentBlock\[\]>\): Promise<ContentBlock\[\]>/,
-    'the tools/code-dispatch-log waterfall signature changed; the Raven listener in src/plugin.ts must be restated against the new payload',
-  )
-  assert.match(
-    toolsIndex,
-    /export interface CodeDispatchLog \{[\s\S]*?\bsubCallId: CallId[\s\S]*?\bname: string[\s\S]*?\bisError: boolean[\s\S]*?\bcontent: ContentBlock\[\]/,
-    'CodeDispatchLog no longer carries subCallId, name, isError, and content; the Raven listener pairs its pending record by subCallId and appends to content',
-  )
-  assert.match(
-    toolsIndex,
-    /export \{ CodeRunFailedError, RUN_CODE_NAME \} from '\.\/code-mode\.ts'/,
-    'RUN_CODE_NAME is no longer re-exported from @deepseek-ai/dsh-tools; this gate drives the official run_code tool by that name',
-  )
+  // The real PTC registry above proves the public event, waterfall, dispatch
+  // fields, RUN_CODE_NAME export, prompt ordering, and durable replay together.
+  // No source-layout or declaration-text regex is a second compatibility oracle.
 
   await ctx.loader.remove(includeId)
   assert.equal(ctx.get('tools'), undefined, 'removing the composition must dispose its tool registry and Raven registration')
@@ -531,7 +600,7 @@ try {
   // The overlay still ships, for a deployment that wants the settings card and
   // accepts losing isolation, so it must still compose to exactly one host row
   // when someone applies it deliberately.
-  const { composeEntries, loadOverlayPatches } = await import(source('packages/boot/app-boot/src/index.ts')) as {
+  const { composeEntries, loadOverlayPatches } = await import(source('@deepseek-ai/dsh-app-boot')) as {
     composeEntries(layers: readonly unknown[][]): Array<{ id?: string; name?: string; config?: { role?: string } }>
     loadOverlayPatches(binName: string, file: string): unknown[]
   }
@@ -548,102 +617,10 @@ try {
     'the opt-in overlay must compose to exactly one row naming this package, in the host role only',
   )
 
-  // The browser half's slot contract, checked against the Harness under test.
-  //
-  // `src/client/slot-contract.ts` restates an augmentation Raven cannot import,
-  // and the published copy of the declaring package lags this checkout: at
-  // 0.1.0-rc.6 the slot is `kind: 'list'`, here it is `kind: 'keyed'` with the
-  // settings namespace as the key. A card registered under the wrong shape
-  // compiles and then never renders, with nothing logged anywhere — so the drift
-  // has to break this gate instead of the browser.
-  const slotContract = await readFile(
-    join(root, 'packages/client/ui-settings-plugins/src/client/slot-contract.ts'),
-    'utf8',
-  )
-  assert.match(
-    slotContract,
-    /'settings\.plugin\.item':\s*\{\s*kind:\s*'keyed';\s*scope:\s*'root'/,
-    'the settings.plugin.item slot is no longer a root-scoped keyed slot; src/client/slot-contract.ts must be restated',
-  )
-  assert.match(
-    slotContract,
-    /keyed by the settings namespace/,
-    'the settings.plugin.item key is no longer the settings namespace; the card would register under a key the tab never dispatches',
-  )
-
-  // The card chrome the Harness renders for its own plugins, checked for the two
-  // properties Raven's hand-drawn copy has to share with it. The tab renders
-  // every card into one `<ul>`, so a root element that is not an `<li>` reads as
-  // a different kind of object in that list, and neither the browser nor a test
-  // would ever say so.
-  const harnessCard = await readFile(
-    join(root, 'packages/client/ui-settings-plugins/src/client/PluginCard.tsx'),
-    'utf8',
-  )
-  assert.match(
-    harnessCard,
-    /<li className=\{clsx\(css\.card/,
-    'the Harness plugin card is no longer rooted on an <li>; src/client/Card.tsx must be restated',
-  )
-
-  // The browser locale contract, likewise restated in `src/client/slot-contract.ts`.
-  // Registration takes every shipped locale in ONE call, so a dictionary set that
-  // is missing one is refused outright rather than falling back — and the card
-  // would then render its own dictionary keys at a reader.
-  const localeSettings = await readFile(join(root, 'packages/client/locale/src/locale-settings.ts'), 'utf8')
-  assert.match(
-    localeSettings,
-    /export const LOCALE_IDS = \['zh', 'en'\] as const/,
-    'the shipped locale set changed; RavenLocaleId in src/client/slot-contract.ts must be restated',
-  )
-  const localeRuntime = await readFile(join(root, 'packages/client/locale/src/client/index.ts'), 'utf8')
-  assert.match(
-    localeRuntime,
-    /register<N extends keyof LocaleNamespaceMap & string>\(ns: N, dicts: Record<LocaleId, LocaleDictOf<N>>\)/,
-    'the typed locale registration signature changed; RavenLocaleRuntime in src/client/slot-contract.ts must be restated',
-  )
-
-  // The settings schema service, likewise restated. This is the one that decides
-  // whether a draft is acceptable, so a drift here would not break the card —
-  // it would make it judge values by a contract the Host no longer honours.
-  const schemaService = await readFile(join(root, 'packages/client/ui-settings/src/client/schema.ts'), 'utf8')
-  for (const [member, signature] of [
-    ['rehydrate', /rehydrate\(serialized: unknown\): SchemaNode/],
-    ['validate', /validate\(schema: SchemaNode, draft: unknown\): string \| undefined/],
-    ['nodeAtPath', /nodeAtPath\(root: SchemaNode, path: readonly string\[\]\): SchemaNode \| undefined/],
-    ['hasPath', /hasPath\(value: unknown, path: readonly string\[\]\): boolean/],
-  ] as const) {
-    assert.match(
-      schemaService,
-      signature,
-      `settingsSchema.${member} changed; RavenSettingsSchemaService in src/client/slot-contract.ts must be restated`,
-    )
-  }
-  assert.match(
-    schemaService,
-    /super\(ctx, 'settingsSchema'\)/,
-    'the settings schema service is no longer published as `settingsSchema`; the card injects that name',
-  )
-
-  // The card reads its own registered schema off the shared describe mirror,
-  // because the per-namespace scope snapshot does not carry one.
-  const scopeBinder = await readFile(join(root, 'packages/client/ui-settings/src/client/settings-scope.ts'), 'utf8')
-  assert.match(
-    scopeBinder,
-    /describe\(\): SettingsDescribeFace/,
-    'settingsScope.describe() is gone; the card has no other route to its namespace schema',
-  )
-  const namespaceWire = await readFile(join(root, 'packages/host/apiproxy/src/api/settings.schema.ts'), 'utf8')
-  assert.match(
-    namespaceWire,
-    /settingsNamespaceViewSchema = z\.object\(\{[\s\S]*?\bschema: z\.unknown\(\)/,
-    'settings.describe no longer carries a per-namespace schema envelope; the card could not derive its fields',
-  )
-
   // What the envelope must still contain for the card to derive controls from
   // it: an object root whose properties carry union members as `const` nodes.
   // Asserted against the REAL Config, through the real serialize/rehydrate pair.
-  const { default: Schemastery } = await import(source('vendor/schemastery/src/index.ts')) as {
+  const { default: Schemastery } = await import(source('@deepseek-ai/schemastery')) as {
     default: new (value: unknown) => { type: string; dict?: Record<string, { type: string; list?: { value?: unknown }[] }> }
   }
   const rehydrated = new Schemastery(JSON.parse(JSON.stringify(Raven.Config.toJSON())))
@@ -653,6 +630,24 @@ try {
     ['sentence-per-line', 'as-written'],
     'a union field no longer round-trips its const members; the card derives its choices from them',
   )
+
+  const installerHome = await mkdtemp(join(tmpdir(), 'dsh-raven-installer-'))
+  try {
+    const installed = await runProcess(
+      process.execPath,
+      [fileURLToPath(new URL('../lib/install-preset.js', import.meta.url)), '--dry-run'],
+      {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        timeoutMs: 30_000,
+        capture: true,
+        env: { ...process.env, DSH_CHECKOUT: root, DSH_HOME: installerHome },
+      },
+    )
+    assert.match(installed.stdout, /base preset "ptc" LIVE/, 'installer did not discover the target package-owned PTC preset')
+    assert.match(installed.stdout, /would install/, 'installer dry-run did not reach composition')
+  } finally {
+    await rm(installerHome, { recursive: true, force: true })
+  }
 
   // ── Raven is opt-in by MODE ────────────────────────────────────────────────
   //
@@ -667,13 +662,13 @@ try {
   // is under test is the ROLE SPLIT reaching a real agent scope, and coupling this
   // assertion to the shipped file layout would make it fail for reasons that have
   // nothing to do with it. `tests/unit/bundle.test.ts` owns the shipped files.
-  const PresetsModule = await import(source('packages/preset/agent-presets/src/index.ts')) as { default: unknown }
+  const PresetsModule = await import(source('@deepseek-ai/dsh-agent-presets')) as { default: unknown }
   const presetRoot = join(compositionRoot, 'preset-root')
   await mkdir(join(presetRoot, 'raven'), { recursive: true })
   await writeFile(join(presetRoot, 'raven', 'preset.yml'), 'name: Raven\ndescription: mode probe\n')
   await writeFile(join(presetRoot, 'raven', 'agent.cordis.yml'), [
     '- id: raven-research',
-    "  name: 'test-raven'",
+    `  name: ${JSON.stringify(ravenUrl)}`,
     '  config:',
     "    role: 'agent'",
     '',
@@ -689,6 +684,7 @@ try {
     "  name: 'test-presets'",
     '  config:',
     "    default: 'raven'",
+    '    includeShippedRoot: false',
     '    includeUserRoot: false',
     '    roots:',
     `      - path: ${JSON.stringify(presetRoot)}`,
@@ -710,7 +706,7 @@ try {
       ['test-system-prompt', SystemPromptModule.default],
       ['test-presets', PresetsModule.default],
       ['test-settings-file', SettingsFileModule.default],
-      ['test-raven', Raven],
+      [ravenUrl, Raven],
     ])
     modeCtx.loader.internal = {
       version: 'v2',
@@ -749,7 +745,7 @@ try {
     await rm(modeRoot, { recursive: true, force: true })
   }
 
-  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, prompt, web search discovery, web verification, tool execution, Code Mode state durability through the real run_code bridge, official Code Mode contract inheritance, failure-path recovery hinting, settings exposure, Profile Bundle composition, browser settings-card slot, chrome, and locale contracts, mode-scoped tool registration, and disposal passed`)
+  console.log(`dsh compatibility: ${manifest.version}@${revision.slice(0, 12)}; clean real composition, relative prompt order, web search and verification, tool execution, PTC durability and replay through the real run_code bridge, failure recovery, settings exposure, Profile Bundle composition, preset standing mount, React alignment, mode-scoped registration, and disposal passed`)
 } finally {
   await ctx.fiber.dispose()
   await rm(compositionRoot, { recursive: true, force: true })

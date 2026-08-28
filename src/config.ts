@@ -95,7 +95,7 @@ export const Config: z<RavenConfig> = z.object({
       + 'mount-time capability warnings, so the configuration surface is served by the long-lived host '
       + 'plane and survives between sessions rather than existing only while one session is alive. '
       + '"agent" registers ONLY raven_task, the system-prompt section, the per-step Task context, and '
-      + 'the tools/code-dispatch-log durability listener, so the tool exists exactly inside the agent '
+      + 'the tools/ptc-dispatch-log durability listener, so the tool exists exactly inside the agent '
       + 'scopes a preset row composes. "both" is the single-row deployment, today\'s behaviour, and the '
       + 'default, so a composition entry that names no role keeps working unchanged. Get it wrong and '
       + 'the failure is silent rather than loud: with no host row nothing serves the settings namespace, '

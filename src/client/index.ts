@@ -13,7 +13,7 @@
  * @module
  */
 
-import type { ClientContext, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only: merges `ctx.settingsScope` onto the browser Context. Erased at build,
 // so it never reaches the bundle and never crosses the purity boundary.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -53,7 +53,7 @@ export const inject = ['slots', 'settingsScope', 'settingsSchema', 'locale']
 
 export function apply(ctx: ClientContext): void {
   const controller = new RavenCardController({
-    scope: ctx.settingsScope.bind({ namespace: RAVEN_NAMESPACE }) as SettingsScope<Record<string, unknown>>,
+    scope: ctx.settingsScope.bind({ namespace: RAVEN_NAMESPACE }),
     // `describe()` exists on the running Harness but not in the published
     // typings this package compiles against, so the binder is narrowed to the
     // one method rather than read through its declared type.

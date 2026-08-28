@@ -146,6 +146,7 @@ if (inheritedUserConfig !== undefined && inheritedUserConfig.trim().length > 0) 
 const rootManifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
   devDependencies?: Record<string, string>
   peerDependencies?: Record<string, string>
+  dsh?: { client?: unknown }
 }
 // A Harness deployment supplies Raven's peers; the clean consumer models that by
 // installing them at the versions this repository builds and tests against.
@@ -301,10 +302,32 @@ try {
     })
   }
   const consumerLock = await readFile(join(consumer, 'pnpm-lock.yaml'), 'utf8')
-  assert.doesNotMatch(consumerLock, /[A-Za-z]:[\\/]/, 'consumer lockfile contains a Windows absolute path')
-  assert.doesNotMatch(consumerLock, /(?:file|link):\//, 'consumer lockfile contains a POSIX absolute file/link path')
+  // Require a token boundary before the drive letter so `https:/` is not
+  // misclassified as drive `s:` when a registry records explicit tarball URLs.
+  assert.doesNotMatch(consumerLock, /(?:^|[\s"'(])[A-Za-z]:[\\/]/m, 'consumer lockfile contains a Windows absolute path')
+  const absoluteFileLink = /(?:file|link):(?:[A-Za-z]:)?[\\/]/i
+  assert.match('file:C:\\vendor\\pkg', absoluteFileLink)
+  assert.match('link:D:/cache/pkg', absoluteFileLink)
+  assert.doesNotMatch('https://registry.npmjs.org/pkg.tgz', absoluteFileLink)
+  assert.doesNotMatch(consumerLock, absoluteFileLink, 'consumer lockfile contains an absolute file/link path')
   assert.doesNotMatch(consumerLock, new RegExp(escapeRegExp(root), 'i'), 'consumer lockfile references the source repository')
   assert.doesNotMatch(consumerLock, new RegExp(escapeRegExp(temporary), 'i'), 'consumer lockfile references its machine-specific temp root')
+
+  const packedBaseRoot = join(temporary, 'packed-base')
+  const packedBase = join(packedBaseRoot, 'ptc')
+  const packedInstallerHome = join(temporary, 'installer-home')
+  await mkdir(packedBase, { recursive: true })
+  await writeFile(join(packedBase, 'agent.cordis.yml'), '- id: persona\n  name: packed-test-persona\n')
+  const packedInstaller = await runProcess(pnpmCommand, [
+    ...pnpmPrefix, 'exec', 'dsh-raven-install-preset',
+    '--base-root', packedBaseRoot, '--dry-run',
+  ], {
+    cwd: consumer,
+    timeoutMs: 30_000,
+    capture: true,
+    env: { ...isolatedPnpmEnv(), DSH_CHECKOUT: '', DSH_HOME: packedInstallerHome },
+  })
+  assert.match(packedInstaller.stdout, /would install/, 'packed installer did not compose the supplied PTC base')
 
   await writeFile(join(consumer, 'verify.mjs'), `
 import assert from 'node:assert/strict'
@@ -339,7 +362,11 @@ assert.match(patch, /name: dsh-raven-research/)
 // The browser half survives packing too: the manifest field the module scan
 // matches on, and the artifact the ./client subpath points at. A platform other
 // than 'web' would fail silently in the page, so it is asserted here instead.
-assert.deepEqual(manifest.dsh?.client, { platform: 'web' })
+assert.deepEqual(
+  manifest.dsh?.client,
+  ${JSON.stringify(rootManifest.dsh?.client)},
+  'the packed client declaration differs from the source manifest',
+)
 assert.equal(manifest.exports['./client'], './lib/client.js')
 const client = readFileSync(require_.resolve('dsh-raven-research/client'), 'utf8')
 // Executed rather than string-matched: the bundler is free to reformat the

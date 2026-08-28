@@ -4,24 +4,6 @@ import { runInNewContext } from 'node:vm'
 
 import { describe, expect, it } from 'vitest'
 
-const PACKAGE_NAME = 'dsh-raven-research'
-
-/**
- * Specifiers the browser shell seeds into its module table. Anything else the
- * artifact asks for is a guaranteed runtime throw, and the loader raises it at
- * materialization — long after the page decided the plugin loaded fine.
- */
-const SHELL_MODULES = new Set([
-  'react',
-  'react/jsx-runtime',
-  'react-dom',
-  'react-dom/client',
-  '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-runtime/client',
-])
-
 const artifactPath = fileURLToPath(new URL('../../lib/client.js', import.meta.url))
 let artifact: string
 try {
@@ -34,7 +16,23 @@ try {
 
 const manifest = JSON.parse(
   readFileSync(fileURLToPath(new URL('../../package.json', import.meta.url)), 'utf8'),
-) as { name: string; files: string[]; exports: Record<string, unknown>; dsh?: Record<string, unknown> }
+) as {
+  name: string
+  files: string[]
+  exports: Record<string, unknown>
+  dsh?: { client?: { platform?: string; inject?: string[] } }
+}
+
+function artifactRequests(): Set<string> {
+  const requests = new Set<string>()
+  for (const match of artifact.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g)) {
+    const specifier = match[1]
+    if (specifier !== undefined) requests.add(specifier)
+  }
+  return requests
+}
+
+const ARTIFACT_REQUESTS = artifactRequests()
 
 interface LoadedEntry {
   readonly id: string
@@ -58,7 +56,10 @@ describe('browser half manifest', () => {
   it('declares the web platform, which is what the module scan matches on', () => {
     // Anything but 'web' caches a never-expiring "not a client row" verdict, so
     // the plugin simply does not appear, with no error anywhere.
-    expect(manifest.dsh?.client).toEqual({ platform: 'web' })
+    expect(manifest.dsh?.client).toMatchObject({
+      platform: 'web',
+      inject: ['@deepseek-ai/dsh-client-ui-settings-plugins'],
+    })
   })
 
   it('exports the ./client subpath the scan requires and ships the file', () => {
@@ -72,8 +73,7 @@ describe('browser half artifact', () => {
   it('registers exactly one entry under the PACKAGE name', () => {
     // The shell keys its boot entry on the package name, not on the Cordis
     // plugin name this module exports.
-    expect(loadArtifact().id).toBe(PACKAGE_NAME)
-    expect(manifest.name).toBe(PACKAGE_NAME)
+    expect(loadArtifact().id).toBe(manifest.name)
   })
 
   it('runs no module body until the factory is materialized', () => {
@@ -90,14 +90,12 @@ describe('browser half artifact', () => {
     expect(materialized).toBe(true)
   })
 
-  it('asks only for specifiers the shell module table can answer', () => {
-    const asked = new Set<string>()
-    for (const match of artifact.matchAll(/\brequire\(\s*["']([^"']+)["']\s*\)/g)) {
-      const specifier = match[1]
-      if (specifier !== undefined) asked.add(specifier)
+  it('preserves bare module requests for the exact-target module-table gate', () => {
+    const requests = ARTIFACT_REQUESTS
+    expect(requests.size).toBeGreaterThan(0)
+    for (const specifier of requests) {
+      expect(specifier).not.toMatch(/^(?:\.|\/|[A-Za-z]:[\\/])/)
     }
-    expect(asked.size).toBeGreaterThan(0)
-    for (const specifier of asked) expect(SHELL_MODULES).toContain(specifier)
   })
 
   it('pulls in no Node built-in and no Host-only code', () => {
@@ -112,23 +110,9 @@ describe('browser half artifact', () => {
   })
 
   it('materializes to a Cordis plugin that registers the card under the namespace key', () => {
+    const requests = ARTIFACT_REQUESTS
     const stub = (specifier: string): unknown => {
-      if (specifier === '@deepseek-ai/dsh-client-runtime/client') {
-        // The one shell module the card actually calls into. A bare {} here
-        // would only prove the artifact never used it.
-        return {
-          createSnapshotStore: (initial: unknown) => {
-            let state = initial
-            return {
-              getSnapshot: () => state,
-              subscribe: () => () => undefined,
-              set: (next: unknown) => { state = next },
-              update: () => undefined,
-            }
-          },
-        }
-      }
-      if (SHELL_MODULES.has(specifier)) return {}
+      if (requests.has(specifier)) return {}
       throw new Error(`unexpected specifier ${specifier}`)
     }
     const module = loadArtifact().factory(stub)

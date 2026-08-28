@@ -11,7 +11,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wxxb789/dsh-raven-research/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white)](https://github.com/wxxb789/dsh-raven-research/actions/workflows/ci.yml)
 [![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek_Harness-dsh--plugin-1a7f37?style=flat-square)](https://github.com/topics/dsh-plugin)
-[![Harness 0.1.1-rc.2](https://img.shields.io/badge/harness-0.1.1--rc.2-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
+[![Harness 0.1.2-alpha.1](https://img.shields.io/badge/harness-0.1.2--alpha.1-4c6ef5?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178c6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/node-%E2%89%A5%2022.19-5fa04e?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -24,7 +24,7 @@
 </div>
 
 > [!IMPORTANT]
-> **v1 developer preview。** 锚定并针对 DeepSeek Harness `0.1.1-rc.2` 测试，而 Harness 本身仍是 RC、会有破坏性变更。
+> **v1 developer preview。** 锚定并针对 DeepSeek Harness `0.1.2-alpha.1` 测试，而 Harness 本身是 alpha 预发布版、会有破坏性变更。
 > 尚未发布到 npm —— 请[从源码安装](#安装)。
 
 ## TL;DR
@@ -77,7 +77,7 @@ Raven 改变的是这项工作的形态。
   无法验证的证据会拒绝发布，而不是悄悄降级成"未检查"。
 - **情境提示。** `guidance: auto` 只在相关时让主 Agent 简短提示一项有用能力，例如调整方向、增减来源、暂停/继续或保留
   成果，不会变成教程或审批流程。`guidance: off` 会关闭这些可选提示，但不改变 Task 行为。
-- **可在会话内重放的 Task book。** 直接调用与 Code Mode `run_code` 调用通过 Harness 自有 session record 持久化
+- **可在会话内重放的 Task book。** 直接调用与 PTC mode `run_code` 调用通过 Harness 自有 session record 持久化
   snapshot，并受下文的 nested-log spill 边界约束 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
 - **一句一行。** 每一份存下来的 Artifact 都会被规整成"每个句子独占一行"，让**行**成为最小编辑单元：一次修订
   diff 出来的是真正改动的那些句子，而不是整段重写。该变换是 Markdown 结构感知且幂等的 —— fenced code、表格、
@@ -102,10 +102,10 @@ Raven **尚未发布到 npm**，请从仓库源码安装。下面所有操作都
 
 | 要求 | 版本 |
 | --- | --- |
-| DeepSeek Harness | `0.1.1-rc.2`（checkout `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`）—— 见[版本锚定与 peer dependencies](#版本锚定与-peer-dependencies) |
+| DeepSeek Harness | `0.1.2-alpha.1`（checkout `cd5ef8148158c3a752a658978873241fdf8e2bbc`）—— 见[版本锚定与 peer dependencies](#版本锚定与-peer-dependencies) |
 | Node.js | `^22.19.0 \|\| >=24.0.0` |
 | pnpm | `11.21.0` |
-| Peer dependencies | 九个 `@deepseek-ai/*` 包 —— cordis 框架、schema 库，以及七个 Harness Service Definition（`cordis`、`dsh-agent`、`dsh-llm`、`dsh-session`、`dsh-settings`、`dsh-system-prompt`、`dsh-tools`、`dsh-web`、`schemastery`）—— 由 Harness 部署提供，绝不打包进产物 |
+| Peer dependencies | 十一个 `@deepseek-ai/*` 包 —— Cordis 框架、schema 库、Harness Service Definition、preset owner 与 settings-page owner —— 由 Harness 部署提供，绝不打包进产物 |
 
 ### 1. 构建并打包
 
@@ -129,16 +129,16 @@ tarball 自身没有任何运行时依赖，peer 由部署提供。声明为 pee
 
 ### 3. Raven 隔离在自己的模式中
 
-**在未开启 Raven 模式的会话里，Raven 不提供任何功能。** 在 `code` 模式、在其他任何模式下，以及在所有设置页面上，本包都是不可见的：没有工具目录里的 `raven_task`，没有 system-prompt 段落，没有 pre-step Task 上下文，也没有 settings 卡片。选择该模式就是请求使用 Raven 的动作，也是获取它的唯一方式。
+**在未开启 Raven 模式的会话里，Raven 不提供任何功能。** 在 PTC mode、在其他任何模式下，以及在所有设置页面上，本包都是不可见的：没有工具目录里的 `raven_task`，没有 system-prompt 段落，没有 pre-step Task 上下文，也没有 settings 卡片。选择该模式就是请求使用 Raven 的动作，也是获取它的唯一方式。
 
 这就是为什么安装 Raven 只有 **一个** 步骤 —— 第 4 步，安装模式 —— 而不是两个步骤。Raven 按 `role` 拆分：
 
 | 角色 (Role) | 由谁挂载 | 注册内容 | 是否隔离？ |
 | --- | --- | --- | --- |
-| `role: agent` | 第 4 步的 `raven` agent preset | `raven_task`、系统提示词段落、pre-step Task 上下文以及 `tools/code-dispatch-log` waterfall | **是** —— 作用域限定在模式内 |
+| `role: agent` | 第 4 步的 `raven` agent preset | `raven_task`、系统提示词段落、pre-step Task 上下文以及 `tools/ptc-dispatch-log` waterfall | **是** —— 作用域限定在模式内 |
 | `role: host` | 默认不挂载 | `raven-research` settings 命名空间（Settings → Plugins 卡片）与挂载时的能力告警 | **否** —— 设置页面是全局的 |
 
-`tools/code-dispatch-log` waterfall **并不**需要 host plane：事件准入沿作用域链向上扩散，且该事件的作用域为 `dispatch.agent`，因此限定在 agent 作用域的监听器依然能收到本 agent 自己的 Code Mode 子 dispatch。
+`tools/ptc-dispatch-log` waterfall **并不**需要 host plane：事件准入沿作用域链向上扩散，且该事件的作用域为 `dispatch.agent`，因此限定在 agent 作用域的监听器依然能收到本 agent 自己的 PTC mode 子 dispatch。
 
 settings 命名空间是唯一无法隔离的界面，因为设置页面是一个*全局*界面：由 host plane 提供的卡片在任何模式下都可见，而如果从 preset 内部提供卡片，它会随使用该 preset 的会话出现和消失。隔离与卡片不可兼得 —— 因此隔离优先，**Raven 改为在 preset 行中进行配置**。每个字段都列在那里；对兼容性敏感的网络字段会显式采用更安全的新安装值，其余 schema 默认值则保持注释，直到操作者修改：
 
@@ -162,7 +162,7 @@ settings 命名空间是唯一无法隔离的界面，因为设置页面是一�
 <br>
 
 > [!WARNING]
-> **这会故意破坏隔离。** 卡片是一个全局页面；挂载 host 行会让 Raven 在*每一个*模式的 Settings 中可见，包括那些永远不会提供 `raven_task` 的模式。仅当比起在 `code` 模式中出现 Raven 卡片你更讨厌编辑 YAML 时，才进行此操作。
+> **这会故意破坏隔离。** 卡片是一个全局页面；挂载 host 行会让 Raven 在*每一个*模式的 Settings 中可见，包括那些永远不会提供 `raven_task` 的模式。仅当比起在 PTC mode中出现 Raven 卡片你更讨厌编辑 YAML 时，才进行此操作。
 
 `dsh plugin add` **不会**替你完成这一步。Raven 不声明 `dsh.bundle`，安装时 CLI 会明确告知 —— *installed as a
 plain dependency, not a profile layer*。这个「缺席」正是隔离本身；挂载这一行是一个刻意的动作。
@@ -201,13 +201,13 @@ npx dsh-raven-install-preset
 它会写出 `$DSH_HOME/.agent-presets/raven`（`$DSH_HOME` 默认为 `~/.dsh`），也就是
 `@deepseek-ai/dsh-agent-presets` 本来就会扫描的用户 preset 根目录。
 
-**该模式实时继承（LIVE）部署本身的 `code` preset。** preset 的 `agent.cordis.yml` 是**完整的**
+**该模式实时继承（LIVE）部署本身的 `ptc` preset。** preset 的 `agent.cordis.yml` 是**完整的**
 agent composition —— persona、工具、shell、compaction —— 而不是叠加在某个默认值之上的覆盖层；因此一个只含 Raven
 这一行的 preset，启动出来会是没有 persona、没有工具、没有 shell 的 agent。所以安装器会：
 
-1. 寻找基础 preset（`--base <id>`，默认 `code`）：依次查找 `$DSH_HOME/.agent-presets`、你传入的每个
-   `--base-root <dir>`，以及设置了 `DSH_CHECKOUT` 时的 `$DSH_CHECKOUT/apps/cli/config/agent-presets`。若都没有，
-   安装器会**列出它尝试过的每一个位置**并报错退出，提示你用 `--base-root` 指向部署的 `config/agent-presets`，
+1. 寻找基础 preset（`--base <id>`，默认 `ptc`）：依次查找 `$DSH_HOME/.agent-presets`、你传入的每个
+   `--base-root <dir>`，以及已安装或通过 `DSH_CHECKOUT` 找到的 `@deepseek-ai/dsh-agent-presets` manifest
+   声明的 shipped 目录。若都没有，安装器会**列出它尝试过的每一个位置**并要求显式传入 `--base-root`，
    而不是凭空编造一份 composition；
 2. 把 `raven/agent.cordis.yml` 写成约 2 KB 的 composition，内容是**两个顶层平级行（sibling rows）**：一个
    `cordis:include` 行，其 `path` 为该基础 composition；以及在同一份文档的同一层级、与它并列的一个
@@ -216,12 +216,12 @@ agent composition —— persona、工具、shell、compaction —— 而不是�
 
 ```yaml
 # $DSH_HOME/.agent-presets/raven/agent.cordis.yml — 完整文件（不含头部）
-- id: inherited-code
+- id: inherited-ptc
   name: cordis:include
   config:
     # file:// URL：include 会先用 new URL(path, baseUrl) 再用
     # fileURLToPath 来解析它；像 Q:\… 这样的纯 Windows 路径会被解析为 URL scheme 并引发 ERR_INVALID_URL_SCHEME 报错
-    path: file:///path/to/your/config/agent-presets/code/agent.cordis.yml
+    path: file:///path/to/the/package-declared/preset/root/ptc/agent.cordis.yml
 
 # Raven 的行是上面这个 include 的**平级兄弟行**，绝不能放进它的 `patches` 列表。
 - id: raven-research
@@ -324,7 +324,14 @@ pnpm add /path/to/dsh-raven-research-<version>.tgz
 pnpm 以完整性哈希标识本地 tarball，因此即便版本号没变也会识别到新字节；若部署仍在用旧构建，执行
 `pnpm install --force`。
 
-默认（实时）安装在 Harness 升级后**无需**重新同步 —— 这正是实时继承的意义所在。仅当你是使用 `--snapshot` 安装时才需要重新运行安装器：
+实时安装通常无需在 Harness 升级后重新同步。本次发布有一个明确例外：旧 Raven 生成文件仍继承已移除的 `code` base，
+必须迁移到 `ptc`。先检查生成 preset 中是否有本地编辑，再运行：
+
+```bash
+npx dsh-raven-install-preset --force
+```
+
+安装器会识别旧生成头部并打印同一迁移命令，不会直接覆盖。`--snapshot` 安装在每次 base 变化后仍需执行其专用同步：
 
 ```bash
 npx dsh-raven-install-preset --snapshot --force
@@ -333,7 +340,7 @@ npx dsh-raven-install-preset --snapshot --force
 升级前请确认三件事：
 
 - **Harness 锚定版本。** 比对 `package.json` 里的 `dshRaven.harnessVersion` 与你实际运行的 Harness。Raven 只锚定
-  一个 RC，不宣称兼容未经测试的版本。
+  一个预发布版，不宣称兼容未经测试的版本。
 - **Base 基础。** 实时安装会自动跟踪升级后的基础。`--snapshot` 安装则不会：升级 **Harness** 正是导致内联进
   `raven/agent.cordis.yml` 的拷贝过期的原因，不加 `--force` 运行安装器会在修改任何东西之前进行报告。
 - **配置。** 存在用户 `settings.yaml` 里的 `raven-research` 取值会在重装后保留；preset 的 `config:` 块只是 base 层。
@@ -360,7 +367,7 @@ npx dsh-raven-install-preset --snapshot --force
 
 3. 可选：如果你之前开启过 settings 卡片，从用户的 `settings.yaml` 中删除 `raven-research` 部分。
 
-Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pre-step` 监听器、`tools/code-dispatch-log`
+Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pre-step` 监听器、`tools/ptc-dispatch-log`
 监听器、settings section 以及浏览器卡片 —— 都由 Cordis fiber 持有 disposer，卸载会把它们一并撤销，不会留下孤儿工具
 或残留 prompt 文本（`pnpm test:dsh` 正是针对真实 Harness Loader 验证这条释放路径）。如果你的部署不会在 composition
 变更时重载，请重启 Harness。
@@ -465,7 +472,7 @@ Raven 导出的是普通的 Cordis 插件元数据（`name`、`inject = ['tools'
 - 通过 `ctx.tools` 注册的一个 `raven_task` 模型工具；
 - 通过 `ctx.systemPrompt` 注册的一段紧凑静态 section；
 - 一个 `agent/pre-step` 监听器，在每一步之前把当前 Task book 放到模型面前；
-- 一个 `tools/code-dispatch-log` 监听器，让 Code Mode 中的 Task step 保持持久（见下文）；以及
+- 一个 `tools/ptc-dispatch-log` 监听器，让 PTC mode 中的 Task step 保持持久（见下文）；以及
 - `raven-research` settings section，它挂在 `ctx.inject` 之后，所以没有 settings 服务的部署根本不会执行这段接线。
 
 这个包还附带一个浏览器半边（`dsh.client`，通过 `./client` 导出），它唯一的贡献是在带 key 的
@@ -485,25 +492,21 @@ Raven 按所属 Agent 身份 —— 或成功检测到的 Agent Team 身份 —�
 
 - **直接工具调用**通过持久化的结果元数据携带 Task 记录（`tool/result.meta`，kind 为
   `dsh-raven-research/task-state`）。
-- **Code Mode `run_code` 程序内的调用**是嵌套子调用，没有 result card，Harness 也就不会为它计算 presentation
-  metadata。因此 Raven 改为通过 `tools/code-dispatch-log` 瀑布流，把同一份记录以 HTML 注释的形式附加到 Harness
+- **PTC mode `run_code` 程序内的调用**是嵌套子调用，没有 result card，Harness 也就不会为它计算 presentation
+  metadata。因此 Raven 改为通过 `tools/ptc-dispatch-log` 瀑布流，把同一份记录以 HTML 注释的形式附加到 Harness
   自有的 `tool/code-dispatch` 事件、即该子调度的持久化副本上。
 
 > [!IMPORTANT]
-> Raven **不写任何插件自有的 session event type**。Harness 的持久化读取路径会拒绝解释存档日志中任何它不认识的
-> event type，除非写入方把该事件标记为 `ignorable`，而 `Session.append` 并不给仓库外的插件设置该标记的途径 ——
-> 因此一个以插件自有类型写入的 Code Mode Task step，会让整个会话无法加载。搭载已知事件类型，从构造上就保证会话
-> 可加载。若部署的 spill 策略替换掉了超大的日志副本，那一步只是无法恢复；会话照样能加载，下一次直接调用会把整份
-> 记录重新发布出来。
+> Raven **不写任何插件自有的 session event type**。Harness 的持久化读取路径只接受生成的已知 event 集合，
+> 同时不向仓库外插件提供 event-name 注册接缝。因此私有类型会让整个会话无法加载；搭载既有
+> `tool/code-dispatch` 则从构造上保持可加载。若 spill 策略替换掉超大的日志副本，那一步只是无法恢复，
+> 下一次直接调用会重新发布完整 snapshot。
 
-会话 resume 时会从最近一次成功持久化的 snapshot 恢复这本 book。若超大的 Code Mode nested log 被 spill 掉，那一步可能不在重放中；会话仍能加载，后续直接的状态 mutation 会重新发布完整 snapshot。
+会话 resume 时会从最近一次成功持久化的 snapshot 恢复这本 book。若超大的 PTC mode nested log 被 spill 掉，那一步可能不在重放中；会话仍能加载，后续直接的状态 mutation 会重新发布完整 snapshot。
 
-Code Mode 就是 Harness 中在 UI 里以 **PTC mode** 为 preset 别名的那项能力，因此跑该 preset 的部署正是这条路径服务的
-对象。Raven 不在本地重述这份契约：`src/plugin.ts` 从 `@deepseek-ai/dsh-tools` 导入 `CodeDispatchEventData` 与
-`CodeDispatchLog`，并把事件 key 钉到官方增强后的 `SessionEventMap` 上，于是上游的重命名或改形在这里是**编译错误**，
-而不是某个 Task step 悄悄不再被恢复。`pnpm test:dsh` 补上另一半：它在进程内的 code runtime 之上组合出官方的
-`run_code` 工具，并真的跑一段调用 `raven_task` 的程序，让真实的 bridge 跑真实的 waterfall、追加真实的
-`tool/code-dispatch` 事件；同时它还直接断言上游的那些声明，一旦它们移动就指名该重述什么。
+Raven 用官方增强后的 `SessionEventMap['tool/code-dispatch']` 派生实际读取字段，而不复制 payload 结构。
+由于已发布的 compile package 早于 `PtcDispatchLog`，`pnpm test:dsh` 会在精确 target checkout 上组合官方
+`run_code`，真实执行 `tools/ptc-dispatch-log` waterfall 并追加 `tool/code-dispatch`，从而补足 runtime contract 证明。
 
 ### 每个检测到的 Agent Team 一个 Task
 
@@ -611,7 +614,7 @@ executable helpers from one another."* 因此被拒绝的输入会直接显示 s
 
 三个需要如实说明的前置条件。其一，只有组合了 `@deepseek-ai/dsh-client-ui-settings-plugins` 的部署才会出现这张
 卡片 —— Harness web app bundle 属于此类。其二，它注入浏览器端 `locale` 与 `settingsSchema` 服务，缺其一则这部分接线
-根本不会运行。其三，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness `0.1.1-rc.2` 声明的那一版；而
+根本不会运行。其三，它所对接的带 key 的 `settings.plugin.item` slot 契约是 Harness `0.1.2-alpha.1` 声明的那一版；而
 `0.1.0-rc.6` 至今仍是 npm 上最新的已发布版本，声明的仍是较旧的 list 形态，因此 Raven 内联了较新的形态 —— 连同 locale
 注册签名、schema 服务、describe face 与它所镜像的卡片外观 —— 并由 `scripts/verify-dsh.ts` 对被测 Harness checkout
 逐一断言 —— 于是契约漂移会导致 release gate 失败，而不是让卡片在浏览器里悄无声息地不渲染、把自己的字典 key 直接显示
@@ -767,8 +770,8 @@ Source 标题 1,000、locator 4,000）的报告方式与此相同。
 "peerDependencies": { "@deepseek-ai/dsh-tools": "*", ... },
 "devDependencies":  { "@deepseek-ai/dsh-tools": "0.1.0-rc.6", ... },
 "dshRaven": {
-  "harnessVersion": "0.1.1-rc.2",
-  "harnessCommit": "b150a551b8d465e31e418e1b2eaf5e79bbb7d28e"
+  "harnessVersion": "0.1.2-alpha.1",
+  "harnessCommit": "cd5ef8148158c3a752a658978873241fdf8e2bbc"
 }
 ```
 
@@ -781,14 +784,14 @@ Source 标题 1,000、locator 4,000）的报告方式与此相同。
 可执行检查 —— 它从 `package.json` 读取该锚定值（刻意不存在第二份副本），并把 Raven 组合到一个真实 checkout 上运行 ——
 而发布工作流会拒绝发布锚定缺失或格式错误的构建。**要知道这次构建针对什么运行，请看锚定值，而不是版本范围。**
 
-**`@deepseek-ai/*` 的 devDependency 停在 `0.1.0-rc.6`，而锚定写的是 `0.1.1-rc.2`，这个落差是预期之内的。**
+**`@deepseek-ai/*` 的 devDependency 停在 `0.1.0-rc.6`，而锚定写的是 `0.1.2-alpha.1`，这个落差是预期之内的。**
 那些 devDependency 是*已发布到 npm* 的最新 Service Definition 包；而锚定针对的是 *Harness 发行版*，后者走在前面。
-两个数字描述的是不同的东西，并不要求一致。在这个落差真正有影响的地方 —— 即形态发生过变化的客户端 slot 契约 ——
-Raven 在 `src/client/slot-contract.ts` 内联了较新的形态，并由 `scripts/verify-dsh.ts` 对锚定的 checkout 断言，
-因此漂移会打断 release gate，而不是悄悄产出一张永远不渲染的卡片。Dependabot 被配置为忽略 `@deepseek-ai/*`，
-以免自动升级在锚定值不变的情况下挪动这道接缝、让锚定继续宣称一个已经不成立的兼容性。
+两个数字描述的是不同的东西，并不要求一致。在这个落差有影响的地方，Raven 把目标客户端形态隔离在
+`src/client/slot-contract.ts`；bundle tests 会执行它，而 `test:dsh` 会把每个 emitted client request 与 target
+自己的 module table 比对。authenticated card interaction 仍是显式 release smoke，不会伪装成源码文字检查。
+Dependabot 被配置为忽略 `@deepseek-ai/*`，避免在锚定值不变时移动 compile seam。
 
-`*` 需要如实承担的后果是：一个重塑了接缝的 pre-1.0 RC，在安装期**不会给出任何信号**。唯一能发现它的，是锚定值加上
+`*` 需要如实承担的后果是：一个重塑了接缝的 pre-1.0 预发布版，在安装期**不会给出任何信号**。唯一能发现它的，是锚定值加上
 针对匹配 checkout 运行的 `pnpm run test:dsh` —— 这正是该门禁在发布前不可省略的原因，见
 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
@@ -796,12 +799,12 @@ Raven 在 `src/client/slot-contract.ts` 内联了较新的形态，并由 `scrip
 
 Raven v1 锚定并测试于：
 
-- DeepSeek Harness `0.1.1-rc.2`；
-- Harness checkout commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`；
+- DeepSeek Harness `0.1.2-alpha.1`；
+- Harness checkout commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`；
 - Node.js `^22.19.0 || >=24.0.0`；以及
 - pnpm `11.21.0`。
 
-DeepSeek Harness 目前仍是 RC，会有破坏性变更。Raven 不宣称兼容未经测试的 Harness 版本。
+DeepSeek Harness 目前是 alpha 预发布版，会有破坏性变更。Raven 不宣称兼容未经测试的 Harness 版本。
 
 ## 开发
 
@@ -841,7 +844,7 @@ pnpm check:release
 - 只把 Draft Variant 作为候选返回，并在 route 未配置或未知时如实报告，而不是替换成别的 route；
 - 从 bundle patch 恰好插入一行 host-plane 行，并按命名空间 key 注册 settings 卡片；
 - 在成功检测到的 Agent Team 内共享一个 active Task，并拒绝队友另起竞争 Task；
-- 在不写插件自有 session event type 的前提下恢复已持久化的 Code Mode Task snapshot，并明确 spill 边界；
+- 在不写插件自有 session event type 的前提下恢复已持久化的 PTC mode Task snapshot，并明确 spill 边界；
 - 在 `auto` 注入情境提示、在 `off` 完全关闭提示，同时保持同一套渐进工作流；
 - 在最终校验前就暴露可用的中间研究 Artifact；
 - 在中途纠偏后继续精修同一个 Task；
@@ -883,7 +886,7 @@ pnpm check:release
 **没有联网能用吗？**
 可以。没有 web 时，有据要求的 Task 仍可使用由 Source Policy 显式准入的本地、llm-wiki 或 MCP Resource；普通 Harness tool 的 inspection receipt 必须证明 Markdown provenance。web Claim 仍保持 deferred；没有任何有效 Claim 的 grounding-required Task 会保持 active，而不会被标记为完成。
 
-**Code Mode（`run_code`）里能用吗？**
+**PTC mode（`run_code`）里能用吗？**
 可以 —— 见 [Task book 的两条持久化路径](#task-book-的两条持久化路径)。
 
 **它和"deep research"管线有什么不同？**
@@ -897,7 +900,7 @@ pnpm check:release
 还没有。请按[安装](#安装)从仓库构建打包。
 
 **支持哪些 DeepSeek Harness 版本？**
-只有[兼容性](#兼容性)中锚定的那个 RC。
+只有[兼容性](#兼容性)中锚定的那个预发布版。
 
 **怎么干净卸载？**
 删一行 preset 配置、移除一个依赖即可 —— 见[卸载](#卸载)。Raven 不会留下数据库、缓存或文件。
@@ -911,7 +914,7 @@ pnpm check:release
   而不是基于规则的文本分类器去猜测纠正意图。
 - 未组合 Harness `web` 能力时，web Claim 保持 deferred；由 Source Policy 显式准入且 inspection receipt 有效的本地、llm-wiki 与 MCP Source 仍可用于 grounding。
 - 最近一次成功持久化的 Task snapshot 可从所属 Harness session record 重放，包括多个 stopped/completed Task 身份及稍后
-  resume 旧 Task。超大的 nested Code Mode log 可能漏掉那一步；后续直接 mutation 会重新发布完整 snapshot。跨会话项目、
+  resume 旧 Task。超大的 nested PTC mode log 可能漏掉那一步；后续直接 mutation 会重新发布完整 snapshot。跨会话项目、
   可复用语料库和间隔重复存储不在范围内；要留存成果请用 `export`。
 - Raven 通过普通的工具结果与聊天呈现 Task 进度；它在浏览器里唯一的界面是 settings 卡片，v1 没有针对 Task 本身的
   自定义 UI。

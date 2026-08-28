@@ -3,15 +3,11 @@ import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+import * as SystemPromptModule from '@deepseek-ai/dsh-system-prompt'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { BlockAssembler, createUserMessage, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import type {
-  CodeDispatchEventData,
-  CodeDispatchLog,
-  ToolDefinition,
-  ToolRunContext,
-} from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 // The augmented session-event map itself, so the event key below is the OFFICIAL
 // one rather than a literal restated here. `@deepseek-ai/dsh-tools` declares
 // `'tool/code-dispatch'` INTO this map, and both are published export subpaths.
@@ -66,41 +62,77 @@ const ACTION_FIELD_SUMMARY = Object.entries(ACTION_FIELDS)
   .map(([action, fields]) => `${action}(${fields.filter(field => field !== 'action').join(', ') || 'no other field'})`)
   .join('; ')
 /**
- * A nested Code Mode sub-call has no result card, so the Harness registry computes
+ * A nested PTC mode sub-call has no result card, so the Harness registry computes
  * no presentation metadata for it and the dispatch bridge logs rendered content
  * without any. Task steps taken from inside a `run_code` program would otherwise
  * vanish from a resumed session while the in-memory book still looked complete.
  *
  * The record therefore rides the durable copy of the sub-dispatch itself, through
- * the `tools/code-dispatch-log` waterfall, inside an HTML comment appended to the
+ * the `tools/ptc-dispatch-log` waterfall, inside an HTML comment appended to the
  * logged content. It deliberately does NOT ride a plugin-owned session event type:
- * the Harness persistence read path refuses to interpret any log carrying an event
- * type it does not know unless the writer marked it `ignorable`, and `Session.append`
- * gives an out-of-repo plugin no way to set that marker — so one Code Mode Task step
- * would make the whole session unloadable. A known event type keeps the session
+ * the Harness persistence read path accepts only its generated known-event set, and
+ * an out-of-repo plugin has no event-name registration seam — so one PTC mode Task
+ * step written under a private type would make the whole session unloadable. A known event type keeps the session
  * loadable by construction; if a deployment's spill policy replaces the logged copy,
  * the step simply is not restored, which is the honest degradation.
  *
- * Every name on that path is INHERITED from the official Code Mode contract
+ * Every name on that path is INHERITED from the official PTC mode contract
  * (the Harness feature whose UI alias is "PTC mode") rather than restated here:
- * the event key is pinned to `SessionEventMap` (see {@link CODE_DISPATCH_EVENT}),
- * the settled payload to `CodeDispatchEventData`, and the waterfall payload to
- * `CodeDispatchLog`. An official rename or reshape is therefore a compile error
- * in this file instead of a Task step that silently stops being restored.
+ * the event key is pinned to `SessionEventMap` (see {@link PTC_DISPATCH_EVENT}),
+ * the settled payload to `PtcDispatchEventData`. The currently published compile
+ * packages predate `PtcDispatchLog`, so the listener derives the shared fields from
+ * that official durable-event map and the exact target gate exercises the waterfall.
  */
 const STATE_LOG_PREFIX = `<!-- ${META_KIND} `
 const STATE_LOG_SUFFIX = ' -->'
 /**
  * The event type earlier Raven builds appended directly. Still read so an in-memory
- * session that predates this build keeps its Code Mode steps; never written again.
+ * session that predates this build keeps its PTC mode steps; never written again.
  */
 const LEGACY_STATE_EVENT = META_KIND
 /**
- * The official settle-event key of the Code Mode bridge, pinned to the augmented
+ * The official settle-event key of the PTC mode bridge, pinned to the augmented
  * `SessionEventMap` key set. `satisfies` keeps the value a literal type (so the
  * comparison below still narrows) while making an official rename fail this build.
  */
-const CODE_DISPATCH_EVENT = 'tool/code-dispatch' satisfies keyof SessionEventMap
+const PTC_DISPATCH_EVENT = 'tool/code-dispatch' satisfies keyof SessionEventMap
+const PTC_DISPATCH_LOG_EVENT = 'tools/ptc-dispatch-log'
+type PtcDispatchEventData = SessionEventMap[typeof PTC_DISPATCH_EVENT]
+type PtcDispatchLogListener = (
+  dispatch: PtcDispatchEventData,
+  next: () => Promise<PtcDispatchEventData['content']>,
+) => Promise<PtcDispatchEventData['content']>
+
+/**
+ * Register the renamed PTC waterfall while published compile packages still
+ * describe its predecessor. The payload comes from the official durable-event
+ * map rather than a locally copied field list; the exact target checkout gate
+ * exercises the waterfall itself.
+ */
+function registerPtcDispatchLog(ctx: Context, listener: PtcDispatchLogListener): void {
+  const on = ctx.on as unknown as (event: string, callback: PtcDispatchLogListener) => unknown
+  on.call(ctx, PTC_DISPATCH_LOG_EVENT, listener)
+}
+
+/**
+ * Put Raven's tool guidance after the Harness's PTC-only rule and before its
+ * next first-party section. Older published compile packages predate the sparse
+ * order table, so they retain Raven's legacy placement; a matching Harness
+ * supplies the authoritative table at runtime.
+ */
+function ravenPromptOrder(): number {
+  const firstParty = (SystemPromptModule as {
+    FIRST_PARTY_SECTION_ORDER?: Readonly<Record<string, unknown>>
+  }).FIRST_PARTY_SECTION_ORDER
+  const ptcOnly = firstParty?.PTC_ONLY
+  const next = firstParty?.FILE_REFERENCE
+  return typeof ptcOnly === 'number' && typeof next === 'number' && next > ptcOnly
+    ? (ptcOnly + next) / 2
+    : 116
+}
+
+const RAVEN_PROMPT_ORDER = ravenPromptOrder()
+
 /** Handoff slots kept while sub-dispatches settle; bounded so a lost waterfall cannot leak. */
 const PENDING_LOG_STATE_LIMIT = 64
 
@@ -151,9 +183,9 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * The Task record embedded in one logged Code Mode sub-dispatch, when it survived.
+ * The Task record embedded in one logged PTC mode sub-dispatch, when it survived.
  *
- * The fields read are named through the official `CodeDispatchEventData`, so a
+ * The fields read are named through the official `PtcDispatchEventData`, so a
  * reshape of the settle payload breaks this build. The RUNTIME checks below stay
  * exactly as strict: this value comes off a durable session log that may be
  * truncated, spilled, or written by an older build, so the typing is a
@@ -161,7 +193,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * truncated log still loses ONE step, never the session.
  */
 function readDispatchTaskState(event: Record<string, unknown>): Record<string, unknown> | undefined {
-  const data = asRecord(event.data) as Partial<CodeDispatchEventData> | undefined
+  const data = asRecord(event.data) as Partial<PtcDispatchEventData> | undefined
   if (data?.name !== TOOL_NAME || !Array.isArray(data.content)) return undefined
   for (const raw of data.content) {
     const block = asRecord(raw)
@@ -184,7 +216,7 @@ function readDispatchTaskState(event: Record<string, unknown>): Record<string, u
 /** The durable Task record an event carries, from any publication path. */
 function readTaskStateMeta(event: Record<string, unknown>): Record<string, unknown> | undefined {
   if (event.type === 'tool/result') return asRecord(asRecord(event.data)?.meta)
-  if (event.type === CODE_DISPATCH_EVENT) return readDispatchTaskState(event)
+  if (event.type === PTC_DISPATCH_EVENT) return readDispatchTaskState(event)
   if (event.type === LEGACY_STATE_EVENT) return asRecord(event.data)
   return undefined
 }
@@ -2110,7 +2142,7 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
   const now = () => new Date().toISOString()
   // Per-preset-mount state, and deliberately so: agent presets mount once under a
   // standing scope, then every joined session shares this plugin instance. `books`
-  // therefore keys mutable state by Agent or Team identity, while pending Code Mode
+  // therefore keys mutable state by Agent or Team identity, while pending PTC mode
   // records key by sub-call. Separate presets still get separate mount instances.
   const books = new Map<string, SessionTaskBook>()
   // The role is a MOUNT-TIME decision, so it is read from the composition entry and
@@ -2308,19 +2340,19 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
   }
 
   // Everything below is the AGENT half: the tool, the prompt that describes it, the
-  // per-step Task context, and the Code Mode durability seam. A host-role mount
+  // per-step Task context, and the PTC mode durability seam. A host-role mount
   // registers none of it, so a reduced host serves configuration without ever
   // putting raven_task in front of an agent.
   if (!isAgent) return
-  ctx.systemPrompt.section({ name: 'tool:raven-task', order: 116, text: RAVEN_PROMPT })
+  ctx.systemPrompt.section({ name: 'tool:raven-task', order: RAVEN_PROMPT_ORDER, text: RAVEN_PROMPT })
   ctx.tools.register(toolDefinition(ctx, engine, books, pendingLogState))
-  // The durable half of the Code Mode path: attach the Task record to the logged
+  // The durable half of the PTC mode path: attach the Task record to the logged
   // copy of Raven's own sub-dispatch. Total by contract — the bridge contains a
   // throwing listener by logging the original content, but a Task step must not
   // depend on that, so nothing here can fail.
-  // `dispatch` is typed as the official `CodeDispatchLog` explicitly rather than by
-  // inference, so a rename of the fields read below fails the build here.
-  ctx.on('tools/code-dispatch-log', async (dispatch: CodeDispatchLog, next) => {
+  // The shared fields come from SessionEventMap; the exact target gate drives the
+  // PtcDispatchLog waterfall so a runtime-only drift also fails before release.
+  registerPtcDispatchLog(ctx, async (dispatch, next) => {
     const content = await next()
     if (dispatch.name !== TOOL_NAME) return content
     const record = pendingLogState.get(dispatch.subCallId)

@@ -56,10 +56,11 @@ describe('Raven Cordis plugin', () => {
     expect(claimItems.properties.text?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.claimTextChars))
     expect(failureItems.properties.detail?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.limitationDetailChars))
     expect(sections).toEqual([
-      expect.objectContaining({ name: 'tool:raven-task', order: 116 }),
+      expect.objectContaining({ name: 'tool:raven-task' }),
     ])
+    expect(Number.isFinite(sections[0]?.order)).toBe(true)
     expect(String(sections[0]?.text)).toContain('one continuing Raven Task')
-    expect(listeners.map(listener => listener.event)).toEqual(['tools/code-dispatch-log', 'agent/pre-step'])
+    expect(listeners.map(listener => listener.event)).toEqual(['tools/ptc-dispatch-log', 'agent/pre-step'])
     expect(parameters.properties.queries?.description).toContain('Leads, never Sources')
   })
 
@@ -339,7 +340,7 @@ describe('Raven Cordis plugin', () => {
     expect(restoredB.state.checkpoints).toHaveLength(1)
   })
 
-  it('publishes durable Task state for a Code Mode sub-call that receives no result card', async () => {
+  it('publishes durable Task state for a PTC mode sub-call that receives no result card', async () => {
     interface TestTool extends Record<string, unknown> {
       execute(args: unknown, exec: unknown): Promise<{
         state: RavenPlugin.RavenTaskState
@@ -366,11 +367,11 @@ describe('Raven Cordis plugin', () => {
         inject() { return vi.fn() },
         get() { return undefined },
         on(event: string, listener: unknown) {
-          if (event === 'tools/code-dispatch-log') shapeLog = listener as DispatchLogListener
+          if (event === 'tools/ptc-dispatch-log') shapeLog = listener as DispatchLogListener
           return vi.fn()
         },
       } as never)
-      if (tool === undefined || shapeLog === undefined) throw new Error('Raven did not register its Code Mode durability path')
+      if (tool === undefined || shapeLog === undefined) throw new Error('Raven did not register its PTC mode durability path')
       return { tool, shapeLog }
     }
 
@@ -379,7 +380,7 @@ describe('Raven Cordis plugin', () => {
     const events: unknown[] = []
     const appended: unknown[] = []
     const agent = {
-      id: 'code-mode-session',
+      id: 'ptc-mode-session',
       session: {
         events,
         append(type: string, data: unknown) {
@@ -405,7 +406,7 @@ describe('Raven Cordis plugin', () => {
       stage: 'draft',
       summary: 'A draft published from a program.',
       // A Task step whose Artifact closes an HTML comment must not corrupt the record.
-      artifact: 'A draft written from a Code Mode program --> with a comment closer.',
+      artifact: 'A draft written from a PTC mode program --> with a comment closer.',
     }, { agent, signal, parent, callId })
     // The record never rides a plugin-owned session event type: one would make the
     // whole persisted session unloadable on the Harness read path.
@@ -425,18 +426,18 @@ describe('Raven Cordis plugin', () => {
 
     const reloaded = capture()
     const restored = await reloaded.tool.execute({ action: 'status' }, {
-      agent: { id: 'code-mode-session', session: { events } },
+      agent: { id: 'ptc-mode-session', session: { events } },
       signal,
     })
     expect(restored.state.taskId).toBe(started.state.taskId)
     expect(restored.state.checkpoints).toHaveLength(1)
-    expect(restored.state.latestArtifact).toBe('A draft written from a Code Mode program --> with a comment closer.')
+    expect(restored.state.latestArtifact).toBe('A draft written from a PTC mode program --> with a comment closer.')
 
     // A log copy a spill policy replaced loses the step, never the session.
     const spilled = capture()
     const withoutRecord = await spilled.tool.execute({ action: 'status' }, {
       agent: {
-        id: 'code-mode-session',
+        id: 'ptc-mode-session',
         session: {
           events: [{ type: 'tool/code-dispatch', data: { name: 'raven_task', content: [{ type: 'text', text: 'preview + locator' }] } }],
         },
