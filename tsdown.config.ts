@@ -1,32 +1,30 @@
+import { readFileSync } from 'node:fs'
+
 import { defineConfig } from 'tsdown'
 
-/**
- * Modules the browser shell seeds into its own module table and answers by name
- * at materialization time. The bundle must reference them by exact specifier and
- * must NOT contain them: inlining React or cordis here would give the page a
- * second instance of a runtime the shell already owns.
- *
- * Anything not on this list has to be inlined instead, because `require` in the
- * generated factory is the shell's table shim, not Node's resolver — an
- * unanswerable specifier is a guaranteed runtime throw.
- */
-const SHELL_MODULES = new Set([
-  'react',
-  'react/jsx-runtime',
-  'react-dom',
-  'react-dom/client',
-  '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-runtime/client',
-])
+interface ClientBuildManifest {
+  readonly name: string
+}
 
-const shellModule = (specifier: string): boolean => SHELL_MODULES.has(specifier)
+const manifest = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+) as ClientBuildManifest
+
+/**
+ * Preserve bare imports for the shell module table without copying its changing
+ * baseline roster. The exact-target gate compares the emitted requests with the
+ * target's own PLATFORM_MODULES and fails on any unanswerable future import.
+ */
+const clientExternal = (specifier: string): boolean => specifier.length > 0
+  && !specifier.startsWith('.')
+  && !specifier.startsWith('/')
+  && !specifier.startsWith('\0')
+  && !/^[A-Za-z]:[\\/]/.test(specifier)
 const mode = process.env.NODE_ENV ?? 'production'
 
 export default defineConfig([
   {
-    name: 'raven-research',
+    name: manifest.name,
     entry: ['src/index.ts'],
     outDir: 'lib',
     format: 'esm',
@@ -56,7 +54,7 @@ export default defineConfig([
     // rather than run through tsx because a bin has to work from a plain install,
     // where no TypeScript loader is present. It imports only Node builtins, so
     // there is nothing to externalize.
-    name: 'raven-research/install-preset',
+    name: `${manifest.name}/install-preset`,
     entry: { 'install-preset': 'scripts/install-preset.ts' },
     outDir: 'lib',
     format: 'esm',
@@ -69,7 +67,7 @@ export default defineConfig([
     minify: false,
   },
   {
-    name: 'raven-research/client',
+    name: `${manifest.name}/client`,
     entry: { client: 'src/client/index.ts' },
     outDir: 'lib',
     // Not ESM and not an IIFE: the browser module loader evaluates the artifact
@@ -85,8 +83,8 @@ export default defineConfig([
     clean: false,
     sourcemap: true,
     deps: {
-      neverBundle: shellModule,
-      alwaysBundle: (specifier: string) => !shellModule(specifier),
+      neverBundle: clientExternal,
+      alwaysBundle: (specifier: string) => !clientExternal(specifier),
     },
     // Not decoration: a dependency written in node idiom reads `process.env`
     // at module scope, and without these the factory throws ReferenceError at boot.
@@ -99,7 +97,7 @@ export default defineConfig([
       entryFileNames: 'client.js',
       // `id` is the PACKAGE name, which is what the shell's boot entry keys on —
       // not the Cordis plugin name this module exports.
-      banner: 'window.__ModuleLoader__.load({ id: "dsh-raven-research", factory: (require) => {',
+      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(manifest.name)}, factory: (require) => {`,
       intro: 'var module = { exports: {} }; var exports = module.exports;',
       footer: 'return module.exports; } });',
     },

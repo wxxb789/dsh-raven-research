@@ -411,32 +411,22 @@ one to be stopped, and new Task ordinals use that book's maximum. An in-memory r
 covers calls before results are durably appended; the latest successfully persisted
 snapshot is the restart source of truth.
 
-A Code Mode sub-call gets no result card, so its record cannot ride `tool/result.meta`.
+A PTC mode sub-call gets no result card, so its record cannot ride `tool/result.meta`.
 It rides the durable copy of the sub-dispatch instead, through the official
-`tools/code-dispatch-log` waterfall, as a base64 payload inside an HTML comment on the
-Harness-owned `tool/code-dispatch` event. A plugin-owned session event type is
-explicitly rejected as the mechanism: the Harness persistence read path refuses to
-interpret a stored log containing an event type it does not know unless the writer
-marked it `ignorable`, and `Session.append` exposes no way for an out-of-repo plugin to
-set that marker, so one Code Mode Task step would make the whole session unloadable.
-Base64 keeps a Task Artifact that happens to contain `-->` from closing the comment.
-The path degrades safely rather than exactly: a spill policy that replaces an oversized
-log copy loses that one step, and the next direct call republishes the complete record.
+`tools/ptc-dispatch-log` waterfall, as a base64 payload inside an HTML comment on the
+Harness-owned `tool/code-dispatch` event. A plugin-owned session event type is rejected:
+the Harness persistence reader accepts only its generated known-event set, and there is
+no external event-name registration seam, so a private type would make the session
+unloadable. Base64 keeps an Artifact containing `-->` from closing the comment. A spill
+policy may lose that one step; the next direct call republishes the complete record.
 
-That contract is INHERITED, not restated. Code Mode is the feature whose preset alias in
-the UI is "PTC mode", and every name on this path comes from `@deepseek-ai/dsh-tools`,
-which Raven already depends on: `CodeDispatchEventData` types the settled payload the
-dispatch reader parses, `CodeDispatchLog` types the waterfall listener parameter, and the
-event key is pinned with `satisfies keyof SessionEventMap` against the augmented map the
-same package declares into `@deepseek-ai/dsh-session/types`. An upstream rename or reshape
-is therefore a compile error rather than a silently lost step. The typing changes nothing
-at runtime: these values arrive off a durable log that may be truncated, spilled, or
-written by an older build, so every runtime check stays, and a bad copy still loses one
-step rather than the session. The release gate closes the half a type cannot see — it
-composes the official `run_code` tool over an in-process code runtime and drives the REAL
-bridge (real waterfall, real appended event), then asserts the upstream declarations in
-the checkout under test so a reshape that a stale published copy would still accept is
-named at the gate instead of discovered in a resumed session.
+The shared fields are inherited from the augmented
+`SessionEventMap['tool/code-dispatch']`, not copied into a local payload declaration. The
+published compile package predates `PtcDispatchLog`, so the exact-checkout release gate
+proves the runtime half directly: it composes official `run_code`, executes Raven through
+`tools/ptc-dispatch-log`, observes the appended `tool/code-dispatch`, and replays the
+result. Runtime checks remain because durable logs may be truncated, spilled, or written
+by an older build; a bad copy still loses one step rather than the session.
 
 Agent Teams is consumed the same way `web` is — dynamically, never injected — but with
 one additional constraint: the Harness Team packages are `private: true`, excluded from
@@ -533,10 +523,12 @@ cordis instance; a bundled copy would give this plugin a second instance whose
 services the Harness cannot resolve, and that failure looks like an absent service
 rather than a build error.
 
-The browser half inverts that rule: it inlines everything except the eight specifiers
-the shell seeds into its own module table, because `require` inside the generated
-factory is that table's shim rather than Node's resolver, and an unanswerable
-specifier is a guaranteed runtime throw.
+The browser half inverts that rule: it keeps bare imports external without copying the
+shell's changing baseline roster, and inlines relative implementation dependencies.
+`dsh.client.external` remains absent because the target reserves it for non-baseline
+additions. The exact-checkout gate compares every emitted `require` with the target's
+own `PLATFORM_MODULES` and preloaded externals, so a new unanswerable bare import fails
+before release.
 
 ### Browser half and the restated slot contract
 
@@ -548,11 +540,12 @@ ever learning what the namespace means.
 
 The declaring package's own augmentation cannot be imported across the client
 bundle-purity boundary, and its published copy lags the running Harness — at
-`0.1.0-rc.6` the slot is `kind: 'list'`, at `0.1.1-rc.2` it is `kind: 'keyed'`. A card
+`0.1.0-rc.6` the slot is `kind: 'list'`, at `0.1.2-alpha.1` it is `kind: 'keyed'`. A card
 registered under the older shape compiles and then never renders, with nothing logged
-anywhere. `src/client/slot-contract.ts` therefore restates the targeted augmentation,
-and `scripts/verify-dsh.ts` asserts that shape against the Harness checkout under
-test, so the drift breaks the release gate rather than the browser.
+anywhere. `src/client/slot-contract.ts` therefore restates the targeted augmentation.
+The package declares the settings-page owner in `dsh.client.inject`; bundle
+materialization tests cover the keyed registration. Authenticated target-page interaction
+remains a release requirement and is reported as skipped when no approved driver/profile is available.
 
 The Harness card chrome and staged-form model are likewise off limits as values, so
 the card reimplements them. All of that logic lives in `card-state.ts` and is pure — a
@@ -599,7 +592,7 @@ own settings otherwise live on the agent row inside the preset, next to the mode
 configure.
 
 The agent half — `raven_task`, the system-prompt section, the pre-step Task context,
-and the `tools/code-dispatch-log` waterfall — reaches a session as the `raven` AGENT
+and the `tools/ptc-dispatch-log` waterfall — reaches a session as the `raven` AGENT
 PRESET, which is what makes Raven a selectable mode. `dsh-raven-install-preset` writes
 it into `$DSH_HOME/.agent-presets`, the root `@deepseek-ai/dsh-agent-presets`
 already scans via its own `includeUserRoot`; the bundle deliberately does not patch
@@ -643,18 +636,18 @@ identical to the one it started with. "Unchanged" could not distinguish no write
 the write. A negative result about destruction needs a base whose content a write would
 visibly replace.
 
-So the installer REFUSES by default to point a live include at a writable base, names
-the file, and states both ways forward. It also records the base's `sha256`, which
-separates an ordinary upgrade — already picked up, since the include reads at mount —
-from a base that now contains Raven's own row, which would mean something wrote into it.
+The installer therefore writes only the sibling composition under Raven's own user
+preset directory and never writes or changes the included base. It records the base's
+`sha256` for detection: an ordinary upgrade is already picked up at mount, while a base
+that now contains Raven's own row is reported as evidence that something else wrote it.
 
 A `--snapshot` mode remains for a deployment that would rather not depend on a file
 outside the package: it inlines the base's text, keeps its comments, records the same
 digest, and is re-synced with `--force`.
 
 The waterfall does not hold the tool on the host plane: event admission extends UP the
-scope chain and `tools/code-dispatch-log` is scoped to `dispatch.agent`, so an
-agent-scoped listener still receives its own agent's Code Mode sub-dispatches. The preset
+scope chain and `tools/ptc-dispatch-log` is scoped to `dispatch.agent`, so an
+agent-scoped listener still receives its own agent's PTC mode sub-dispatches. The preset
 mounts once under a standing scope; every joined session shares that plugin instance, and
 Raven keys its Task books by Agent identity or successfully detected Team identity. `examples/agent-row.cordis.yml`
 remains the hand-mounted preset-scoped alternative. With the roles split, mounting both
@@ -673,10 +666,10 @@ The direct objective already fixes the test surfaces:
 3. **SourceVerifier Seam:** production-shaped and deterministic Adapters produce the
    same completion policy, including unknown citations, broken links, optional
    capability absence, cancellation, and independent partial-result survival.
-4. **Durable Task-state Seam:** a direct call publishes Task state as result metadata
-   and a nested Code Mode sub-call publishes the same record as a plugin-owned session
-   event; each path alone rebuilds the Task book on replay, and neither duplicates the
-   other. A host exposing a read-only session view keeps working on result metadata.
+4. **Durable Task-state Seam:** a direct call publishes Task state as result metadata,
+   while a nested PTC mode sub-call embeds the same record in the Harness-owned
+   `tool/code-dispatch` event. Each path alone rebuilds the Task book on replay, neither
+   duplicates the other, and Raven never writes a plugin-owned session event.
 5. **Failure Recovery Seam:** the tool-owned content finalizer attaches the addressed
    Task's identity and recovery action to a failed outcome, including the invalid-argument
    and cancellation paths the output projection never sees, and is total: a hostile
@@ -691,11 +684,11 @@ a specific agent graph.
 
 ## Compatibility target
 
-Raven v1 targets DeepSeek Harness `0.1.1-rc.2` at commit
-`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`, Node `^22.19.0 || >=24`, and pnpm
+Raven v1 targets DeepSeek Harness `0.1.2-alpha.1` at commit
+`cd5ef8148158c3a752a658978873241fdf8e2bbc`, Node `^22.19.0 || >=24`, and pnpm
 `11.21.0`. Release checks use built ESM and declarations, a real Loader-path smoke
 test against that checkout, and a packed clean-consumer install. The version is an
-RC, so the package claims only the exact tested compatibility family.
+alpha prerelease, so the package claims only the exact tested compatibility family.
 
 That target has exactly ONE machine-readable source: `dshRaven.harnessVersion` and
 `dshRaven.harnessCommit` in `package.json`. `scripts/verify-dsh.ts` READS them rather
@@ -707,5 +700,6 @@ prose above is documentation of that value, never a third definition of it.
 The published `@deepseek-ai/*` packages this repository builds against sit at
 `0.1.0-rc.6` and legitimately lag the pinned Harness release; the two numbers describe
 different things. Where that gap has teeth — the client slot contract, reshaped between
-them — `src/client/slot-contract.ts` vendors the newer shape and the release gate asserts
-it against the pinned checkout, so the drift fails a gate instead of a browser.
+them — `src/client/slot-contract.ts` vendors the newer shape. Bundle materialization and
+the exact target module-table gate cover executable packaging; authenticated card
+interaction remains an explicitly reported manual release smoke.

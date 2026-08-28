@@ -106,7 +106,7 @@ agent topology.
   - named Cordis exports, bounded schema annotations, and one prompt/tool/listener registration;
   - compact Task reconstruction from durable `tool/result.meta` after plugin reload;
   - preservation and replay of multiple historical Task identities in one Session;
-  - a Code Mode step recorded on the known `tool/code-dispatch` event and NO plugin-owned
+  - a PTC mode step recorded on the known `tool/code-dispatch` event and NO plugin-owned
     session event type, an Artifact carrying `-->` surviving the record, and a replaced
     (spilled) log copy losing that step without failing the session.
 - `tests/integration/discovery.test.ts`

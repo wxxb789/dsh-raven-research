@@ -16,7 +16,9 @@
  * @module
  */
 
-import { createSnapshotStore, type SettingsScope, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context } from '@deepseek-ai/cordis'
+import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 
 import {
   describeFields,
@@ -33,11 +35,40 @@ import type {
   RavenSettingsSchemaService,
 } from './slot-contract.js'
 
+type RavenSettingsScope = ReturnType<Context['settingsScope']['bind']>
+
+interface WritableSnapshot<T> extends HostObservable<T> {
+  set(next: T): void
+}
+
+/** Plugin-local publication source; the renderer consumes the official HostObservable face. */
+function createWritableSnapshot<T>(initial: T): WritableSnapshot<T> {
+  let snapshot = initial
+  const listeners = new Set<() => void>()
+  return {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    set(next) {
+      snapshot = next
+      for (const listener of Array.from(listeners)) {
+        try {
+          listener()
+        } catch (error) {
+          console.error('raven settings snapshot listener failed:', error)
+        }
+      }
+    },
+  }
+}
+
 /** The face the card's slot registration injects. */
 export interface RavenCardFace {
   hooks: {
     /** Card snapshot, bound by the renderer as `useRavenCard`. */
-    ravenCard: SnapshotStore<RavenCardState>
+    ravenCard: HostObservable<RavenCardState>
   }
   /** Disclose or collapse the card's controls. */
   toggle(): void
@@ -50,7 +81,7 @@ export interface RavenCardFace {
 /** What the controller needs from the browser composition. */
 export interface RavenCardDeps {
   /** The bound scope for Raven's own namespace. */
-  readonly scope: SettingsScope<Record<string, unknown>>
+  readonly scope: RavenSettingsScope
   /** The shared describe mirror, which carries every namespace's schema. */
   readonly describe: RavenSettingsDescribeFace
   /** The Harness's own schema operations. */
@@ -61,7 +92,7 @@ export interface RavenCardDeps {
 
 export class RavenCardController {
   private readonly edits = new Map<string, RavenStagedEdit>()
-  private readonly store: SnapshotStore<RavenCardState>
+  private readonly store: WritableSnapshot<RavenCardState>
   private readonly disposers: (() => void)[] = []
   /**
    * Which card a reader has open is a reading gesture the Host has no stake in,
@@ -89,7 +120,7 @@ export class RavenCardController {
   private cached: { readonly serialized: unknown; readonly specs: readonly RavenFieldSpec[] } | undefined
 
   constructor(private readonly deps: RavenCardDeps) {
-    this.store = createSnapshotStore(this.project())
+    this.store = createWritableSnapshot(this.project())
     this.disposers.push(deps.scope.subscribe(() => { this.publish() }))
     // The schema arrives on the shared mirror rather than on the scope
     // snapshot, so the card has to observe both or it renders no fields until

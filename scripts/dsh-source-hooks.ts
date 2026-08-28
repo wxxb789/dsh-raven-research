@@ -1,5 +1,9 @@
 /**
- * Resolve the Harness's own bare `@deepseek-ai/cordis` to Harness SOURCE.
+ * Resolve identity-sensitive Cordis and System Prompt imports to Harness SOURCE.
+ *
+ * Cordis must be singular for service identity. System Prompt must be the target
+ * build-time contract too, because Raven derives its section placement from the
+ * target's exported sparse order table rather than a copied number.
  *
  * `verify-dsh.ts` deliberately loads the Harness from `src/`, because the point
  * of the gate is to check Raven against the checkout under test rather than
@@ -24,24 +28,44 @@
  * @module
  */
 
+import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+
+import { parseConfigFileTextToJson } from 'typescript'
 
 const checkout = process.env.DSH_CHECKOUT
 if (checkout === undefined || checkout.trim().length === 0) {
   throw new Error('Set DSH_CHECKOUT to the DeepSeek Harness checkout under test.')
 }
 
-/** The one specifier redirected. Everything else resolves normally. */
+/** Runtime identities Raven must share with the source-loaded target composition. */
 const CORDIS = '@deepseek-ai/cordis'
+const SYSTEM_PROMPT = '@deepseek-ai/dsh-system-prompt'
 
-/** The same module `verify-dsh.ts` imports by path, so the run holds exactly one. */
-const cordisSource = pathToFileURL(join(resolve(checkout), 'vendor/cordis/src/index.ts')).href
+/** Resolve Cordis through the checkout's own path map so package moves cannot fork it. */
+const root = resolve(checkout)
+const configFile = join(root, 'tsconfig.base.json')
+const parsed = parseConfigFileTextToJson(configFile, readFileSync(configFile, 'utf8'))
+const paths = (parsed.config as { compilerOptions?: { paths?: Record<string, unknown> } })
+  .compilerOptions?.paths ?? {}
+const sourceUrl = (packageName: string): string => {
+  const candidates = paths[packageName]
+  const mapped = Array.isArray(candidates) ? candidates[0] : undefined
+  if (parsed.error !== undefined || typeof mapped !== 'string') {
+    throw new Error(`Harness TypeScript path map has no source entry for ${packageName}`)
+  }
+  return pathToFileURL(join(root, mapped, 'index.ts')).href
+}
+const redirects = new Map([
+  [CORDIS, sourceUrl(CORDIS)],
+  [SYSTEM_PROMPT, sourceUrl(SYSTEM_PROMPT)],
+])
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier !== CORDIS) return nextResolve(specifier, context)
-    return { url: cordisSource, shortCircuit: true }
+    const url = redirects.get(specifier)
+    return url === undefined ? nextResolve(specifier, context) : { url, shortCircuit: true }
   },
 })

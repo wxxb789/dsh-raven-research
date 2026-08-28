@@ -4,11 +4,35 @@ All notable changes to `dsh-raven-research` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
-DeepSeek Harness it targets is itself an RC, a Harness pin change is treated as a
+DeepSeek Harness it targets is itself a prerelease, a Harness pin change is treated as a
 breaking change even when the Raven API is untouched: the package claims only the exact
 tested compatibility family.
 
 ## [Unreleased]
+
+### DeepSeek Harness 0.1.2-alpha.1 migration
+
+#### Changed
+
+- Retargeted the exact Harness compatibility pin to `0.1.2-alpha.1` at
+  `cd5ef8148158c3a752a658978873241fdf8e2bbc`.
+- Migrated Code Mode integrations to PTC while preserving the durable
+  `tool/code-dispatch` session record used to read existing histories.
+- Removed Raven's direct dependency on the deleted `dsh-client-runtime`; the
+  client now consumes Cordis and the official slot observable face directly.
+- Moved Raven prompt guidance after the target's PTC-only rule using the
+  exported sparse order table rather than a copied numeric order.
+- Changed the default inherited base preset from `code` to `ptc`, and discover
+  shipped preset roots through `dsh-agent-presets` package manifests rather
+  than a fixed Harness source-tree path.
+- Made client bare-import handling generic, then validate emitted requests against the
+  target module table; bundle identity and source resolution consume manifest/path-map
+  authorities instead of duplicated lists.
+
+The alpha Service Definition packages are not yet available from the configured
+registry, so the published compile pins remain at `0.1.0-rc.6`; the exact target
+source/runtime contract is covered by `test:dsh`. See the primary-source report
+under `docs/reverse-engineering/deepseek-harness-v0.1.2-alpha.1-migration.md`.
 
 ### Progressive main-agent experience
 
@@ -28,7 +52,7 @@ tested compatibility family.
   language; the README action table is an integrator reference, not a user workflow.
 - Product and architecture docs now distinguish prompt-directed cadence from engine
   guarantees, detected-Team ownership from fallback single-Agent books, persisted snapshots
-  from best-effort nested Code Mode logs, Task stopping from execution cancellation, and
+  from best-effort nested PTC mode logs, Task stopping from execution cancellation, and
   default mode isolation from the explicit global host-settings opt-in.
 - Omitted legacy network-policy and Source-timeout settings retain their prior unrestricted/no-deadline
   behavior, while newly generated Raven presets explicitly choose `public-only` and 20 seconds.

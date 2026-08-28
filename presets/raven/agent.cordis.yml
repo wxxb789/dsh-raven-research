@@ -7,7 +7,7 @@
 #
 # By DEFAULT `dsh-raven-install-preset` writes an installed composition of TWO
 # TOP-LEVEL SIBLING ROWS: one `cordis:include` row mounting the base (`--base`,
-# default `code`), and this row beside it at the same level. The base is
+# default `ptc`), and this row beside it at the same level. The base is
 # inherited LIVE, so a Harness upgrade updates the mode with nothing to re-sync.
 #
 # This row must stay a SIBLING of the include and must never be inserted through
@@ -27,10 +27,10 @@
 # every write it makes lands inside `$DSH_HOME/.agent-presets/raven`, and not even
 # a permission bit is changed outside it.
 #
-# The base defaults to `code` because Raven's prompt section and its Code Mode
-# durability seam both assume `run_code` exists: the `tools/code-dispatch-log`
+# The base defaults to `ptc` because Raven's prompt section and its PTC mode
+# durability seam both assume `run_code` exists: the `tools/ptc-dispatch-log`
 # waterfall is what keeps a Task step taken from inside a `run_code` program
-# durable, and it has nothing to record under a base that presents no Code Mode.
+# durable, and it has nothing to record under a base that does not present PTC mode.
 #
 # `role: agent` registers `raven_task`, the system-prompt section, the pre-step
 # Task context, and that waterfall — and deliberately NOT the settings

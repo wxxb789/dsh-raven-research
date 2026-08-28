@@ -66,6 +66,7 @@
  */
 import { createHash } from 'node:crypto'
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -78,8 +79,10 @@ const USER_PRESET_DIR = '.agent-presets'
 const COMPOSITION_FILE = 'agent.cordis.yml'
 /** The roster-metadata file every agent preset directory carries. */
 const METADATA_FILE = 'preset.yml'
-/** Default base preset id: Raven's prompt and Code Mode seam assume `run_code`. */
-const DEFAULT_BASE = 'code'
+/** Default base preset id: Raven's prompt and PTC seam assume `run_code`. */
+const DEFAULT_BASE = 'ptc'
+/** Package that owns the Harness's shipped preset directories. */
+const AGENT_PRESETS_PACKAGE = '@deepseek-ai/dsh-agent-presets'
 /** The id of Raven's own row, and what identifies it inside another file. */
 const ROW_ID = 'raven-research'
 /** The plugin name Raven's row mounts. */
@@ -148,7 +151,7 @@ export function parseArguments(argv: readonly string[]): {
     else if (argument === '--snapshot') snapshot = true
     else if (argument === '--base') {
       const value = argv[index + 1]
-      if (value === undefined || value.startsWith('--')) fail('--base needs a preset id, e.g. --base code')
+      if (value === undefined || value.startsWith('--')) fail('--base needs a preset id, e.g. --base ptc')
       base = value
       index += 1
     } else if (argument === '--base-root') {
@@ -207,41 +210,91 @@ export function digestText(bytes: string): string {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-/**
- * Every directory a base preset id could live in, in resolution order: the user
- * preset root, then each `--base-root`, then the checkout's shipped preset
- * directory when `$DSH_CHECKOUT` names one.
- * @param base - the base preset id.
- * @param baseRoots - directories given with `--base-root`, in order.
- * @param root - the user preset root.
- * @returns candidate directories, in the order they are tried.
- */
-export function baseCandidates(base: string, baseRoots: readonly string[], root: string): string[] {
-  const candidates = [join(root, base), ...baseRoots.map(dir => join(dir, base))]
+interface PackageManifest {
+  readonly name?: unknown
+  readonly files?: unknown
+}
+
+/** Return package-declared directories instead of assuming where a package keeps assets. */
+async function declaredDirectories(manifestFile: string): Promise<string[]> {
+  const manifest = JSON.parse(await readFile(manifestFile, 'utf8')) as PackageManifest
+  if (!Array.isArray(manifest.files)) return []
+  const packageRoot = dirname(manifestFile)
+  const directories: string[] = []
+  for (const entry of manifest.files) {
+    if (typeof entry !== 'string' || /[*?![\]{}]/.test(entry)) continue
+    const candidate = join(packageRoot, entry)
+    if ((await stat(candidate).catch(() => undefined))?.isDirectory() === true) directories.push(candidate)
+  }
+  return directories
+}
+
+/** Locate one package manifest in a source checkout without encoding monorepo layout. */
+async function findPackageManifest(root: string, packageName: string): Promise<string | undefined> {
+  const queue = [root]
+  for (let index = 0; index < queue.length; index += 1) {
+    const dir = queue[index]
+    if (dir === undefined) continue
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name === 'package.json') {
+        const file = join(dir, entry.name)
+        const manifest = JSON.parse(await readFile(file, 'utf8').catch(() => '{}')) as PackageManifest
+        if (manifest.name === packageName) return file
+      }
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name === '.git' || entry.name === 'node_modules') continue
+      queue.push(join(dir, entry.name))
+    }
+  }
+  return undefined
+}
+
+/** Discover every package-owned shipped preset root available to this install. */
+async function discoverShippedPresetRoots(): Promise<string[]> {
+  const manifests = new Set<string>()
+  try {
+    manifests.add(createRequire(import.meta.url).resolve(`${AGENT_PRESETS_PACKAGE}/package.json`))
+  } catch {
+    // A source checkout supplied below is the other supported owner.
+  }
   const checkout = process.env.DSH_CHECKOUT
   if (checkout !== undefined && checkout.trim().length > 0) {
-    candidates.push(join(resolve(checkout), 'apps', 'cli', 'config', 'agent-presets', base))
+    const manifest = await findPackageManifest(resolve(checkout), AGENT_PRESETS_PACKAGE)
+    if (manifest !== undefined) manifests.add(manifest)
   }
-  return candidates
+  const roots = (await Promise.all([...manifests].map(declaredDirectories))).flat()
+  return [...new Set(roots)]
+}
+
+/**
+ * Every directory a base preset id could live in, in resolution order: the user
+ * preset root, then each operator-supplied root, then package-declared shipped
+ * roots discovered from the installed package or source checkout.
+ */
+export function baseCandidates(
+  base: string,
+  additionalRoots: readonly string[],
+  root: string,
+): string[] {
+  return [join(root, base), ...additionalRoots.map(dir => join(dir, base))]
 }
 
 /**
  * Find the base preset's composition, or fail naming every place tried.
  *
  * Never invents a composition: an absent base is an operator-fixable condition —
- * the deployment's `config/agent-presets` is somewhere this process cannot guess
+ * the deployment's extra preset root may be somewhere this process cannot guess
  * — and writing a made-up agent instead would be worse than stopping.
  * @param base - the base preset id.
  * @param baseRoots - directories given with `--base-root`, in order.
  * @param root - the user preset root.
  * @returns the base directory, its composition path, and its text.
  */
-async function resolveBase(
-  base: string,
-  baseRoots: readonly string[],
-  root: string,
-): Promise<{ dir: string, file: string, text: string }> {
-  const candidates = baseCandidates(base, baseRoots, root)
+async function readFirstBase(
+  candidates: readonly string[],
+): Promise<{ dir: string, file: string, text: string } | undefined> {
   for (const dir of candidates) {
     const file = join(dir, COMPOSITION_FILE)
     try {
@@ -250,6 +303,23 @@ async function resolveBase(
       continue
     }
   }
+  return undefined
+}
+
+async function resolveBase(
+  base: string,
+  baseRoots: readonly string[],
+  root: string,
+): Promise<{ dir: string, file: string, text: string }> {
+  const candidates = baseCandidates(base, baseRoots, root)
+  const direct = await readFirstBase(candidates)
+  if (direct !== undefined) return direct
+
+  const shippedCandidates = (await discoverShippedPresetRoots()).map(dir => join(dir, base))
+  candidates.push(...shippedCandidates)
+  const shipped = await readFirstBase(shippedCandidates)
+  if (shipped !== undefined) return shipped
+
   fail(...baseNotFound(base, candidates))
 }
 
@@ -257,7 +327,7 @@ async function resolveBase(
  * The message printed when no candidate directory carries the base preset.
  *
  * Names every location tried, in order, because the operator is the only one
- * who knows where this deployment keeps `config/agent-presets`.
+ * who knows where this deployment keeps its extra preset roots.
  * @param base - the base preset id that was not found.
  * @param candidates - the directories tried, in order.
  * @returns the message lines.
@@ -268,7 +338,7 @@ export function baseNotFound(base: string, candidates: readonly string[]): strin
     'inherits one the deployment already has.',
     'Tried, in order:',
     ...candidates.map(dir => `  ${join(dir, COMPOSITION_FILE)}`),
-    "Pass --base-root <dir> pointing at your deployment's config/agent-presets directory",
+    "Pass --base-root <dir> pointing at one of your deployment's preset roots,",
     '(or set DSH_CHECKOUT to a Harness checkout), and --base <id> to pick a different base.',
   ]
 }
@@ -388,7 +458,7 @@ export function composeLive(
     '# new URL(path, baseUrl) then fileURLToPath, and a bare Windows path like',
     '# Q:\\... parses as a URL scheme and fails with ERR_INVALID_URL_SCHEME.',
     '',
-    '- id: inherited-code',
+    `- id: inherited-${base}`,
     '  name: cordis:include',
     '  config:',
     `    path: ${includePath(file)}`,
