@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
 import { decodeRavenTaskState, RAVEN_SCHEMA_VERSION } from '../../src/codec.js'
-import { createRavenEngine } from '../../src/engine.js'
+import { createRavenEngine, renderArtifact } from '../../src/engine.js'
 import { RAVEN_LIMITS, type RavenTaskState, type SourceVerifier } from '../../src/domain.js'
 import { sourceInspectionSha256 } from '../../src/source.js'
 
@@ -36,10 +36,10 @@ async function validState() {
 }
 
 describe('Raven Task snapshot codec', () => {
-  it('round-trips a complete schema-v1 state through JSON', async () => {
+  it('round-trips a complete current state through JSON', async () => {
     const state = await validState()
     const roundTrip: unknown = JSON.parse(JSON.stringify(state))
-    expect(decodeRavenTaskState(roundTrip)).toEqual({ ...state, schemaVersion: 2, sourcePolicy: {
+    expect(decodeRavenTaskState(roundTrip)).toEqual({ ...state, schemaVersion: 3, sourcePolicy: {
       allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
       includedMcpSources: [], excludedMcpSources: [],
     } })
@@ -216,11 +216,30 @@ describe('Raven Task snapshot codec', () => {
     }, started.state)
     expect(checkpoint.status).toBe('active')
 
+    const synthesized = await dispatch({
+      action: 'synthesize',
+      taskId,
+      scope: 'Disagreement analysis',
+      purpose: 'synthesis',
+      claimIds: ['M1', 'M2'],
+      insights: [{
+        insightId: 'I1',
+        text: 'The disagreement may reflect incompatible measurement windows.',
+        kind: 'hypothesis',
+        pattern: 'temporal-shift',
+        claimIds: ['M1', 'M2'],
+        assumptions: ['Both records measure the same underlying quantity.'],
+        rationale: 'Different time windows can produce different figures without either record being fabricated.',
+        wouldChangeMind: 'A schema comparison showing identical windows and population definitions.',
+        confidence: 'low',
+      }],
+    }, checkpoint.state)
+
     const steered = await dispatch({
       action: 'steer',
       taskId,
       correction: 'Lead with the disagreement rather than with the figure.',
-    }, checkpoint.state)
+    }, synthesized.state)
 
     const revised = await dispatch({
       action: 'checkpoint',
@@ -241,7 +260,7 @@ describe('Raven Task snapshot codec', () => {
     for (const state of emitted) {
       const replayed: unknown = JSON.parse(JSON.stringify(state))
       // Not just "defined": the codec must return the SAME Task, not a shell.
-      expect(decodeRavenTaskState(replayed)).toEqual({ ...state, schemaVersion: 2, sourcePolicy: {
+      expect(decodeRavenTaskState(replayed)).toEqual({ ...state, schemaVersion: 3, sourcePolicy: {
         allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
         includedMcpSources: [], excludedMcpSources: [],
       }, sources: state.sources.map(source => ({
@@ -348,35 +367,154 @@ describe('Raven Task snapshot codec', () => {
     })).toBeUndefined()
   })
 
-  it('migrates schema-v1 web sources without losing provenance', async () => {
-    const state = await validState()
-    const v1 = {
-      ...state,
+  it('migrates a literal schema-v1 source-backed analysis Claim without granting direct Source authority', () => {
+    const legacyV1 = {
       schemaVersion: 1,
+      taskId: 'rvn-111111111111-1',
+      ordinal: 1,
+      outcome: 'research',
+      request: 'Replay a schema-v1 analysis Claim.',
+      grounding: 'required',
+      phase: 'active',
+      revision: 1,
+      steeringRevision: 0,
+      steering: [],
+      checkpoints: [],
       sources: [{
         sourceId: 'S1',
-        url: 'HTTPS://EXAMPLE.TEST:443/source',
-        title: 'A Source',
+        url: 'HTTPS://EXAMPLE.TEST:443/legacy-v1',
+        title: 'Legacy v1 Source',
         locator: 'Section 1',
-        excerpt: 'an excerpt',
+        excerpt: 'A legacy excerpt.',
         role: 'primary',
         inspectedAt: now(),
-        check: { status: 'reachable', checkedAt: now(), statusCode: 200, resolvedUrl: 'https://example.test/source' },
+        check: { status: 'reachable', checkedAt: now(), statusCode: 200, resolvedUrl: 'https://example.test/legacy-v1' },
       }],
+      claims: [{
+        claimId: 'A1',
+        text: 'A legacy v1 analysis Claim.',
+        kind: 'analysis',
+        importance: 'material',
+        disposition: 'supported',
+        sourceIds: ['S1'],
+      }],
+      limitations: [],
+      latestArtifact: null,
+      verification: null,
+      finalArtifactSha256: null,
+      startedAt: now(),
+      updatedAt: now(),
     }
-    const decoded = decodeRavenTaskState(v1)
-    expect(RAVEN_SCHEMA_VERSION).toBe(2)
-    expect(decoded?.schemaVersion).toBe(2)
-    expect(decoded?.sourcePolicy).toEqual({
+
+    const decoded = decodeRavenTaskState(legacyV1)
+    if (decoded === undefined) throw new Error('Expected literal schema-v1 fixture to migrate')
+
+    expect(RAVEN_SCHEMA_VERSION).toBe(3)
+    expect(decoded).toMatchObject({ schemaVersion: 3, insightCandidates: [], syntheses: [] })
+    expect(decoded.sourcePolicy).toEqual({
       allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
       includedMcpSources: [], excludedMcpSources: [],
     })
-    expect(decoded?.sources[0]).toMatchObject({
-      url: 'https://example.test/source',
-      resource: { origin: 'web', uri: 'https://example.test/source' },
+    expect(decoded.sources[0]).toMatchObject({
+      url: 'https://example.test/legacy-v1',
+      resource: { origin: 'web', uri: 'https://example.test/legacy-v1' },
       representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
-      check: { status: 'reachable', statusCode: 200 },
     })
+    expect(decoded.claims[0]).toEqual({
+      claimId: 'A1',
+      text: 'A legacy v1 analysis Claim.',
+      kind: 'analysis',
+      importance: 'material',
+      disposition: 'supported',
+      sourceIds: [],
+      legacySourceIds: ['S1'],
+    })
+    expect(renderArtifact('', decoded.sources, decoded.claims)).toContain('legacy untraced analysis')
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(decoded)) as unknown)).toEqual(decoded)
+  })
+
+  it('migrates a literal schema-v2 source-backed analysis Claim and validates compatibility IDs', async () => {
+    const legacyV2 = {
+      schemaVersion: 2,
+      taskId: 'rvn-222222222222-1',
+      ordinal: 1,
+      outcome: 'research',
+      request: 'Replay a schema-v2 analysis Claim.',
+      grounding: 'required',
+      phase: 'active',
+      revision: 1,
+      steeringRevision: 0,
+      steering: [],
+      checkpoints: [],
+      sources: [{
+        sourceId: 'S2',
+        url: 'https://example.test/legacy-v2',
+        resource: { origin: 'web', uri: 'https://example.test/legacy-v2' },
+        representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'web_fetch' },
+        title: 'Legacy v2 Source',
+        locator: 'Section 2',
+        excerpt: 'Another legacy excerpt.',
+        role: 'primary',
+        inspectedAt: now(),
+        check: { status: 'reachable', checkedAt: now(), statusCode: 200, resolvedUrl: 'https://example.test/legacy-v2' },
+      }],
+      claims: [{
+        claimId: 'A2',
+        text: 'A legacy v2 analysis Claim.',
+        kind: 'analysis',
+        importance: 'material',
+        disposition: 'qualified',
+        sourceIds: ['S2'],
+      }],
+      limitations: [],
+      latestArtifact: null,
+      verification: null,
+      finalArtifactSha256: null,
+      sourcePolicy: {
+        allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
+        includedMcpSources: [], excludedMcpSources: [],
+      },
+      startedAt: now(),
+      updatedAt: now(),
+    }
+
+    const decoded = decodeRavenTaskState(legacyV2)
+    if (decoded === undefined) throw new Error('Expected literal schema-v2 fixture to migrate')
+
+    expect(decoded).toMatchObject({
+      schemaVersion: 3,
+      claims: [{ sourceIds: [], legacySourceIds: ['S2'] }],
+      insightCandidates: [],
+      syntheses: [],
+    })
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(decoded)) as unknown)).toEqual(decoded)
+
+    const continued = await createRavenEngine({ now, sourceVerifier }).dispatch(decoded, {
+      action: 'checkpoint',
+      taskId: decoded.taskId,
+      stage: 'analyze',
+      summary: 'Continue the migrated Task without accepting the compatibility field as input.',
+      artifact: 'A legacy v2 analysis Claim.',
+      claims: [{
+        claimId: 'A2',
+        text: 'A legacy v2 analysis Claim.',
+        kind: 'analysis',
+        importance: 'material',
+        disposition: 'qualified',
+        sourceIds: [],
+      }],
+    }, { sessionId: 'legacy-v2-continuation', signal: new AbortController().signal })
+    expect(continued.state.claims[0]?.legacySourceIds).toEqual(['S2'])
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(continued.state)) as unknown)).toEqual(continued.state)
+
+    expect(decodeRavenTaskState({
+      ...decoded,
+      claims: [{ ...decoded.claims[0], legacySourceIds: ['UNKNOWN'] }],
+    })).toBeUndefined()
+    expect(decodeRavenTaskState({
+      ...decoded,
+      claims: [{ ...decoded.claims[0], legacySourceIds: ['S2', 'S2'] }],
+    })).toBeUndefined()
   })
 
   it('accepts local original Markdown and a non-web unavailable source with no representation', async () => {
@@ -428,7 +566,7 @@ describe('Raven Task snapshot codec', () => {
   it('keeps migration bounded to known older schemas', async () => {
     const state = await validState()
     expect(decodeRavenTaskState({ ...state, schemaVersion: 0 })).toBeUndefined()
-    expect(decodeRavenTaskState({ ...state, schemaVersion: 3 })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 4 })).toBeUndefined()
     expect(decodeRavenTaskState({ ...state, schemaVersion: 'one' })).toBeUndefined()
   })
   // rather than one unreadable snapshot.
@@ -535,6 +673,98 @@ describe('Raven Task snapshot codec', () => {
     // Self-contradiction is never a real disagreement.
     expect(decodeRavenTaskState(claim({ contradicts: ['C1'] }))).toBeUndefined()
     expect(decodeRavenTaskState(claim({ contradicts: ['C1', 'C1'] }))).toBeUndefined()
+  })
+
+  it('rejects cyclic analysis lineage and preserves historical Summary Debt snapshots', async () => {
+    const state = await validState()
+    const insight = (insightId: string, text: string, claimIds: string[]) => ({
+      insightId,
+      text,
+      kind: 'hypothesis',
+      pattern: 'alternative-causal-mechanism',
+      claimIds,
+      assumptions: [],
+      rationale: 'A bounded candidate rationale.',
+      wouldChangeMind: 'Evidence that disproves the proposed mechanism.',
+      confidence: 'low',
+      createdAt: now(),
+    })
+    const analysis = (claimId: string, text: string, insightId: string, premiseId: string) => ({
+      claimId,
+      text,
+      kind: 'analysis',
+      importance: 'context',
+      disposition: 'supported',
+      sourceIds: [],
+      insightId,
+      derivedFromClaimIds: [premiseId],
+    })
+    expect(decodeRavenTaskState({
+      ...state,
+      claims: [analysis('A1', 'Analysis one.', 'I1', 'A2'), analysis('A2', 'Analysis two.', 'I2', 'A1')],
+      insightCandidates: [insight('I1', 'Analysis one.', ['A2']), insight('I2', 'Analysis two.', ['A1'])],
+    })).toBeUndefined()
+
+    const claim = {
+      claimId: 'C1', text: 'A context premise.', kind: 'analysis', importance: 'context',
+      disposition: 'supported', sourceIds: [],
+    }
+    const candidate = insight('I1', 'A candidate interpretation.', ['C1'])
+    const round = {
+      ordinal: 1,
+      scope: 'Analysis section',
+      purpose: 'synthesis',
+      claimIds: ['C1'],
+      insightIds: ['I1'],
+      summaryDebt: 'none',
+      summaryDebtDetail: 'The candidate has usable Claim lineage.',
+      createdAt: now(),
+    }
+    expect(decodeRavenTaskState({
+      ...state, claims: [claim], insightCandidates: [candidate], syntheses: [round],
+    })).toBeDefined()
+    const historicalDebt = decodeRavenTaskState({
+      ...state, claims: [claim], insightCandidates: [candidate],
+      syntheses: [{ ...round, summaryDebt: 'high' }],
+    })
+    expect(historicalDebt?.syntheses[0]?.summaryDebt).toBe('high')
+  })
+
+  it('round-trips capped synthesis history after a non-front eviction preserves debt', async () => {
+    const state = await validState()
+    const claim = {
+      claimId: 'C1', text: 'A context premise.', kind: 'analysis', importance: 'context',
+      disposition: 'supported', sourceIds: [],
+    }
+    const syntheses = [{
+      ordinal: 1,
+      scope: 'Outstanding scope',
+      purpose: 'synthesis',
+      claimIds: ['C1'],
+      insightIds: [],
+      summaryDebt: 'high',
+      summaryDebtDetail: 'The scope still only restates evidence.',
+      createdAt: now(),
+    }, ...Array.from({ length: RAVEN_LIMITS.synthesisRounds - 1 }, (_value, index) => ({
+      ordinal: index + 3,
+      scope: `Other scope ${index + 1}`,
+      purpose: 'summary',
+      claimIds: ['C1'],
+      insightIds: [],
+      summaryDebt: 'none',
+      summaryDebtDetail: 'The user explicitly requested a summary.',
+      createdAt: now(),
+    }))]
+    const snapshot = { ...state, claims: [claim], syntheses }
+    const decoded = decodeRavenTaskState(JSON.parse(JSON.stringify(snapshot)) as unknown)
+
+    expect(decoded).toEqual(snapshot)
+    expect(decoded?.syntheses).toHaveLength(RAVEN_LIMITS.synthesisRounds)
+    expect(decoded?.syntheses.map(round => round.ordinal)).toEqual([
+      1,
+      ...Array.from({ length: RAVEN_LIMITS.synthesisRounds - 1 }, (_value, index) => index + 3),
+    ])
+    expect(decoded?.syntheses[0]).toMatchObject({ scope: 'Outstanding scope', summaryDebt: 'high' })
   })
 
   it('protects Limitation identity by shape and uniqueness, NOT by array position', async () => {

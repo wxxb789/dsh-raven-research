@@ -218,6 +218,43 @@ describe('Raven task engine', () => {
     expect(checkpoint.renderedArtifact).toContain('**C1**')
   })
 
+  it('lets an existing external Claim move from context to material without changing kind or text', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start', outcome: 'research', request: 'Reassess Claim importance as evidence develops.',
+    }, { sessionId: 'session-importance', signal })
+    const source = {
+      sourceId: 'IMPORTANCE1',
+      url: 'https://example.test/importance',
+      title: 'Importance source',
+      locator: 'Section 1',
+      excerpt: 'the same proposition becomes material later',
+      role: 'primary',
+    }
+    const contextual = await engine.dispatch(started.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read', summary: 'Context recorded.',
+      artifact: 'A contextual observation.',
+      sources: [source],
+      claims: [{
+        claimId: 'IMPORTANCE-C1', text: 'The proposition becomes material later.', kind: 'external',
+        importance: 'context', disposition: 'supported', sourceIds: ['IMPORTANCE1'],
+      }],
+    }, { sessionId: 'session-importance', signal })
+    const material = await engine.dispatch(contextual.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'analyze', summary: 'Importance reassessed.',
+      artifact: 'The proposition becomes material later [@IMPORTANCE1].',
+      claims: [{
+        claimId: 'IMPORTANCE-C1', text: 'The proposition becomes material later.', kind: 'external',
+        importance: 'material', disposition: 'supported', sourceIds: ['IMPORTANCE1'],
+      }],
+    }, { sessionId: 'session-importance', signal })
+
+    expect(material.status).toBe('active')
+    expect(material.state.claims[0]).toMatchObject({
+      claimId: 'IMPORTANCE-C1', kind: 'external', importance: 'material',
+    })
+  })
+
   it('applies a Steering Revision to the same Task without discarding Checkpoints', async () => {
     const engine = createRavenEngine({ now, sourceVerifier })
     const started = await engine.dispatch(null, {
@@ -1696,7 +1733,7 @@ describe('Raven task engine', () => {
     }, { sessionId: 'session-local-markdown', signal })
 
     expect(checkpoint.status).toBe('active')
-    expect(checkpoint.state.schemaVersion).toBe(2)
+    expect(checkpoint.state.schemaVersion).toBe(3)
     expect(checkpoint.state.sources[0]?.representation?.markdown).toBe(markdown)
     expect(received[0]?.resource).toEqual({ origin: 'local', uri: 'file:///workspace/docs/guide.md', mediaType: 'text/markdown' })
     expect(checkpoint.renderedArtifact).toContain('local; original full Markdown by read')

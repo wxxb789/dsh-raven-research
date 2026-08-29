@@ -216,13 +216,101 @@ describe('Raven end-to-end acceptance', () => {
     expect(fetch).toHaveBeenCalledTimes(7)
   })
 
+  it('turns evidence into inspectable competing Insight Candidates with defensible analysis lineage', async () => {
+    const fetch = vi.fn(async ({ url }: { url: string }) => ({
+      url,
+      statusCode: 200,
+      body: { kind: 'text' as const, content: 'Exact evidence excerpt for S1. Exact evidence excerpt for S2.' },
+    }))
+    const raven = createHarness({ fetch })
+    const started = await raven.run({
+      action: 'start', outcome: 'research', request: 'Explain what follows from two timing constraints.',
+    })
+    const evidence = await raven.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read',
+      summary: 'Two source observations before interpretation.',
+      artifact: 'The first record reports delayed settlement [@S1]. The second reports short review windows [@S2].',
+      sources: [source('S1', 'delayed-settlement'), source('S2', 'short-review')],
+      claims: [
+        claim('C1', 'S1', 'The first record reports delayed settlement.'),
+        claim('C2', 'S2', 'The second record reports short review windows.'),
+      ],
+    })
+    const debt = await raven.run({
+      action: 'synthesize', taskId: started.state.taskId, scope: 'Interpretation section',
+      purpose: 'synthesis', claimIds: ['C1', 'C2'], insights: [],
+    })
+    expect(debt.state.syntheses.at(-1)).toMatchObject({ summaryDebt: 'high' })
+    expect(debt.issues.join(' ')).toContain('summary debt')
+
+    const insightText = 'Short review windows may reward visible activity before delayed outcomes can be observed.'
+    const assumption = 'Reviewers optimize decisions around outcomes visible inside the review window.'
+    const synthesized = await raven.run({
+      action: 'synthesize', taskId: started.state.taskId, scope: 'Interpretation section',
+      purpose: 'synthesis', claimIds: ['C1', 'C2'], insights: [
+        {
+          insightId: 'I1', text: insightText, kind: 'explanation', pattern: 'incentive-mismatch',
+          claimIds: ['C1', 'C2'], assumptions: [assumption], confidence: 'medium',
+          rationale: 'The timing mismatch supplies a mechanism connecting the two observations.',
+          wouldChangeMind: 'Evidence that reviews routinely use outcomes collected after settlement.',
+          competesWith: ['I2'],
+        },
+        {
+          insightId: 'I2',
+          text: 'The same timing pattern may reflect measurement cost rather than strategic incentives.',
+          kind: 'hypothesis', pattern: 'alternative-causal-mechanism', claimIds: ['C1', 'C2'],
+          assumptions: ['Long-horizon outcomes are materially more expensive to measure.'], confidence: 'low',
+          rationale: 'Measurement cost explains the observations without assuming strategic behavior.',
+          wouldChangeMind: 'Evidence that long-horizon outcomes are cheap, collected, and deliberately ignored.',
+          competesWith: ['I1'],
+        },
+      ],
+    })
+    expect(synthesized.state.insightCandidates.map(item => item.insightId)).toEqual(['I1', 'I2'])
+    expect(synthesized.state.syntheses.at(-1)).toMatchObject({ summaryDebt: 'none' })
+
+    await expect(raven.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'analyze', summary: 'Invalid fact promotion.',
+      artifact: 'Short review windows reward visible activity [@S1].',
+      claims: [{
+        claimId: 'BAD', text: insightText, kind: 'external', importance: 'material', disposition: 'supported',
+        sourceIds: ['S1'], insightId: 'I1', derivedFromClaimIds: ['C1', 'C2'], assumptions: [assumption],
+      }],
+    })).rejects.toThrow(/cannot be promoted as external fact/)
+
+    const analyzed = await raven.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'analyze',
+      summary: 'One interpretation adopted with lineage while its alternative remains visible.',
+      artifact: `The records report delayed settlement [@S1] and short review windows [@S2]. ${insightText}`,
+      claims: [{
+        claimId: 'A1', text: insightText, kind: 'analysis', importance: 'material', disposition: 'qualified',
+        sourceIds: [], insightId: 'I1', derivedFromClaimIds: ['C1', 'C2'], assumptions: [assumption],
+      }],
+    })
+
+    expect(analyzed.renderedArtifact).toContain('**C1** (source says)')
+    expect(analyzed.renderedArtifact).toContain('## Analysis lineage')
+    expect(analyzed.renderedArtifact).toContain('Raven inference from C1, C2')
+    expect(analyzed.renderedArtifact).toContain('alternative I2 remains a candidate')
+    expect(analyzed.state.claims.find(item => item.claimId === 'A1')).toMatchObject({
+      kind: 'analysis', insightId: 'I1', derivedFromClaimIds: ['C1', 'C2'], assumptions: [assumption],
+    })
+    expect(evidence.state.insightCandidates).toEqual([])
+    const prompt = String(raven.sections.find(section => section.name === 'tool:raven-task')?.text)
+    expect(prompt).toContain('Epistemic layers')
+    expect(prompt).toContain('Raven infers Y from A, B, and C')
+    expect(prompt).toContain('alternative causal mechanisms')
+    expect(prompt).toContain('Summary debt')
+    expect(prompt).toContain('Do not force action=synthesize onto trivial writing')
+  })
+
   it('supports general writing without forcing external evidence', async () => {
     const raven = createHarness()
     const started = await raven.run({
       action: 'start',
       outcome: 'general-writing',
       grounding: 'none',
-      request: 'Rewrite the supplied release note for engineering managers.',
+      request: 'Summarize the supplied release note for engineering managers.',
     })
     const draft = await raven.run({
       action: 'checkpoint',
@@ -240,6 +328,8 @@ describe('Raven end-to-end acceptance', () => {
     expect(draft.renderedArtifact).toContain('controlled steps')
     expect(completed.status).toBe('completed')
     expect(completed.state.outcome).toBe('general-writing')
+    expect(completed.state.insightCandidates).toEqual([])
+    expect(completed.state.syntheses).toEqual([])
   })
 
   it('supports academic writing with traceable real Source identities', async () => {
@@ -762,7 +852,7 @@ describe('Raven end-to-end acceptance', () => {
     const properties = raven.tool.parameters.properties as Record<string, unknown>
     const action = properties.action as { enum: string[] }
 
-    expect(action.enum).toEqual(['start', 'discover', 'draft', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'])
+    expect(action.enum).toEqual(['start', 'discover', 'synthesize', 'draft', 'checkpoint', 'steer', 'complete', 'status', 'inspect', 'stop', 'resume', 'export'])
     expect(action.enum).not.toContain('confirm')
     expect(action.enum).not.toContain('approve')
     expect(String(raven.sections[0]?.text)).toContain('Do not ask for approval between')

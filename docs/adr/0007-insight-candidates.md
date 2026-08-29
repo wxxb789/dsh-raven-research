@@ -1,0 +1,3 @@
+# An Insight Candidate is not an accepted Claim
+
+Raven records synthesis as durable Insight Candidates before any interpretation can become accepted analysis. A candidate keeps its premise Claims, assumptions, plausible alternatives, confidence, rationale, and reversal evidence; promotion is a separate Checkpoint contribution that creates an `analysis` Claim with the exact lineage, while an `external` Claim remains reserved for what inspected Sources say. This two-step boundary costs one explicit synthesis action, but prevents novel interpretation from silently hardening into external fact, preserves competing explanations, and adds inspectable reasoning without introducing a second model workflow or changing Draft Variants.

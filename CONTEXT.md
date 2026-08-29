@@ -32,6 +32,18 @@ A candidate Raven has located but not inspected. A Lead records where something 
 
 One candidate rendering of the same writing instruction, produced by one model route. A Draft Variant is a candidate in exactly the sense a Lead is: it carries no evidence of its own, can never be cited, and joins the Raven Task only when its wording is adopted into a Checkpoint that Raven verifies against real Sources. Comparing variants chooses phrasing; it never establishes a fact, and a sentence every variant agrees on is still unsupported until a Source excerpt supports it.
 
+## Insight Candidate
+
+A candidate interpretation Raven has derived from one or more Claims, such as a connection, explanation, hypothesis, reframing, implication, or thesis. It records its premise Claims, assumptions, rationale, plausible alternatives, confidence, and what evidence would weaken it. An Insight Candidate is neither external fact nor accepted analysis. Raven may later promote it into an analysis Claim while preserving that lineage; competing candidates remain candidates rather than disappearing.
+
+## Synthesis Pass
+
+An explicit examination of a bounded Artifact or section for what follows from its Claims. A Synthesis Pass may seek synthesis, honor a request for summary, or provide explanation without a novelty requirement. It records the Claims considered, the Insight Candidates produced, and any Summary Debt found; it does not publish an Artifact or accept a candidate by itself.
+
+## Summary Debt
+
+A visible deficit in material that is organized but still consists mostly of restatement, chronology, or description. Summary Debt means the requested synthesis has not yet produced enough defensible interpretation, explanation, connection, or implication. It does not apply when summary is the requested result or when explanation rather than novelty is the goal.
+
 ## Prose Layout
 
 The canonical line shape of a stored Artifact. Raven owns it rather than the executor, because Completion compares Artifact bytes: if each writer laid out its own text, one model's line-wrapping habits would decide whether a final Artifact matches its Checkpoint. Under the default layout each sentence occupies its own line, which makes a line the smallest edit unit — a revision then reads as the sentences that changed rather than as rewritten paragraphs. A Prose Layout never alters meaning and never reflows document structure.
@@ -58,7 +70,7 @@ The current Raven Task's steerable rules for admitting and preferring Sources. I
 
 ## Claim
 
-A proposition considered or used by a Raven Task. A Claim distinguishes externally grounded statements from Raven's analysis and records whether it is supported, qualified, deferred, or rejected.
+A proposition considered or used by a Raven Task. An external Claim records what inspected Sources say. An analysis Claim records what Raven infers and retains the Insight Candidate, premise Claims, and assumptions from which the inference was promoted. Either kind records whether it is supported, qualified, deferred, or rejected; an analysis Claim loses accepted authority when a premise does.
 
 ## Evidence Link
 

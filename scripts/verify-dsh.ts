@@ -351,13 +351,59 @@ try {
     }],
   })
   assert.match(checkpoint, /Harness smoke evidence/)
+  const insightText = 'Durable acknowledgement may move failure handling from retry ambiguity to explicit recovery.'
+  const assumption = 'The documented acknowledgement boundary is the relevant failure boundary.'
+  const synthesized = await execute({
+    action: 'synthesize',
+    taskId,
+    scope: 'Operational implication',
+    purpose: 'synthesis',
+    claimIds: ['C1'],
+    insights: [{
+      insightId: 'I1',
+      text: insightText,
+      kind: 'implication',
+      pattern: 'second-order-effect',
+      claimIds: ['C1'],
+      assumptions: [assumption],
+      rationale: 'A durable boundary changes which recovery state remains ambiguous after failure.',
+      wouldChangeMind: 'Evidence that acknowledgement can precede durability under the documented mode.',
+      confidence: 'medium',
+    }],
+  })
+  assert.match(synthesized, /Insight Candidates \(interpretations, not facts or accepted analysis\)/)
+  assert.match(synthesized, /Summary debt: none/)
+  const inspectedInsight = await execute({ action: 'inspect', taskId, insightIds: ['I1'] })
+  assert.match(inspectedInsight, /Exact durable Insight Candidate records/)
+  assert.match(inspectedInsight, /acknowledgement can precede durability/)
+  const finalArtifact = `The source documents durable acknowledgement [@S1]. ${insightText}`
+  const analyzed = await execute({
+    action: 'checkpoint',
+    taskId,
+    stage: 'analyze',
+    summary: 'A source observation plus one explicitly traced implication.',
+    artifact: finalArtifact,
+    claims: [{
+      claimId: 'A1',
+      text: insightText,
+      kind: 'analysis',
+      importance: 'material',
+      disposition: 'qualified',
+      sourceIds: [],
+      insightId: 'I1',
+      derivedFromClaimIds: ['C1'],
+      assumptions: [assumption],
+    }],
+  })
+  assert.match(analyzed, /Raven inference from C1/)
   const completed = await execute({
     action: 'complete',
     taskId,
-    artifact: 'The source documents durable acknowledgement [@S1].',
+    artifact: finalArtifact,
   })
   assert.match(completed, /Completed Raven Task/)
   assert.match(completed, /Harness smoke evidence/)
+  assert.match(completed, /Analysis lineage/)
 
   // Task state has two publication paths because the registry gives a nested
   // sub-call no result card: a direct call carries the record as result metadata,

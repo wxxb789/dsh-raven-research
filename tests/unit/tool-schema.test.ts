@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { ACTION_FIELDS, createRavenEngine } from '../../src/engine.js'
 import { apply } from '../../src/plugin.js'
-import type { SourceVerifier } from '../../src/domain.js'
+import { RAVEN_LIMITS, type SourceVerifier } from '../../src/domain.js'
 
 interface ParameterSchema {
   properties: Record<string, { enum?: string[]; description?: string }>
@@ -84,6 +84,53 @@ describe('raven_task action field contract', () => {
       'allowedWebHosts', 'blockedWebHosts', 'preferPrimary', 'localRoots', 'llmWikiRoots',
       'includedMcpSources', 'excludedMcpSources',
     ])
+  })
+
+  it('exposes first-class bounded Insight Candidates and explicit synthesis purposes', () => {
+    const properties = toolParameters().properties as unknown as Record<string, Record<string, unknown>>
+    const insights = properties.insights
+    const item = insights?.items as Record<string, unknown>
+    const insightProperties = item?.properties as Record<string, Record<string, unknown>>
+
+    expect(properties.action?.enum).toContain('synthesize')
+    expect(properties.action?.enum).toContain('inspect')
+    expect(ACTION_FIELDS.status).toEqual(['action', 'taskId', 'insightOffset'])
+    expect(ACTION_FIELDS.inspect).toEqual(['action', 'taskId', 'insightIds'])
+    expect(properties.insightOffset).toMatchObject({ type: 'integer', minimum: 0 })
+    expect(properties.insightOffset?.description).toContain(String(RAVEN_LIMITS.insightInspectionIds))
+    expect(properties.insightIds?.description).toContain(`1-${RAVEN_LIMITS.insightInspectionIds}`)
+    expect(properties.insightIds?.description).toContain('no implicit inspect-all')
+    expect(properties.purpose?.enum).toEqual(['summary', 'explanation', 'synthesis'])
+    expect(item.required).toEqual([
+      'insightId', 'text', 'kind', 'pattern', 'claimIds', 'assumptions', 'rationale',
+      'wouldChangeMind', 'confidence',
+    ])
+    expect(insightProperties.kind?.enum).toEqual([
+      'interpretation', 'connection', 'explanation', 'hypothesis', 'reframing', 'implication', 'thesis',
+    ])
+    expect(insightProperties.pattern?.enum).toContain('alternative-causal-mechanism')
+    expect(insightProperties.pattern?.enum).toContain('cross-domain-analogy')
+    expect(insightProperties.wouldChangeMind?.description).toContain('reverse or materially weaken')
+  })
+
+  it('keeps legacy migration Source IDs out of tool and engine input', async () => {
+    const properties = toolParameters().properties as unknown as Record<string, Record<string, unknown>>
+    const claim = properties.claims?.items as Record<string, unknown>
+    const claimProperties = claim.properties as Record<string, unknown>
+    expect(claimProperties).not.toHaveProperty('legacySourceIds')
+
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start', outcome: 'learning', grounding: 'none', request: 'Reject codec-only Claim fields.',
+    }, { sessionId: 'session-legacy-source-ids', signal })
+    await expect(engine.dispatch(started.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'draft', summary: 'Invalid compatibility input.',
+      artifact: 'A new analysis Claim.',
+      claims: [{
+        claimId: 'A1', text: 'A new analysis Claim.', kind: 'analysis', importance: 'context',
+        disposition: 'supported', sourceIds: [], legacySourceIds: ['S1'],
+      }],
+    }, { sessionId: 'session-legacy-source-ids', signal })).rejects.toThrow(/unknown field\(s\): legacySourceIds/)
   })
 
   it('names the accepted fields when it rejects one belonging to another action', async () => {

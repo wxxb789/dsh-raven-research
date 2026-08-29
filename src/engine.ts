@@ -2,6 +2,16 @@ import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 
 import { settleWithAbort } from './abort.js'
+import {
+  acceptedAnalysisPremise,
+  analysisLineageCycle,
+  appendBoundedSynthesisRound,
+  assessSummaryDebt,
+  insightCandidateRecall,
+  insightCompetitionMap,
+  outstandingSummaryDebt,
+  propagateAnalysisPremiseDispositions,
+} from './analysis.js'
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { layoutProse, proseLayoutReport, type ProseLayoutOptions, type ProseLayoutReport } from './prose.js'
 import { formatDraftRoute } from './route.js'
@@ -14,18 +24,26 @@ import {
   CLAIM_KINDS,
   EMPTY_SOURCE_POLICY,
   GROUNDING_POLICIES,
+  INSIGHT_CONFIDENCE,
+  INSIGHT_KINDS,
+  INSIGHT_PATTERNS,
   LIMITATION_KINDS,
   OUTCOMES,
   RAVEN_LIMITS,
+  RAVEN_SCHEMA_VERSION,
   RAVEN_STAGES,
   SOURCE_ORIGINS,
   SOURCE_ROLES,
+  SYNTHESIS_PURPOSES,
   type ClaimDisposition,
   type ClaimImportance,
   type ClaimKind,
   type DraftGenerator,
   type DraftResult,
   type GroundingPolicy,
+  type InsightConfidence,
+  type InsightKind,
+  type InsightPattern,
   type LeadSearchResult,
   type RavenCheckpointRecord,
   type RavenClaimRecord,
@@ -34,6 +52,7 @@ import {
   type RavenDispatchResult,
   type RavenDraftRoute,
   type RavenExecution,
+  type RavenInsightCandidate,
   type RavenLimitation,
   type RavenLimitationKind,
   type RavenOutcome,
@@ -43,6 +62,8 @@ import {
   type RavenSourceRepresentation,
   type RavenSourceResource,
   type RavenStage,
+  type RavenSynthesisResult,
+  type RavenSynthesisRound,
   type RavenTaskState,
   type RavenVerificationReceipt,
   type SourceCheckResult,
@@ -50,6 +71,7 @@ import {
   type SourceRole,
   type SourceSearcher,
   type SourceVerifier,
+  type SynthesisPurpose,
 } from './domain.js'
 
 /** Deployment-owned discovery bounds, read per call so a settings change needs no restart. */
@@ -129,11 +151,13 @@ interface RavenEngine {
 export const ACTION_FIELDS: Record<string, readonly string[]> = {
   start: ['action', 'outcome', 'request', 'grounding', 'sourcePolicy'],
   discover: ['action', 'taskId', 'queries'],
+  synthesize: ['action', 'taskId', 'scope', 'purpose', 'claimIds', 'insights'],
   draft: ['action', 'taskId', 'instruction', 'routes'],
   checkpoint: ['action', 'taskId', 'stage', 'summary', 'artifact', 'sources', 'claims', 'failures'],
   steer: ['action', 'taskId', 'correction', 'sourcePolicy'],
   complete: ['action', 'taskId', 'artifact'],
-  status: ['action', 'taskId'],
+  status: ['action', 'taskId', 'insightOffset'],
+  inspect: ['action', 'taskId', 'insightIds'],
   stop: ['action', 'taskId', 'reason'],
   resume: ['action', 'taskId'],
   export: ['action', 'taskId', 'title', 'tags', 'init'],
@@ -194,6 +218,19 @@ function member<T extends string>(value: unknown, values: readonly T[], label: s
 
 function optionalArray(value: unknown, label: string): unknown[] {
   if (value === undefined) return []
+  if (!Array.isArray(value)) throw new RavenTypeError('invalid-value', `${label} must be an array`)
+  return value
+}
+
+function optionalNonnegativeInteger(value: unknown, label: string): number {
+  if (value === undefined) return 0
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new RavenTypeError('invalid-value', `${label} must be a nonnegative safe integer`)
+  }
+  return value
+}
+
+function requiredArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) throw new RavenTypeError('invalid-value', `${label} must be an array`)
   return value
 }
@@ -611,15 +648,141 @@ function parseSources(
   return [...byId.values()]
 }
 
+function parseInsightCandidates(
+  value: unknown,
+  existing: readonly RavenInsightCandidate[],
+  knownClaims: ReadonlyMap<string, RavenClaimRecord>,
+  roundClaimIds: ReadonlySet<string>,
+  createdAt: string,
+): { readonly all: RavenInsightCandidate[]; readonly round: RavenInsightCandidate[] } {
+  const byId = new Map(existing.map(insight => [insight.insightId, insight]))
+  const round: RavenInsightCandidate[] = []
+  const roundIds = new Set<string>()
+  for (const raw of requiredArray(value, 'insights')) {
+    const input = record(raw, 'insight')
+    assertOnlyKeys(input, [
+      'insightId', 'text', 'kind', 'pattern', 'claimIds', 'assumptions', 'rationale',
+      'wouldChangeMind', 'confidence', 'competesWith',
+    ], 'insight')
+    const insightId = stableId(input.insightId, 'insight.insightId')
+    if (roundIds.has(insightId)) {
+      throw new RavenError('evidence-conflict', `synthesis round contains duplicate Insight Candidate ${insightId}`)
+    }
+    roundIds.add(insightId)
+    const claimIds = requiredArray(input.claimIds, 'insight.claimIds')
+      .map(claimId => stableId(claimId, 'insight.claimIds[]'))
+    if (claimIds.length === 0) {
+      throw new RavenTypeError('invalid-value', `Insight Candidate ${insightId} must name at least one premise Claim`)
+    }
+    if (claimIds.length > RAVEN_LIMITS.claims) {
+      throw new RavenError('limit-exceeded', `insight.claimIds may name at most ${RAVEN_LIMITS.claims} Claim IDs`)
+    }
+    if (new Set(claimIds).size !== claimIds.length) {
+      throw new RavenError('evidence-conflict', `Insight Candidate ${insightId} contains duplicate premise Claim IDs`)
+    }
+    for (const claimId of claimIds) {
+      if (!knownClaims.has(claimId)) {
+        throw new RavenError('evidence-conflict', `Insight Candidate ${insightId} references unknown Claim ${claimId}`)
+      }
+      if (!roundClaimIds.has(claimId)) {
+        throw new RavenError('evidence-conflict', `Insight Candidate ${insightId} uses Claim ${claimId} outside this synthesis scope`)
+      }
+    }
+    const assumptions = requiredArray(input.assumptions, 'insight.assumptions')
+      .map((assumption, index) => boundedText(
+        assumption,
+        `insight.assumptions[${index}]`,
+        RAVEN_LIMITS.insightAssumptionChars,
+      ))
+    if (assumptions.length > RAVEN_LIMITS.insightAssumptions) {
+      throw new RavenError(
+        'limit-exceeded',
+        `insight.assumptions may contain at most ${RAVEN_LIMITS.insightAssumptions} assumptions`,
+      )
+    }
+    if (new Set(assumptions).size !== assumptions.length) {
+      throw new RavenError('evidence-conflict', `Insight Candidate ${insightId} contains duplicate assumptions`)
+    }
+    const competesWith = optionalArray(input.competesWith, 'insight.competesWith')
+      .map(other => stableId(other, 'insight.competesWith[]'))
+    if (competesWith.length > RAVEN_LIMITS.insightCandidates) {
+      throw new RavenError(
+        'limit-exceeded',
+        `insight.competesWith may name at most ${RAVEN_LIMITS.insightCandidates} Insight IDs`,
+      )
+    }
+    if (new Set(competesWith).size !== competesWith.length) {
+      throw new RavenError('evidence-conflict', `Insight Candidate ${insightId} contains duplicate competing links`)
+    }
+    if (competesWith.includes(insightId)) {
+      throw new RavenError('evidence-conflict', `Insight Candidate ${insightId} cannot compete with itself`)
+    }
+    const candidate: RavenInsightCandidate = {
+      insightId,
+      text: boundedText(input.text, 'insight.text', RAVEN_LIMITS.insightTextChars),
+      kind: member<InsightKind>(input.kind, INSIGHT_KINDS, 'insight.kind'),
+      pattern: member<InsightPattern>(input.pattern, INSIGHT_PATTERNS, 'insight.pattern'),
+      claimIds,
+      assumptions,
+      rationale: boundedText(input.rationale, 'insight.rationale', RAVEN_LIMITS.insightRationaleChars),
+      wouldChangeMind: boundedText(
+        input.wouldChangeMind,
+        'insight.wouldChangeMind',
+        RAVEN_LIMITS.insightWouldChangeMindChars,
+      ),
+      confidence: member<InsightConfidence>(input.confidence, INSIGHT_CONFIDENCE, 'insight.confidence'),
+      ...(competesWith.length === 0 ? {} : { competesWith }),
+      createdAt,
+    }
+    const current = byId.get(insightId)
+    if (current !== undefined) {
+      const { createdAt: _createdAt, ...currentContent } = current
+      const { createdAt: _nextCreatedAt, ...nextContent } = candidate
+      if (JSON.stringify(currentContent) !== JSON.stringify(nextContent)) {
+        throw new RavenError('evidence-conflict', `Insight Candidate ID ${insightId} cannot be reused for different reasoning`)
+      }
+      round.push(current)
+    } else {
+      byId.set(insightId, candidate)
+      round.push(candidate)
+    }
+  }
+  for (const insight of byId.values()) {
+    for (const other of insight.competesWith ?? []) {
+      if (!byId.has(other)) {
+        throw new RavenError('evidence-conflict', `Insight Candidate ${insight.insightId} competes with unknown Insight Candidate ${other}`)
+      }
+    }
+  }
+  if (byId.size > RAVEN_LIMITS.insightCandidates) {
+    throw new RavenError(
+      'limit-exceeded',
+      `Raven Task may retain at most ${RAVEN_LIMITS.insightCandidates} Insight Candidates`,
+    )
+  }
+  return { all: [...byId.values()], round }
+}
+
+function summaryDebtIssues(state: RavenTaskState): string[] {
+  return outstandingSummaryDebt(state.syntheses)
+    .map(round => `Outstanding ${round.summaryDebt} summary debt for ${round.scope}: ${round.summaryDebtDetail}`)
+}
+
 function parseClaims(
   value: unknown,
   existing: readonly RavenClaimRecord[],
   knownSourceIds: ReadonlySet<string>,
+  insightCandidates: readonly RavenInsightCandidate[],
 ): RavenClaimRecord[] {
-  const byId = new Map(existing.map(claim => [claim.claimId, claim]))
+  const existingById = new Map(existing.map(claim => [claim.claimId, claim]))
+  const byId = new Map(existingById)
+  const candidateById = new Map(insightCandidates.map(insight => [insight.insightId, insight]))
   for (const raw of optionalArray(value, 'claims')) {
     const input = record(raw, 'claim')
-    assertOnlyKeys(input, ['claimId', 'text', 'kind', 'importance', 'disposition', 'sourceIds', 'contradicts'], 'claim')
+    assertOnlyKeys(input, [
+      'claimId', 'text', 'kind', 'importance', 'disposition', 'sourceIds', 'insightId',
+      'derivedFromClaimIds', 'assumptions', 'contradicts',
+    ], 'claim')
     const claimId = stableId(input.claimId, 'claim.claimId')
     const text = boundedText(input.text, 'claim.text', RAVEN_LIMITS.claimTextChars)
     const current = byId.get(claimId)
@@ -640,8 +803,53 @@ function parseClaims(
     const kind = member<ClaimKind>(input.kind, CLAIM_KINDS, 'claim.kind')
     const importance = member<ClaimImportance>(input.importance, CLAIM_IMPORTANCE, 'claim.importance')
     const disposition = member<ClaimDisposition>(input.disposition, CLAIM_DISPOSITIONS, 'claim.disposition')
-    if (kind === 'external' && (disposition === 'supported' || disposition === 'qualified') && sourceIds.length === 0) {
-      throw new RavenError('evidence-conflict', `external claim ${claimId} requires at least one source`)
+    if (current !== undefined && current.kind !== kind) {
+      throw new RavenError('evidence-conflict', `claim ID ${claimId} cannot change kind`)
+    }
+    const insightId = input.insightId === undefined ? undefined : stableId(input.insightId, 'claim.insightId')
+    const derivedFromClaimIds = optionalArray(input.derivedFromClaimIds, 'claim.derivedFromClaimIds')
+      .map(other => stableId(other, 'claim.derivedFromClaimIds[]'))
+    const assumptions = optionalArray(input.assumptions, 'claim.assumptions')
+      .map((assumption, index) => boundedText(
+        assumption,
+        `claim.assumptions[${index}]`,
+        RAVEN_LIMITS.insightAssumptionChars,
+      ))
+    if (derivedFromClaimIds.length > RAVEN_LIMITS.claims) {
+      throw new RavenError('limit-exceeded', `claim.derivedFromClaimIds may name at most ${RAVEN_LIMITS.claims} Claim IDs`)
+    }
+    if (assumptions.length > RAVEN_LIMITS.insightAssumptions) {
+      throw new RavenError('limit-exceeded', `claim.assumptions may contain at most ${RAVEN_LIMITS.insightAssumptions} assumptions`)
+    }
+    if (new Set(derivedFromClaimIds).size !== derivedFromClaimIds.length) {
+      throw new RavenError('evidence-conflict', `claim ${claimId} contains duplicate analysis-premise links`)
+    }
+    if (new Set(assumptions).size !== assumptions.length) {
+      throw new RavenError('evidence-conflict', `claim ${claimId} contains duplicate assumptions`)
+    }
+    if (derivedFromClaimIds.includes(claimId)) {
+      throw new RavenError('evidence-conflict', `analysis claim ${claimId} cannot derive from itself`)
+    }
+    if (current?.insightId !== undefined
+      && (current.insightId !== insightId
+        || JSON.stringify(current.derivedFromClaimIds ?? []) !== JSON.stringify(derivedFromClaimIds)
+        || JSON.stringify(current.assumptions ?? []) !== JSON.stringify(assumptions))) {
+      throw new RavenError('evidence-conflict', `analysis lineage for claim ${claimId} is immutable`)
+    }
+    if (kind === 'external') {
+      if ((disposition === 'supported' || disposition === 'qualified') && sourceIds.length === 0) {
+        throw new RavenError('evidence-conflict', `external claim ${claimId} requires at least one source`)
+      }
+      if (input.insightId !== undefined
+        || input.derivedFromClaimIds !== undefined
+        || input.assumptions !== undefined) {
+        throw new RavenError(
+          'evidence-conflict',
+          `Insight Candidate ${insightId ?? 'unknown'} cannot be promoted as external fact; promote it as kind=analysis with explicit Claim lineage`,
+        )
+      }
+    } else if (sourceIds.length > 0) {
+      throw new RavenError('evidence-conflict', `analysis claim ${claimId} must use Claim lineage rather than direct Source IDs`)
     }
     const contradicts = optionalArray(input.contradicts, 'claim.contradicts')
       .map(other => stableId(other, 'claim.contradicts[]'))
@@ -659,19 +867,72 @@ function parseClaims(
       importance,
       disposition,
       sourceIds,
+      ...(current?.legacySourceIds === undefined
+        || input.insightId !== undefined
+        || input.derivedFromClaimIds !== undefined
+        || input.assumptions !== undefined
+        ? {}
+        : { legacySourceIds: current.legacySourceIds }),
+      ...(insightId === undefined ? {} : { insightId }),
+      ...(derivedFromClaimIds.length === 0 ? {} : { derivedFromClaimIds }),
+      ...(assumptions.length === 0 ? {} : { assumptions }),
       ...(contradicts.length === 0 ? {} : { contradicts }),
     })
   }
-  // Resolved after the batch so a mutually contradicting pair can be submitted together.
+  // Resolved after the batch so mutually linked Claims can be submitted together.
   for (const claim of byId.values()) {
     for (const other of claim.contradicts ?? []) {
       if (!byId.has(other)) throw new RavenError('evidence-conflict', `claim ${claim.claimId} contradicts unknown Claim ${other}`)
     }
+    if (claim.kind !== 'analysis') continue
+    const acceptedMaterial = claim.importance === 'material' && acceptedAnalysisPremise(claim)
+    const previous = existingById.get(claim.claimId)
+    const retainedLegacyAcceptance = previous?.kind === 'analysis'
+      && previous.importance === 'material'
+      && acceptedAnalysisPremise(previous)
+      && previous.insightId === undefined
+    if (acceptedMaterial && claim.insightId === undefined && !retainedLegacyAcceptance) {
+      throw new RavenError(
+        'evidence-conflict',
+        `material analysis claim ${claim.claimId} requires an explicitly recorded Insight Candidate and Claim lineage`,
+      )
+    }
+    if (claim.insightId === undefined) continue
+    const candidate = candidateById.get(claim.insightId)
+    if (candidate === undefined) {
+      throw new RavenError('evidence-conflict', `analysis claim ${claim.claimId} references unknown Insight Candidate ${claim.insightId}`)
+    }
+    if (claim.text !== candidate.text
+      || JSON.stringify(claim.derivedFromClaimIds ?? []) !== JSON.stringify(candidate.claimIds)
+      || JSON.stringify(claim.assumptions ?? []) !== JSON.stringify(candidate.assumptions)) {
+      throw new RavenError(
+        'evidence-conflict',
+        `analysis claim ${claim.claimId} must preserve Insight Candidate ${candidate.insightId} text, Claim lineage, and assumptions exactly`,
+      )
+    }
+    const firstPromotion = previous?.insightId === undefined
+    for (const premiseId of candidate.claimIds) {
+      const premise = byId.get(premiseId)
+      if (premise === undefined) {
+        throw new RavenError('evidence-conflict', `analysis claim ${claim.claimId} derives from unknown Claim ${premiseId}`)
+      }
+      if (firstPromotion && acceptedMaterial && !acceptedAnalysisPremise(premise)) {
+        throw new RavenError(
+          'evidence-conflict',
+          `Insight Candidate ${candidate.insightId} cannot be promoted because premise Claim ${premiseId} is ${premise.disposition}`,
+        )
+      }
+    }
   }
-  if (byId.size > RAVEN_LIMITS.claims) {
+  const claims = [...byId.values()]
+  const cycle = analysisLineageCycle(claims)
+  if (cycle !== undefined) {
+    throw new RavenError('evidence-conflict', `analysis Claim lineage contains a cycle at ${cycle}`)
+  }
+  if (claims.length > RAVEN_LIMITS.claims) {
     throw new RavenError('limit-exceeded', `Raven Task may retain at most ${RAVEN_LIMITS.claims} Claims`)
   }
-  return [...byId.values()]
+  return propagateAnalysisPremiseDispositions(claims).claims
 }
 
 /**
@@ -807,7 +1068,7 @@ function propagateSourceChecks(
   createdAt: string,
 ): { claims: RavenClaimRecord[]; limitations: RavenLimitation[]; droppedLimitations: number } {
   const checkById = new Map(sources.map(source => [source.sourceId, source.check]))
-  const propagatedClaims = claims.map((claim): RavenClaimRecord => {
+  const sourcePropagatedClaims = claims.map((claim): RavenClaimRecord => {
     if (claim.kind !== 'external') return claim
     const hasUsableSupport = claim.sourceIds.some(sourceId => checkById.get(sourceId)?.status === 'reachable')
     if (claim.disposition === 'deferred' && claim.deferredFrom !== undefined && hasUsableSupport) {
@@ -819,6 +1080,7 @@ function propagateSourceChecks(
     }
     return claim
   })
+  const propagatedClaims = propagateAnalysisPremiseDispositions(sourcePropagatedClaims).claims
   // Total on purpose. This runs on the `complete` failure path, where throwing at
   // the Limitation cap converted an actionable "this Source is broken" result into
   // a contextless throw AND lost the Claim deferrals computed in the same pass —
@@ -1339,10 +1601,53 @@ function sourceProvenance(source: RavenSourceRecord): string {
   return `${source.resource.origin}; ${source.representation.derivation} ${source.representation.coverage} Markdown by ${source.representation.producedBy}`
 }
 
+export function renderSynthesis(
+  result: RavenSynthesisResult | undefined,
+  claims: readonly RavenClaimRecord[],
+  insightCandidates: readonly RavenInsightCandidate[] = result?.candidates ?? [],
+): string {
+  if (result === undefined) return ''
+  const competitionById = insightCompetitionMap(insightCandidates)
+  const lines = [
+    '## Insight Candidates (interpretations, not facts or accepted analysis)',
+    `Scope: ${markdownText(result.round.scope)} · Purpose: ${result.round.purpose} · Summary debt: ${result.round.summaryDebt}`,
+    markdownText(result.round.summaryDebtDetail),
+  ]
+  if (result.candidates.length === 0) {
+    lines.push('No Insight Candidate was recorded in this pass.')
+    return lines.join('\n\n')
+  }
+  const claimById = new Map(claims.map(claim => [claim.claimId, claim]))
+  for (const candidate of result.candidates) {
+    const unresolved = candidate.claimIds.filter((claimId) => {
+      const claim = claimById.get(claimId)
+      return claim === undefined || !acceptedAnalysisPremise(claim)
+    })
+    const lineage = unresolved.length === 0
+      ? `traceable to Claim${candidate.claimIds.length === 1 ? '' : 's'} ${candidate.claimIds.join(', ')}`
+      : `weak lineage; unresolved Claim${unresolved.length === 1 ? '' : 's'} ${unresolved.join(', ')}`
+    const competitors = competitionById.get(candidate.insightId) ?? []
+    lines.push([
+      `### ${markdownIdentifier(candidate.insightId)} — ${candidate.kind} / ${candidate.pattern}`,
+      markdownText(candidate.text),
+      `- Lineage: ${lineage}`,
+      `- Why it may matter: ${markdownText(candidate.rationale)}`,
+      `- Assumptions: ${candidate.assumptions.length === 0 ? 'none stated' : candidate.assumptions.map(markdownText).join(' | ')}`,
+      `- What would change Raven's mind: ${markdownText(candidate.wouldChangeMind)}`,
+      `- Confidence: ${candidate.confidence}`,
+      ...(competitors.length === 0
+        ? []
+        : [`- Plausible alternative: competes with ${competitors.map(markdownText).join(', ')}`]),
+    ].join('\n'))
+  }
+  return lines.join('\n\n')
+}
+
 export function renderArtifact(
   artifact: string,
   sources: readonly RavenSourceRecord[],
   claims: readonly RavenClaimRecord[] = [],
+  insightCandidates: readonly RavenInsightCandidate[] = [],
 ): string {
   const byId = new Map(sources.map(source => [source.sourceId, source]))
   const used: string[] = []
@@ -1364,19 +1669,44 @@ export function renderArtifact(
     })
     sections.push(`## Sources\n${lines.join('\n')}`)
   }
-  const traced = claims.filter(claim => claim.kind === 'external'
+  const external = claims.filter(claim => claim.kind === 'external'
     && claim.importance === 'material'
     && (claim.disposition === 'supported' || claim.disposition === 'qualified'))
-  if (traced.length > 0) {
-    const lines = traced.map((claim) => {
+  if (external.length > 0) {
+    const lines = external.map((claim) => {
       const links = claim.sourceIds.map((sourceId) => {
         const source = byId.get(sourceId)
         if (source === undefined) throw new Error(`claim ${claim.claimId} lost source ${sourceId} during rendering`)
         return `[${sourceId}](${source.url.replaceAll(')', '%29')})`
       })
-      return `- **${claim.claimId}**: ${markdownText(claim.text)} — ${links.join(', ')}${independenceNote(claim, byId)}${contestedNote(claim)}`
+      return `- **${claim.claimId}** (source says): ${markdownText(claim.text)} — ${links.join(', ')}${independenceNote(claim, byId)}${contestedNote(claim)}`
     })
     sections.push(`## Claim trace\n${lines.join('\n')}`)
+  }
+  const analysis = claims.filter(claim => claim.kind === 'analysis'
+    && claim.importance === 'material'
+    && (claim.disposition === 'supported' || claim.disposition === 'qualified'))
+  if (analysis.length > 0) {
+    const candidateById = new Map(insightCandidates.map(insight => [insight.insightId, insight]))
+    const competitionById = insightCompetitionMap(insightCandidates)
+    const lines = analysis.map((claim) => {
+      if (claim.legacySourceIds !== undefined) {
+        return `- **${claim.claimId}** (legacy untraced analysis; historical Source IDs ${claim.legacySourceIds.join(', ')} preserved for migration only, not direct Source authority): ${markdownText(claim.text)}`
+          + contestedNote(claim)
+      }
+      const premises = claim.derivedFromClaimIds ?? []
+      const candidate = claim.insightId === undefined ? undefined : candidateById.get(claim.insightId)
+      const assumptions = claim.assumptions ?? []
+      const alternatives = candidate === undefined
+        ? []
+        : competitionById.get(candidate.insightId) ?? []
+      return `- **${claim.claimId}** (Raven inference from ${premises.length === 0 ? 'unrecorded premises' : premises.join(', ')}`
+        + `${claim.insightId === undefined ? '' : `; Insight Candidate ${claim.insightId}`}): ${markdownText(claim.text)}`
+        + ` — Assumptions: ${assumptions.length === 0 ? 'none stated' : assumptions.map(markdownText).join(' | ')}`
+        + `${alternatives.length === 0 ? '' : ` — ${alternatives.map(item => `alternative ${markdownText(item)} remains a candidate`).join('; ')}`}`
+        + contestedNote(claim)
+    })
+    sections.push(`## Analysis lineage\n${lines.join('\n')}`)
   }
   return sections.join('\n\n')
 }
@@ -1447,7 +1777,7 @@ function assertStateBudget(state: RavenTaskState, maximum: number): void {
       `Raven Task state would occupy ${bytes} bytes, above this mutation's durable snapshot budget of`
       + ` ${maximum} (${RAVEN_LIMITS.stateBytes} total with`
       + ` ${RAVEN_LIMITS.stateCompletionReserveBytes} reserved for Completion).`
-      + ' Shorten or split Sources, Claims, excerpts, corrections, or Limitations',
+      + ' Shorten or split Sources, Claims, Insight Candidates, excerpts, corrections, or Limitations',
     )
   }
 }
@@ -1480,7 +1810,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const ordinal = (previous?.ordinal ?? 0) + 1
         const at = options.now()
         const state: RavenTaskState = {
-          schemaVersion: 2,
+          schemaVersion: RAVEN_SCHEMA_VERSION,
           taskId: taskId(execution.sessionId, ordinal),
           ordinal,
           outcome,
@@ -1494,6 +1824,8 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           checkpoints: [],
           sources: [],
           claims: [],
+          insightCandidates: [],
+          syntheses: [],
           limitations: [],
           latestArtifact: null,
           verification: null,
@@ -1514,11 +1846,52 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         if (args.taskId !== undefined && requiredText(args.taskId, 'taskId') !== previous.taskId) {
           throw new RavenError('task-not-found', `Raven Task ${String(args.taskId)} was not found in this session`)
         }
+        const insightOffset = optionalNonnegativeInteger(args.insightOffset, 'insightOffset')
+        const recall = insightCandidateRecall(
+          previous.claims,
+          previous.insightCandidates,
+          RAVEN_LIMITS.insightInspectionIds,
+          insightOffset,
+        )
         return {
           status: previous.phase,
           state: previous,
           message: `Raven Task ${previous.taskId} is ${previous.phase}.`,
-          issues: [],
+          issues: summaryDebtIssues(previous),
+          ...(previous.insightCandidates.length === 0 ? {} : { recall }),
+        }
+      }
+
+      if (action === 'inspect') {
+        const state = requireTask(previous, args.taskId)
+        const insightIds = requiredArray(args.insightIds, 'insightIds')
+          .map((insightId, index) => stableId(insightId, `insightIds[${index}]`))
+        if (insightIds.length === 0) {
+          throw new RavenTypeError('invalid-value', 'insightIds must name at least one Insight Candidate')
+        }
+        if (insightIds.length > RAVEN_LIMITS.insightInspectionIds) {
+          throw new RavenTypeError(
+            'limit-exceeded',
+            `insightIds may name at most ${RAVEN_LIMITS.insightInspectionIds} Insight Candidates per inspection`,
+          )
+        }
+        if (new Set(insightIds).size !== insightIds.length) {
+          throw new RavenError('evidence-conflict', 'insightIds contains duplicate Insight Candidate IDs')
+        }
+        const byId = new Map(state.insightCandidates.map(candidate => [candidate.insightId, candidate]))
+        const candidates = insightIds.map((insightId) => {
+          const candidate = byId.get(insightId)
+          if (candidate === undefined) {
+            throw new RavenError('evidence-conflict', `inspect references unknown Insight Candidate ${insightId}`)
+          }
+          return candidate
+        })
+        return {
+          status: state.phase,
+          state,
+          message: `Raven Task ${state.taskId}: inspected ${candidates.length} Insight Candidate(s).`,
+          issues: summaryDebtIssues(state),
+          inspection: { candidates },
         }
       }
 
@@ -1595,6 +1968,79 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           message,
           issues,
           leads: outcome,
+        }
+      }
+
+      if (action === 'synthesize') {
+        const state = requireActiveTask(previous, args.taskId)
+        const scope = boundedText(args.scope, 'scope', RAVEN_LIMITS.synthesisScopeChars)
+        const purpose = member<SynthesisPurpose>(args.purpose, SYNTHESIS_PURPOSES, 'purpose')
+        const claimIds = requiredArray(args.claimIds, 'claimIds')
+          .map(claimId => stableId(claimId, 'claimIds[]'))
+        if (claimIds.length === 0) {
+          throw new RavenTypeError('invalid-value', 'claimIds must name at least one recorded Claim to assess')
+        }
+        if (claimIds.length > RAVEN_LIMITS.claims) {
+          throw new RavenError('limit-exceeded', `claimIds may name at most ${RAVEN_LIMITS.claims} Claims`)
+        }
+        const roundClaimIds = new Set(claimIds)
+        if (roundClaimIds.size !== claimIds.length) {
+          throw new RavenError('evidence-conflict', 'claimIds contains duplicate Claim IDs')
+        }
+        const claimById = new Map(state.claims.map(claim => [claim.claimId, claim]))
+        const roundClaims = claimIds.map((claimId) => {
+          const claim = claimById.get(claimId)
+          if (claim === undefined) throw new RavenError('evidence-conflict', `synthesis scope references unknown Claim ${claimId}`)
+          return claim
+        })
+        const at = options.now()
+        const parsed = parseInsightCandidates(
+          args.insights,
+          state.insightCandidates,
+          claimById,
+          roundClaimIds,
+          at,
+        )
+        const debt = assessSummaryDebt(purpose, scope, roundClaims, parsed.round)
+        const synthesis: RavenSynthesisRound = {
+          ordinal: (state.syntheses.at(-1)?.ordinal ?? 0) + 1,
+          scope,
+          purpose,
+          claimIds,
+          insightIds: parsed.round.map(insight => insight.insightId),
+          summaryDebt: debt.level,
+          summaryDebtDetail: debt.detail,
+          createdAt: at,
+        }
+        const syntheses = appendBoundedSynthesisRound(
+          state.syntheses,
+          synthesis,
+          RAVEN_LIMITS.synthesisRounds,
+        )
+        if (syntheses === undefined) {
+          throw new RavenError(
+            'limit-exceeded',
+            `Raven Task may retain at most ${RAVEN_LIMITS.synthesisRounds} synthesis rounds without discarding outstanding per-scope summary debt`,
+          )
+        }
+        const next: RavenTaskState = {
+          ...state,
+          revision: state.revision + 1,
+          insightCandidates: parsed.all,
+          syntheses,
+          verification: null,
+          finalArtifactSha256: null,
+          updatedAt: at,
+        }
+        return {
+          status: 'active',
+          state: next,
+          message: `Raven Task ${state.taskId}: recorded ${parsed.round.length} Insight Candidate(s) for ${scope}.`,
+          issues: [
+            'Insight Candidates are interpretations, not facts or accepted analysis; promote one only as kind=analysis with its exact Claim lineage and assumptions.',
+            ...(debt.level === 'none' ? [] : [debt.detail]),
+          ],
+          synthesis: { round: synthesis, candidates: parsed.round },
         }
       }
 
@@ -1719,7 +2165,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           issues: [],
           ...(state.latestArtifact === null
             ? {}
-            : { renderedArtifact: renderArtifact(state.latestArtifact, state.sources, state.claims) }),
+            : { renderedArtifact: renderArtifact(state.latestArtifact, state.sources, state.claims, state.insightCandidates) }),
         }
       }
 
@@ -1748,7 +2194,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         }
         const wiki = renderWikiPages(
           state,
-          renderArtifact(state.latestArtifact, state.sources, state.claims),
+          renderArtifact(state.latestArtifact, state.sources, state.claims, state.insightCandidates),
           {
             title,
             tags: tags.length > 0 ? tags : [state.outcome],
@@ -1857,7 +2303,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const artifactSha256 = sha256(artifact)
         const parsedSources = parseSources(args.sources, state.sources, at)
         const knownSourceIds = new Set(parsedSources.map(source => source.sourceId))
-        const claims = parseClaims(args.claims, state.claims, knownSourceIds)
+        const claims = parseClaims(args.claims, state.claims, knownSourceIds, state.insightCandidates)
         const parsedLimitations = parseLimitations(args.failures, state.limitations, knownSourceIds, at)
         const limitations = parsedLimitations.limitations
         validateArtifactCitations(artifact, parsedSources, claims)
@@ -1907,6 +2353,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
                 return `source ${source.sourceId} failed evidence verification: ${detail}`
               }),
               ...limitationCapIssue(parsedLimitations.dropped + propagated.droppedLimitations),
+              ...summaryDebtIssues(state),
             ],
           }
         }
@@ -1945,8 +2392,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           issues: [
             ...admitted.issues,
             ...limitationCapIssue(parsedLimitations.dropped + propagated.droppedLimitations),
+            ...summaryDebtIssues(state),
           ],
-          renderedArtifact: renderArtifact(artifact, sources, propagated.claims),
+          renderedArtifact: renderArtifact(artifact, sources, propagated.claims, state.insightCandidates),
           ...(stored.report.changed
             ? {
                 relaidArtifact: {
@@ -2000,7 +2448,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             status: 'needs-revision',
             state,
             message: `Raven Task ${state.taskId} is not ready for Completion.`,
-            issues,
+            issues: [...issues, ...summaryDebtIssues(state)],
           }
         }
 
@@ -2044,6 +2492,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
                 return `source ${source.sourceId} failed remote verification: ${detail}`
               }),
               ...limitationCapIssue(propagated.droppedLimitations),
+              ...summaryDebtIssues(state),
             ],
           }
         }
@@ -2085,16 +2534,17 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             ? `Completed Raven Task ${state.taskId} with verified Source references.`
             : `Completed Raven Task ${state.taskId} with explicit verification limits.`,
           issues: phase === 'completed'
-            ? admitted.issues
+            ? [...admitted.issues, ...summaryDebtIssues(state)]
             : [
                 ...admitted.issues,
+                ...summaryDebtIssues(state),
                 ...propagated.limitations.map(item => item.detail),
                 ...(verified.receipt.unavailable === 0
                   ? []
                   : [`${verified.receipt.unavailable} Source reference(s) could not be remotely verified`]),
                 ...(hasDeferredClaims ? ['one or more Claims remain deferred'] : []),
               ],
-          renderedArtifact: renderArtifact(artifact, verified.sources, propagated.claims),
+          renderedArtifact: renderArtifact(artifact, verified.sources, propagated.claims, state.insightCandidates),
         }
       }
 
