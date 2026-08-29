@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import { createRavenEngine } from '../../src/engine.js'
 import type { RavenDispatchResult, SourceVerifier } from '../../src/domain.js'
-import { renderWikiPages } from '../../src/wiki.js'
+import { renderWikiPages, wikiConfidence } from '../../src/wiki.js'
 
 const signal = new AbortController().signal
 const now = () => '2026-08-16T16:00:00.000Z'
@@ -272,6 +272,91 @@ describe('llm-wiki emission', () => {
       title: 'Clean Paragraph',
     }, { sessionId: 'wiki-conf-session', signal })
     expect(frontmatter(pageAt(done, 'wiki/queries/query-2026-08-16-clean-paragraph.md').content).confidence).toBe('high')
+
+    expect(wikiConfidence({
+      ...completed.state,
+      syntheses: [{
+        ordinal: 1,
+        scope: 'Analysis section',
+        purpose: 'synthesis',
+        claimIds: ['C1'],
+        insightIds: [],
+        summaryDebt: 'high',
+        summaryDebtDetail: 'The section only restates its evidence.',
+        createdAt: now(),
+      }],
+    })).toBe('medium')
+  })
+
+  it('projects outstanding Summary Debt per synthesis scope until that scope is cleared', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start', outcome: 'general-writing', grounding: 'none', request: 'Project per-scope debt.',
+    }, { sessionId: 'wiki-debt-scope', signal })
+    const checkpoint = await engine.dispatch(started.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'draft', summary: 'A draft.', artifact: 'A draft.',
+    }, { sessionId: 'wiki-debt-scope', signal })
+    const completed = await engine.dispatch(checkpoint.state, {
+      action: 'complete', taskId: started.state.taskId, artifact: checkpoint.state.latestArtifact,
+    }, { sessionId: 'wiki-debt-scope', signal })
+    const outstanding = {
+      ...completed.state,
+      syntheses: [{
+        ordinal: 1,
+        scope: 'Findings section',
+        purpose: 'synthesis' as const,
+        claimIds: ['C1'],
+        insightIds: [],
+        summaryDebt: 'high' as const,
+        summaryDebtDetail: 'The findings only restate evidence.',
+        createdAt: now(),
+      }, {
+        ordinal: 2,
+        scope: 'User summary',
+        purpose: 'summary' as const,
+        claimIds: ['C1'],
+        insightIds: [],
+        summaryDebt: 'none' as const,
+        summaryDebtDetail: 'A requested summary accrues no debt.',
+        createdAt: now(),
+      }],
+    }
+    const projected = renderWikiPages(outstanding, outstanding.latestArtifact ?? '', {
+      title: 'Scoped Debt', tags: ['research'], init: false, at: now(),
+    })
+    const projectedPage = projected.pages.find(page => page.path.includes('scoped-debt'))
+    if (projectedPage === undefined) throw new Error('missing scoped debt page')
+
+    expect(wikiConfidence(outstanding)).toBe('medium')
+    expect(frontmatter(projectedPage.content)).toMatchObject({
+      raven_summary_debt: 'high',
+      raven_summary_debt_scopes: '["Findings section"]',
+    })
+    expect(projected.logEntry).toContain('summary debt high in 1 scope(s): Findings section')
+
+    const cleared = {
+      ...outstanding,
+      syntheses: [...outstanding.syntheses, {
+        ordinal: 3,
+        scope: 'Findings section',
+        purpose: 'synthesis' as const,
+        claimIds: ['C1'],
+        insightIds: ['I1'],
+        summaryDebt: 'none' as const,
+        summaryDebtDetail: 'The findings now include traceable synthesis.',
+        createdAt: now(),
+      }],
+    }
+    const clearedProjection = renderWikiPages(cleared, cleared.latestArtifact ?? '', {
+      title: 'Cleared Debt', tags: ['research'], init: false, at: now(),
+    })
+    const clearedPage = clearedProjection.pages.find(page => page.path.includes('cleared-debt'))
+    if (clearedPage === undefined) throw new Error('missing cleared debt page')
+
+    expect(wikiConfidence(cleared)).toBe('high')
+    expect(frontmatter(clearedPage.content).raven_summary_debt).toBe('none')
+    expect(frontmatter(clearedPage.content).raven_summary_debt_scopes).toBeUndefined()
+    expect(clearedProjection.logEntry).toContain('summary debt none')
   })
 
   it('declares an unverified Source unverified rather than omitting the marker', async () => {

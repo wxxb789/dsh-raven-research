@@ -19,9 +19,18 @@ export const RAVEN_LIMITS = {
   sourcePolicyItems: 256,
   sourcePolicyStringChars: 4_000,
   claimTextChars: 10_000,
+  insightTextChars: 10_000,
+  insightRationaleChars: 4_000,
+  insightWouldChangeMindChars: 4_000,
+  insightAssumptionChars: 2_000,
+  synthesisScopeChars: 2_000,
   limitationDetailChars: 4_000,
   sources: 256,
   claims: 512,
+  insightCandidates: 256,
+  insightAssumptions: 32,
+  insightInspectionIds: 8,
+  synthesisRounds: 64,
   limitations: 256,
   checkpoints: 128,
   steeringRevisions: 128,
@@ -41,6 +50,8 @@ export const RAVEN_LIMITS = {
   /** Headroom non-final mutations leave so Completion cannot deadlock on the state cap. */
   stateCompletionReserveBytes: 64_000,
 } as const
+
+export const RAVEN_SCHEMA_VERSION = 3 as const
 
 export const OUTCOMES = [
   'research',
@@ -117,6 +128,48 @@ export const CLAIM_DISPOSITIONS = ['supported', 'qualified', 'deferred', 'reject
 
 export type ClaimDisposition = typeof CLAIM_DISPOSITIONS[number]
 
+export const INSIGHT_KINDS = [
+  'interpretation',
+  'connection',
+  'explanation',
+  'hypothesis',
+  'reframing',
+  'implication',
+  'thesis',
+] as const
+
+export type InsightKind = typeof INSIGHT_KINDS[number]
+
+export const INSIGHT_PATTERNS = [
+  'tension',
+  'hidden-assumption',
+  'alternative-causal-mechanism',
+  'boundary-condition',
+  'counterfactual',
+  'second-order-effect',
+  'incentive-mismatch',
+  'temporal-shift',
+  'scale-shift',
+  'missing-variable',
+  'cross-domain-analogy',
+  'unexpected-connection',
+  'other',
+] as const
+
+export type InsightPattern = typeof INSIGHT_PATTERNS[number]
+
+export const INSIGHT_CONFIDENCE = ['low', 'medium', 'high'] as const
+
+export type InsightConfidence = typeof INSIGHT_CONFIDENCE[number]
+
+export const SYNTHESIS_PURPOSES = ['summary', 'explanation', 'synthesis'] as const
+
+export type SynthesisPurpose = typeof SYNTHESIS_PURPOSES[number]
+
+export const SUMMARY_DEBT_LEVELS = ['none', 'low', 'high'] as const
+
+export type SummaryDebtLevel = typeof SUMMARY_DEBT_LEVELS[number]
+
 export const LIMITATION_KINDS = ['source', 'tool', 'coverage'] as const
 
 export type RavenLimitationKind = typeof LIMITATION_KINDS[number]
@@ -155,11 +208,61 @@ export interface RavenClaimRecord {
   readonly kind: ClaimKind
   readonly importance: ClaimImportance
   readonly disposition: ClaimDisposition
-  /** Original supported state when Raven temporarily deferred this Claim after Source verification failed. */
+  /** Original accepted state when Raven temporarily deferred this Claim after Source or premise verification failed. */
   readonly deferredFrom?: Extract<ClaimDisposition, 'supported' | 'qualified'>
   readonly sourceIds: readonly string[]
+  /**
+   * Codec-only residue for source-linked analysis Claims migrated from schema v1/v2.
+   * These IDs preserve history but confer no direct Source authority and are never tool input.
+   */
+  readonly legacySourceIds?: readonly string[]
+  /** Insight Candidate explicitly promoted into this accepted analysis Claim. Invalid for external Claims. */
+  readonly insightId?: string
+  /** Claim premises from which Raven derived this analysis. Invalid for external Claims. */
+  readonly derivedFromClaimIds?: readonly string[]
+  /** Assumptions carried from the promoted Insight Candidate. Invalid for external Claims. */
+  readonly assumptions?: readonly string[]
   /** Claim IDs this Claim genuinely conflicts with; disagreement is preserved, never silently resolved. */
   readonly contradicts?: readonly string[]
+}
+
+/**
+ * A candidate interpretation of recorded Claims, never evidence or accepted analysis by itself.
+ *
+ * Promotion is an explicit later Checkpoint contribution: an analysis Claim names this
+ * Insight ID and repeats its exact Claim lineage and assumptions. Competing candidates
+ * remain inspectable even when one is promoted.
+ */
+export interface RavenInsightCandidate {
+  readonly insightId: string
+  readonly text: string
+  readonly kind: InsightKind
+  readonly pattern: InsightPattern
+  readonly claimIds: readonly string[]
+  readonly assumptions: readonly string[]
+  readonly rationale: string
+  readonly wouldChangeMind: string
+  readonly confidence: InsightConfidence
+  readonly competesWith?: readonly string[]
+  readonly createdAt: string
+}
+
+/** One explicit pass over a section or Artifact, including its deterministic summary-debt assessment. */
+export interface RavenSynthesisRound {
+  readonly ordinal: number
+  readonly scope: string
+  readonly purpose: SynthesisPurpose
+  readonly claimIds: readonly string[]
+  readonly insightIds: readonly string[]
+  readonly summaryDebt: SummaryDebtLevel
+  readonly summaryDebtDetail: string
+  readonly createdAt: string
+}
+
+/** Candidate payload returned by action=synthesize; the same records also enter durable Task state. */
+export interface RavenSynthesisResult {
+  readonly round: RavenSynthesisRound
+  readonly candidates: readonly RavenInsightCandidate[]
 }
 
 export interface RavenSteeringRevision {
@@ -275,7 +378,7 @@ export interface RavenVerificationReceipt {
 export type RavenTaskPhase = 'active' | 'stopped' | 'completed' | 'completed-with-limits'
 
 export interface RavenTaskState {
-  readonly schemaVersion: 2
+  readonly schemaVersion: typeof RAVEN_SCHEMA_VERSION
   readonly taskId: string
   readonly ordinal: number
   readonly outcome: RavenOutcome
@@ -289,6 +392,8 @@ export interface RavenTaskState {
   readonly checkpoints: readonly RavenCheckpointRecord[]
   readonly sources: readonly RavenSourceRecord[]
   readonly claims: readonly RavenClaimRecord[]
+  readonly insightCandidates: readonly RavenInsightCandidate[]
+  readonly syntheses: readonly RavenSynthesisRound[]
   readonly limitations: readonly RavenLimitation[]
   readonly latestArtifact: string | null
   /** Draft comparison rounds, oldest first. Absent on a record written before Draft Variants existed. */
@@ -473,6 +578,17 @@ export interface RavenWikiEmission {
   readonly logEntry: string
 }
 
+/** Bounded discovery data attached to status without rendering every durable Candidate. */
+export interface RavenInsightRecall {
+  readonly unpromotedInsightIds: readonly string[]
+  readonly totalUnpromoted: number
+}
+
+/** Exact selected Candidate records returned by the read-only inspect action. */
+export interface RavenInsightInspection {
+  readonly candidates: readonly RavenInsightCandidate[]
+}
+
 export interface RavenDispatchResult {
   readonly status: 'active' | 'needs-revision' | 'stopped' | 'completed' | 'completed-with-limits'
   readonly state: RavenTaskState
@@ -482,6 +598,9 @@ export interface RavenDispatchResult {
   readonly wiki?: RavenWikiEmission
   readonly leads?: LeadSearchResult
   readonly variants?: DraftResult
+  readonly synthesis?: RavenSynthesisResult
+  readonly recall?: RavenInsightRecall
+  readonly inspection?: RavenInsightInspection
   /** Set when the Prose Layout rewrote the submitted Artifact bytes before storing them. */
   readonly relaidArtifact?: { readonly sourceLines: number; readonly laidOutLines: number }
 }

@@ -2,7 +2,7 @@
 
 ## Test surfaces
 
-The requested public contract fixes six test seams:
+The requested public contract fixes seven test seams:
 
 1. **Cordis load seam** — named exports, prompt/tool registration, real Loader
    unwrapping, execution through `ctx.tools`, and disposal.
@@ -12,10 +12,12 @@ The requested public contract fixes six test seams:
 3. **SourceVerifier seam** — deterministic adapters, Harness-web observations, and owning-session file/MCP inspection receipts feeding the same source/claim/completion policy.
 4. **DraftGenerator seam** — a deterministic drafter and the real `ctx.llm` adapter
    feeding the same candidate policy, where a variant can never become evidence.
-5. **Raven Workspace interface** — pure Markdown snapshot planning for initialization,
+5. **Synthesis contract** — durable Insight Candidates, Summary Debt, explicit promotion,
+   competing interpretations, and analysis-to-Claim-to-Source lineage through the same Task state.
+6. **Raven Workspace interface** — pure Markdown snapshot planning for initialization,
    adoption, normalization-backed ingest, Task contribution, maintenance, health, and
    lexical reuse, with conditional writes and a lifecycle separate from Task state.
-6. **Composition and browser artifact** — the Bundle patch composed through the
+7. **Composition and browser artifact** — the Bundle patch composed through the
    Harness's own composer, and the built browser bundle evaluated as the shell
    evaluates it.
 
@@ -41,6 +43,7 @@ agent topology.
 | Configurable from the Web GUI | The browser half registers one card into the keyed `settings.plugin.item` slot under key `raven-research`, drawn as a disclosure card with the same geometry and design tokens as the cards the Harness ships, grouped into evidence, discovery, prose, drafting, and other user preferences such as guidance, with bilingual copy. The card states no validation rules of its own: fields, control kinds, accepted values, and bounds come from the schema the Host registered, read off `settingsScope.describe()` and rehydrated through the Harness's own `settingsSchema` service, so a refused draft reports the schema's own words. `tests/unit/card-state.test.ts` drives the form model through the REAL `Config` schema and a stand-in mirroring the Harness service — field derivation and declaration order, choices derived from union consts, schema-owned refusal of negative/fractional/non-numeric drafts, the one route-shape rule the schema cannot express, override detection from key presence rather than value comparison, staged clears that only write when the user layer carries the key, drafts restating the stored value counting as no edit, all-or-nothing save planning, dictionary coverage for every schema field, and memory-mode read-only. `tests/integration/client-bundle.test.ts` evaluates the built `lib/client.js` in a VM with a fake shell and asserts it registers one entry under the package name, requires only shell-answerable specifiers, carries no Host-only code, binds its scope and the describe mirror, registers both shipped locales in one call, carries its own stylesheet, and materializes to a plugin registering under the namespace key with its locale namespace declared. `pnpm test:dsh` asserts the slot contract, the Harness card chrome, the locale registration signature, the four `settingsSchema` method signatures, the describe face, and the per-namespace schema envelope against the Harness checkout under test. The card renders into host chrome it cannot see, so two structural rules are asserted rather than eyeballed: `tests/unit/styles.test.ts` requires every selector in the shipped stylesheet to be scoped to the card and the card root to establish a containing block, because an escaped absolutely positioned descendant lands in the settings dialog instead and scrolls its header and navigation permanently out of view on the first click; `tests/unit/react-alignment.test.ts` requires the developed and typechecked React major to equal the one the official settings-UI packages declare as their `react` peer, because the shell supplies React through its module table and a drift installs silently, typechecks green, and fails only in the page. |
 | Writing edited a line at a time | `tests/unit/prose.test.ts` covers sentence splitting for Latin and CJK, abbreviations, initials, decimals, inline code, link destinations, and every protected Markdown structure, plus idempotence. `tests/integration/drafting.test.ts` covers the stored bytes, the reflow report, Completion of either line shape, and the layout-change diagnosis. |
 | Multi-model drafting that cannot become evidence | `tests/integration/drafting.test.ts` asserts a Draft Variant never reaches the evidence floor: adopting variant wording verbatim still leaves a grounding-required Completion refused until a recorded Source excerpt supports it. It also covers route-subset selection, refusal of an unconfigured route, survival of a failed route, and bounded provenance that retains no variant text. |
+| Inspectable synthesis and defensible analysis | `tests/integration/synthesis.test.ts`, `tests/integration/plugin.test.ts`, and `tests/acceptance/raven.acceptance.test.ts` distinguish Source testimony, Insight Candidates, and promoted Raven inference; treat cross-round competition as undirected; retain and replay candidate lineage; expose bounded Candidate IDs through status/context and exact selected records through inspect; track Summary Debt per synthesis scope across unrelated summaries; reject deferred/rejected-to-accepted unlineaged analysis; and preserve deferred promoted lineage through recovery and multi-hop restoration. Existing General Writing and Learning scenarios still complete without a synthesis step. |
 
 ## Vitest inventory
 
@@ -122,6 +125,7 @@ agent topology.
 - `tests/integration/plugin.test.ts`
   - named Cordis exports, bounded schema annotations, and one prompt/tool/listener registration;
   - compact Task reconstruction from durable `tool/result.meta` after plugin reload;
+  - bounded unpromoted Candidate IDs in replayed status and active context, exact selected inspect output, and later promotion from the inspected record;
   - preservation and replay of multiple historical Task identities in one Session;
   - a PTC mode step recorded on the known `tool/code-dispatch` event and NO plugin-owned
     session event type, an Artifact carrying `-->` surviving the record, and a replaced
@@ -152,6 +156,14 @@ agent topology.
   - a Prose Layout change named as the cause of a byte mismatch;
   - the layout disabled storing exactly what was submitted;
   - a fenced code block in an Artifact left untouched.
+- `tests/integration/synthesis.test.ts`
+  - multi-Claim Insight Candidate derivation with assumptions, rationale, confidence, and reversal evidence;
+  - cross-round one-way competition projected as an undirected alternative after earlier-Candidate promotion;
+  - explicit candidate-to-analysis promotion and rendered analysis lineage;
+  - Source testimony, candidate interpretation, and accepted Raven inference rendered as distinct authorities;
+  - per-scope Summary Debt surviving an unrelated summary and clearing only after a debt-free synthesis pass over the same scope;
+  - external-fact promotion refusal plus deferred/rejected-to-accepted unlineaged analysis refusal;
+  - verifier-failure recovery through revised Checkpoint and completed-with-limits, plus multi-hop premise deferral/restoration.
 - `tests/integration/client-bundle.test.ts`
   - the `dsh.client` platform declaration and the `./client` export the module scan requires;
   - exactly one registered entry, under the PACKAGE name;
@@ -171,6 +183,9 @@ agent topology.
   - General Writing;
   - Academic Writing;
   - Learning;
+  - end-to-end Source testimony → multi-Claim Insight Candidates → promoted analysis lineage;
+  - competing causal interpretations, Summary Debt detection, and unsupported external-fact promotion refusal;
+  - prompt policy that reserves synthesis for substantial interpretive work rather than summaries, trivial writing, or ordinary teaching;
   - one grounded Claim/Source/citation contract exercised across exactly web, local, llm-wiki, and MCP origins;
   - Original Markdown preservation and converted Markdown provenance;
   - unreadable or unsupported local material becoming unavailable, a deferred Claim, and a retained Limitation;

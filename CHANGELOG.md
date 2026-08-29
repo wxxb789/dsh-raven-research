@@ -10,6 +10,29 @@ tested compatibility family.
 
 ## [Unreleased]
 
+### Inspectable synthesis and critical thinking
+
+#### Added
+
+- Added durable Insight Candidates with typed interpretive patterns, premise Claim lineage, assumptions, rationale,
+  confidence, competing explanations, and explicit evidence that would change Raven's mind.
+- Added `raven_task action=synthesize` with explicit `summary | explanation | synthesis` purposes and a bounded
+  Summary Debt assessment for organized material that has not yet produced defensible interpretation.
+- Added bounded `raven_task action=inspect` recall for explicitly selected durable Insight Candidates after replay or
+  context loss; status and active Task context list a small unpromoted Candidate index without dumping all records.
+- Added a separate Analysis lineage trace that distinguishes Source testimony from promoted Raven inference.
+
+#### Changed
+
+- Material analysis Claims now promote an existing Insight Candidate with its exact text, premise Claims, and
+  assumptions; candidates cannot be promoted as external fact, and retained lineage defers or restores transitively
+  with premise authority while legacy accepted unlineaged analysis remains compatible.
+- Treat Candidate competition as undirected in synthesis, promoted analysis, and wiki confidence projections, and
+  track outstanding Summary Debt independently by synthesis scope until that same scope is repaired.
+- Keep Claim kind immutable while allowing importance to move between context and material.
+- Migrated durable Task snapshots to schema v3 while preserving schema-v1 and schema-v2 replay, existing lightweight
+  summary/writing/learning paths, Draft Variants, and all prior Raven workflows.
+
 ### Durable Raven Workspace
 
 #### Added

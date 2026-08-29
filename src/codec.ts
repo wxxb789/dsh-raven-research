@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { analysisLineageCycle, propagateAnalysisPremiseDispositions } from './analysis.js'
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { PROSE_LAYOUTS } from './prose.js'
 import { sourceInspectionSha256 } from './source.js'
@@ -10,13 +11,21 @@ import {
   CLAIM_KINDS,
   DRAFT_STATUSES,
   GROUNDING_POLICIES,
+  INSIGHT_CONFIDENCE,
+  INSIGHT_KINDS,
+  INSIGHT_PATTERNS,
   LIMITATION_KINDS,
   OUTCOMES,
   EMPTY_SOURCE_POLICY,
   RAVEN_LIMITS,
+  RAVEN_SCHEMA_VERSION,
   RAVEN_STAGES,
   SOURCE_ORIGINS,
   SOURCE_ROLES,
+  SUMMARY_DEBT_LEVELS,
+  SYNTHESIS_PURPOSES,
+  type RavenClaimRecord,
+  type RavenInsightCandidate,
   type RavenSourceCheck,
   type RavenSourcePolicy,
   type RavenSourceRepresentation,
@@ -70,6 +79,12 @@ function uniqueStrings(value: unknown, valid: (item: string) => boolean = () => 
   return Array.isArray(value)
     && value.every(item => string(item) && valid(item))
     && new Set(value).size === value.length
+}
+
+function sameStrings(value: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(value)
+    && value.length === expected.length
+    && value.every((item, index) => item === expected[index])
 }
 
 function validUri(value: unknown, origin: string): value is string {
@@ -178,15 +193,16 @@ function sha256(value: string): string {
 }
 
 /** The schema version this build writes. Older versions are migrated forward. */
-export const RAVEN_SCHEMA_VERSION = 2
+export { RAVEN_SCHEMA_VERSION } from './domain.js'
 
 /**
  * Forward migrations, keyed by the version being migrated FROM.
  *
  * The decoder used to reject any `schemaVersion` but 1 outright, so the first
  * bump would have silently dropped every stored Task on replay — a data-loss
- * path with no code path to fix it in. The table now carries the v1 web-to-v2
- * Source fabric migration; future bumps add one entry per forward step.
+ * path with no code path to fix it in. The table carries the v1 web-to-v2 Source
+ * fabric migration and isolates legacy v1/v2 analysis Source links during the
+ * v2-to-v3 synthesis migration; future bumps add one entry per forward step.
  */
 const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<string, unknown> | undefined> = {
   1: state => {
@@ -208,6 +224,18 @@ const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<stri
       }
     })
     return { ...state, schemaVersion: 2, sourcePolicy: EMPTY_SOURCE_POLICY, sources }
+  },
+  2: state => {
+    if (!Array.isArray(state.claims)) return undefined
+    const claims = state.claims.map((raw) => {
+      const claim = record(raw)
+      if (claim === undefined
+        || claim.kind !== 'analysis'
+        || !Array.isArray(claim.sourceIds)
+        || claim.sourceIds.length === 0) return raw
+      return { ...claim, sourceIds: [], legacySourceIds: claim.sourceIds }
+    })
+    return { ...state, schemaVersion: 3, claims, insightCandidates: [], syntheses: [] }
   },
 }
 
@@ -239,7 +267,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     || !exactKeys(state, [
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
       'revision', 'steeringRevision', 'steering', 'checkpoints', 'sources', 'claims',
-      'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
+      'insightCandidates', 'syntheses', 'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
       'sourcePolicy', 'startedAt', 'updatedAt',
     ])
     || state.schemaVersion !== RAVEN_SCHEMA_VERSION
@@ -257,11 +285,15 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     || !Array.isArray(state.checkpoints)
     || !Array.isArray(state.sources)
     || !Array.isArray(state.claims)
+    || !Array.isArray(state.insightCandidates)
+    || !Array.isArray(state.syntheses)
     || !Array.isArray(state.limitations)
     || state.steering.length > RAVEN_LIMITS.steeringRevisions
     || state.checkpoints.length > RAVEN_LIMITS.checkpoints
     || state.sources.length > RAVEN_LIMITS.sources
     || state.claims.length > RAVEN_LIMITS.claims
+    || state.insightCandidates.length > RAVEN_LIMITS.insightCandidates
+    || state.syntheses.length > RAVEN_LIMITS.synthesisRounds
     || state.limitations.length > RAVEN_LIMITS.limitations
     || !(state.latestArtifact === null || (string(state.latestArtifact, false)
       && state.latestArtifact.length <= RAVEN_LIMITS.artifactChars))
@@ -410,13 +442,16 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   // message, Limitation, or issue anywhere. The
   // structural checks below still reject the snapshot: a malformed Claim is a
   // corrupt record, not a stale one.
-  const repairedClaims: Record<string, unknown>[] = []
+  let repairedClaims: Record<string, unknown>[] = []
   let repairedAnyClaim = false
   const claimIds = new Set<string>()
   for (const raw of state.claims) {
     const item = record(raw)
     if (item === undefined
-      || !exactKeys(item, ['claimId', 'text', 'kind', 'importance', 'disposition', 'deferredFrom', 'sourceIds', 'contradicts'])
+      || !exactKeys(item, [
+        'claimId', 'text', 'kind', 'importance', 'disposition', 'deferredFrom', 'sourceIds',
+        'legacySourceIds', 'insightId', 'derivedFromClaimIds', 'assumptions', 'contradicts',
+      ])
       || !string(item.claimId)
       || !STABLE_ID.test(item.claimId)
       || claimIds.has(item.claimId)
@@ -426,9 +461,28 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || !member(item.importance, CLAIM_IMPORTANCE)
       || !member(item.disposition, CLAIM_DISPOSITIONS)
       || (item.deferredFrom !== undefined
-        && (item.kind !== 'external' || item.disposition !== 'deferred'
+        && (item.disposition !== 'deferred'
           || !member(item.deferredFrom, ['supported', 'qualified'] as const)))
       || !uniqueStrings(item.sourceIds, id => STABLE_ID.test(id) && sourceIds.has(id))
+      || (item.legacySourceIds !== undefined
+        && (item.kind !== 'analysis'
+          || item.sourceIds.length > 0
+          || item.insightId !== undefined
+          || item.derivedFromClaimIds !== undefined
+          || item.assumptions !== undefined
+          || !uniqueStrings(item.legacySourceIds, id => STABLE_ID.test(id) && sourceIds.has(id))
+          || item.legacySourceIds.length === 0
+          || item.legacySourceIds.length > RAVEN_LIMITS.sources))
+      || (item.insightId !== undefined && (!string(item.insightId) || !STABLE_ID.test(item.insightId)))
+      || (item.derivedFromClaimIds !== undefined
+        && (!uniqueStrings(item.derivedFromClaimIds, id => STABLE_ID.test(id) && id !== item.claimId)
+          || item.derivedFromClaimIds.length > RAVEN_LIMITS.claims))
+      || (item.assumptions !== undefined
+        && (!uniqueStrings(item.assumptions, assumption => assumption.length <= RAVEN_LIMITS.insightAssumptionChars)
+          || item.assumptions.length > RAVEN_LIMITS.insightAssumptions))
+      || (item.kind === 'external'
+        && (item.insightId !== undefined || item.derivedFromClaimIds !== undefined || item.assumptions !== undefined))
+      || (item.kind === 'analysis' && item.sourceIds.length > 0)
       || (item.contradicts !== undefined
         && (!uniqueStrings(item.contradicts, id => STABLE_ID.test(id) && id !== item.claimId)
           || item.contradicts.length > RAVEN_LIMITS.claims))) return undefined
@@ -450,11 +504,102 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     }
     claimIds.add(item.claimId)
   }
+  const analysisPropagation = propagateAnalysisPremiseDispositions(
+    repairedClaims as unknown as RavenClaimRecord[],
+  )
+  repairedClaims = analysisPropagation.claims as unknown as Record<string, unknown>[]
+  repairedAnyClaim ||= analysisPropagation.changed
+  const repairedClaimById = new Map(repairedClaims.map(item => [item.claimId as string, item]))
   for (const raw of state.claims) {
     const item = record(raw)
-    const contradicts = item?.contradicts
-    if (!Array.isArray(contradicts)) continue
-    if (contradicts.some(other => typeof other !== 'string' || !claimIds.has(other))) return undefined
+    if (item === undefined) return undefined
+    const contradicts = item.contradicts
+    if (Array.isArray(contradicts)
+      && contradicts.some(other => typeof other !== 'string' || !claimIds.has(other))) return undefined
+    const derivedFrom = item.derivedFromClaimIds
+    if (Array.isArray(derivedFrom)
+      && derivedFrom.some(other => typeof other !== 'string' || !claimIds.has(other))) return undefined
+  }
+
+  const insightById = new Map<string, RavenInsightCandidate>()
+  for (const raw of state.insightCandidates) {
+    const item = record(raw)
+    if (item === undefined
+      || !exactKeys(item, [
+        'insightId', 'text', 'kind', 'pattern', 'claimIds', 'assumptions', 'rationale',
+        'wouldChangeMind', 'confidence', 'competesWith', 'createdAt',
+      ])
+      || !string(item.insightId)
+      || !STABLE_ID.test(item.insightId)
+      || insightById.has(item.insightId)
+      || !string(item.text)
+      || item.text.length > RAVEN_LIMITS.insightTextChars
+      || !member(item.kind, INSIGHT_KINDS)
+      || !member(item.pattern, INSIGHT_PATTERNS)
+      || !uniqueStrings(item.claimIds, id => STABLE_ID.test(id) && claimIds.has(id))
+      || item.claimIds.length === 0
+      || item.claimIds.length > RAVEN_LIMITS.claims
+      || !uniqueStrings(item.assumptions, assumption => assumption.length <= RAVEN_LIMITS.insightAssumptionChars)
+      || item.assumptions.length > RAVEN_LIMITS.insightAssumptions
+      || !string(item.rationale)
+      || item.rationale.length > RAVEN_LIMITS.insightRationaleChars
+      || !string(item.wouldChangeMind)
+      || item.wouldChangeMind.length > RAVEN_LIMITS.insightWouldChangeMindChars
+      || !member(item.confidence, INSIGHT_CONFIDENCE)
+      || (item.competesWith !== undefined
+        && (!uniqueStrings(item.competesWith, id => STABLE_ID.test(id) && id !== item.insightId)
+          || item.competesWith.length > RAVEN_LIMITS.insightCandidates))
+      || !timestamp(item.createdAt)) return undefined
+    const insight = item as unknown as RavenInsightCandidate
+    insightById.set(insight.insightId, insight)
+  }
+  for (const insight of insightById.values()) {
+    if ((insight.competesWith ?? []).some(other => !insightById.has(other))) return undefined
+  }
+  for (const claim of repairedClaims) {
+    if (claim.kind !== 'analysis' || claim.insightId === undefined) continue
+    const insight = insightById.get(claim.insightId as string)
+    if (insight === undefined
+      || claim.text !== insight.text
+      || !sameStrings(claim.derivedFromClaimIds ?? [], insight.claimIds)
+      || !sameStrings(claim.assumptions ?? [], insight.assumptions)) return undefined
+    if ((claim.disposition === 'supported' || claim.disposition === 'qualified')
+      && insight.claimIds.some((claimId) => {
+        const premise = repairedClaimById.get(claimId)
+        return premise === undefined
+          || (premise.disposition !== 'supported' && premise.disposition !== 'qualified')
+      })) return undefined
+  }
+
+  if (analysisLineageCycle(repairedClaims as unknown as RavenClaimRecord[]) !== undefined) return undefined
+
+  let previousSynthesisOrdinal = 0
+  for (const raw of state.syntheses) {
+    const item = record(raw)
+    if (item === undefined
+      || !exactKeys(item, [
+        'ordinal', 'scope', 'purpose', 'claimIds', 'insightIds', 'summaryDebt',
+        'summaryDebtDetail', 'createdAt',
+      ])
+      || !integer(item.ordinal, previousSynthesisOrdinal + 1)
+      || !string(item.scope)
+      || item.scope.length > RAVEN_LIMITS.synthesisScopeChars
+      || !member(item.purpose, SYNTHESIS_PURPOSES)
+      || !uniqueStrings(item.claimIds, id => STABLE_ID.test(id) && claimIds.has(id))
+      || item.claimIds.length === 0
+      || item.claimIds.length > RAVEN_LIMITS.claims
+      || !uniqueStrings(item.insightIds, id => STABLE_ID.test(id) && insightById.has(id))
+      || item.insightIds.length > RAVEN_LIMITS.insightCandidates
+      || !member(item.summaryDebt, SUMMARY_DEBT_LEVELS)
+      || !string(item.summaryDebtDetail)
+      || item.summaryDebtDetail.length > RAVEN_LIMITS.insightRationaleChars
+      || !timestamp(item.createdAt)) return undefined
+    const scoped = new Set(item.claimIds as string[])
+    if ((item.insightIds as string[]).some((insightId) => {
+      const insight = insightById.get(insightId)
+      return insight === undefined || insight.claimIds.some(claimId => !scoped.has(claimId))
+    })) return undefined
+    previousSynthesisOrdinal = item.ordinal as number
   }
 
   // Limitation identity is NOT positional either. Requiring

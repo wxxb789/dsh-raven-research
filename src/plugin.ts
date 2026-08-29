@@ -14,6 +14,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session/types'
 import type { WebFetchResult, WebRuntime, WebSearchResult } from '@deepseek-ai/dsh-web'
 
+import { insightCandidateRecall, outstandingSummaryDebt } from './analysis.js'
 import { settleWithAbort } from './abort.js'
 import { decodeRavenTaskState } from './codec.js'
 import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig, type RavenRole } from './config.js'
@@ -23,6 +24,7 @@ import {
   parseDraftRoute,
   renderArtifact,
   renderLeads,
+  renderSynthesis,
   renderVariants,
   type RavenDraftLimits,
   type RavenSearchLimits,
@@ -38,7 +40,14 @@ import {
   WORKSPACE_PAGE_TYPES,
   type RavenWorkspaceResult,
 } from './workspace.js'
-import { RavenError, RAVEN_LIMITS } from './domain.js'
+import {
+  INSIGHT_CONFIDENCE,
+  INSIGHT_KINDS,
+  INSIGHT_PATTERNS,
+  RavenError,
+  RAVEN_LIMITS,
+  SYNTHESIS_PURPOSES,
+} from './domain.js'
 import type {
   DraftGenerator,
   DraftRequest,
@@ -1641,6 +1650,34 @@ function taskStateMeta(value: RavenToolValue): RavenTaskMeta {
   }
 }
 
+function renderInsightRecall(
+  recall: NonNullable<RavenDispatchResult['recall']>,
+  taskId: string,
+): string {
+  if (recall.totalUnpromoted === 0) {
+    return 'Every durable Insight Candidate has already been promoted; explicitly inspect an ID only when its lineage is needed.'
+  }
+  const visible = recall.unpromotedInsightIds.join(', ')
+  const hidden = recall.totalUnpromoted - recall.unpromotedInsightIds.length
+  return [
+    `Unpromoted Insight Candidate IDs (${recall.unpromotedInsightIds.length} shown of ${recall.totalUnpromoted}): ${visible}`,
+    `Inspect exact Candidate fields with raven_task action=inspect taskId=${taskId}`
+      + ` insightIds=${JSON.stringify(recall.unpromotedInsightIds)}.`
+      + `${hidden === 0 ? '' : ` Inspect these first; ${hidden} more ID(s) remain outside this bounded status index.`}`,
+  ].join('\n')
+}
+
+function renderInsightInspection(inspection: NonNullable<RavenDispatchResult['inspection']>): string {
+  const content = JSON.stringify(inspection.candidates, null, 2)
+  let longest = 0
+  for (const match of content.matchAll(/`+/g)) longest = Math.max(longest, match[0].length)
+  const fence = '`'.repeat(Math.max(3, longest + 1))
+  return [
+    'Exact durable Insight Candidate records. Preserve text, claimIds, and assumptions byte-for-byte when promoting one.',
+    `${fence}json\n${content}\n${fence}`,
+  ].join('\n\n')
+}
+
 function renderToolValue(value: RavenToolValue): string {
   const lines = [
     value.message,
@@ -1656,6 +1693,11 @@ function renderToolValue(value: RavenToolValue): string {
     return lines.join('\n\n')
   }
   if (value.leads !== undefined) lines.push(renderLeads(value.leads))
+  if (value.synthesis !== undefined) {
+    lines.push(renderSynthesis(value.synthesis, value.state.claims, value.state.insightCandidates))
+  }
+  if (value.recall !== undefined) lines.push(renderInsightRecall(value.recall, value.state.taskId))
+  if (value.inspection !== undefined) lines.push(renderInsightInspection(value.inspection))
   if (value.variants !== undefined) lines.push(renderVariants(value.variants))
   if (value.relaidArtifact !== undefined) {
     lines.push(
@@ -1666,7 +1708,7 @@ function renderToolValue(value: RavenToolValue): string {
   }
   if (value.renderedArtifact !== undefined) lines.push(value.renderedArtifact)
   else if (value.state.latestArtifact !== null && value.status === 'stopped') {
-    lines.push(renderArtifact(value.state.latestArtifact, value.state.sources, value.state.claims))
+    lines.push(renderArtifact(value.state.latestArtifact, value.state.sources, value.state.claims, value.state.insightCandidates))
   }
   return lines.join('\n\n')
 }
@@ -1793,12 +1835,71 @@ const CLAIM_SCHEMA = {
     sourceIds: {
       type: 'array',
       items: { type: 'string' },
-      description: `Unique registered Source IDs; at most ${RAVEN_LIMITS.sources}.`,
+      description: `Unique registered Source IDs; at most ${RAVEN_LIMITS.sources}. External Claims use Sources; analysis Claims keep this empty and use derivedFromClaimIds.`,
+    },
+    insightId: {
+      type: 'string',
+      description: 'Insight Candidate explicitly promoted as this analysis Claim. Invalid for external Claims.',
+    },
+    derivedFromClaimIds: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Exact premise Claim IDs retained from the promoted Insight Candidate. Analysis Claims only.',
+    },
+    assumptions: {
+      type: 'array',
+      items: { type: 'string' },
+      description: `Exact assumptions retained from the promoted Insight Candidate; at most ${RAVEN_LIMITS.insightAssumptions}. Analysis Claims only.`,
     },
     contradicts: {
       type: 'array',
       items: { type: 'string' },
       description: 'Claim IDs this Claim genuinely conflicts with. Preserve disagreement instead of silently choosing a side; the rendered Claim trace marks both as contested.',
+    },
+  },
+} as const
+
+const INSIGHT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'insightId', 'text', 'kind', 'pattern', 'claimIds', 'assumptions', 'rationale',
+    'wouldChangeMind', 'confidence',
+  ],
+  properties: {
+    insightId: { type: 'string', description: 'Stable Insight Candidate ID, 1-64 safe identifier characters.' },
+    text: { type: 'string', description: `Candidate interpretation, at most ${RAVEN_LIMITS.insightTextChars} characters.` },
+    kind: {
+      type: 'string',
+      enum: [...INSIGHT_KINDS],
+    },
+    pattern: {
+      type: 'string',
+      enum: [...INSIGHT_PATTERNS],
+    },
+    claimIds: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Recorded premise Claim IDs inside this synthesis scope; an Insight Candidate must name at least one.',
+    },
+    assumptions: {
+      type: 'array',
+      items: { type: 'string' },
+      description: `Assumptions the interpretation depends on; at most ${RAVEN_LIMITS.insightAssumptions}. An empty array is explicit.`,
+    },
+    rationale: {
+      type: 'string',
+      description: `Why the connection or explanation may matter, at most ${RAVEN_LIMITS.insightRationaleChars} characters.`,
+    },
+    wouldChangeMind: {
+      type: 'string',
+      description: `Evidence or observation that would reverse or materially weaken the candidate, at most ${RAVEN_LIMITS.insightWouldChangeMindChars} characters.`,
+    },
+    confidence: { type: 'string', enum: [...INSIGHT_CONFIDENCE] },
+    competesWith: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Other plausible Insight Candidate IDs explaining the same evidence differently; not the same as contradiction.',
     },
   },
 } as const
@@ -1938,7 +2039,7 @@ function workspaceToolDefinition(
         if (state.latestArtifact === null) throw new Error(`Raven Task ${input.taskId} has no Artifact to contribute`)
         contribution = {
           state,
-          renderedArtifact: renderArtifact(state.latestArtifact, state.sources, state.claims),
+          renderedArtifact: renderArtifact(state.latestArtifact, state.sources, state.claims, state.insightCandidates),
         }
       }
       const result = await engine.dispatch(args, {
@@ -2005,7 +2106,7 @@ function toolDefinition(
 ): ToolDefinition {
   return {
     name: TOOL_NAME,
-    description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover Leads with a batch of complementary queries; draft candidate wording from several configured models at once; publish useful Checkpoints before exhaustive work; apply user corrections with steer on the same taskId; record inspected Sources, Claims, and partial failures; stop/resume without loss; and complete only against the exact final Artifact. The stored Artifact is Markdown laid out one sentence per line, so a LINE is the smallest edit unit and the returned bytes are the ones to edit next. Inside an Agent Team the Task belongs to the Team, so every member continues the same one. Normal research stages need no approval.',
+    description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover uninspected Leads; synthesize recorded Claims into Insight Candidates without treating them as fact; inspect selected durable Candidates after context loss; optionally compare Draft Variants; publish useful Checkpoints; apply corrections on the same taskId; retain evidence and analysis lineage; stop/resume without loss; and complete only against the exact final Artifact. Explicit summaries and learning explanations remain lightweight paths. The stored Artifact is Markdown laid out one sentence per line, so a LINE is the smallest edit unit and the returned bytes are the ones to edit next. Inside an Agent Team the Task belongs to the Team. Normal research stages need no approval.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -2013,7 +2114,7 @@ function toolDefinition(
       properties: {
         action: {
           type: 'string',
-          enum: ['start', 'discover', 'draft', 'checkpoint', 'steer', 'complete', 'status', 'stop', 'resume', 'export'],
+          enum: Object.keys(ACTION_FIELDS),
           description: `Requested Task action. Each action accepts only its own fields — ${ACTION_FIELD_SUMMARY} — and any other field fails the call.`,
         },
         taskId: { type: 'string', description: 'Existing Raven Task ID. Required by every action except start.' },
@@ -2034,6 +2135,30 @@ function toolDefinition(
           type: 'array',
           items: { type: 'string' },
           description: `Complementary search queries for one discovery batch, at most ${RAVEN_LIMITS.searchQueries} by default and ${RAVEN_LIMITS.searchQueryChars} characters each. Only with action=discover. Send several angles in ONE call — they share a deadline, are deduplicated against each other, and a failing query never cancels the rest. Results are Leads, never Sources: open a Lead and record a verbatim excerpt before it can support a Claim.`,
+        },
+        scope: {
+          type: 'string',
+          description: `Artifact or section being assessed, at most ${RAVEN_LIMITS.synthesisScopeChars} characters. Only with action=synthesize.`,
+        },
+        purpose: {
+          type: 'string',
+          enum: [...SYNTHESIS_PURPOSES],
+          description: 'Intellectual goal for this pass. Only with action=synthesize. Explicit summary and explanation do not accrue summary debt.',
+        },
+        claimIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Recorded Claims represented in the assessed scope. Only with action=synthesize.',
+        },
+        insightIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: `Explicit durable Insight Candidate IDs to recall, 1-${RAVEN_LIMITS.insightInspectionIds} per call. Only with action=inspect; there is no implicit inspect-all operation.`,
+        },
+        insights: {
+          type: 'array',
+          items: INSIGHT_SCHEMA,
+          description: `Insight Candidate contributions; Task state retains at most ${RAVEN_LIMITS.insightCandidates}. Only with action=synthesize. Empty is valid and exposes summary debt for a synthesis pass that found no interpretation.`,
         },
         instruction: {
           type: 'string',
@@ -2192,13 +2317,15 @@ function toolDefinition(
         )
       }
       book.tasks.set(result.state.taskId, result.state)
-      if (action !== 'status' || book.currentTaskId === undefined) book.currentTaskId = result.state.taskId
+      if ((action !== 'status' && action !== 'inspect') || book.currentTaskId === undefined) {
+        book.currentTaskId = result.state.taskId
+      }
       const currentTaskId = book.currentTaskId ?? result.state.taskId
       book.currentTaskId = currentTaskId
       const withStatusArtifact = action === 'status'
         && result.renderedArtifact === undefined
         && result.state.latestArtifact !== null
-        ? { ...result, renderedArtifact: renderArtifact(result.state.latestArtifact, result.state.sources, result.state.claims) }
+        ? { ...result, renderedArtifact: renderArtifact(result.state.latestArtifact, result.state.sources, result.state.claims, result.state.insightCandidates) }
         : result
       const durableState = previous === null
         || previous.taskId !== result.state.taskId
@@ -2240,6 +2367,7 @@ function taskRecoveryHint(state: RavenTaskState): string {
     `This call failed. Raven Task ${state.taskId} is unchanged at revision ${state.revision}.`,
     `Outcome: ${state.outcome}. Phase: ${state.phase}. Steering revision: ${state.steeringRevision}.`,
     `Evidence: ${state.sources.length} Source(s), ${state.claims.length} Claim(s), ${state.limitations.length} Limitation(s).`,
+    `Synthesis: ${state.insightCandidates.length} Insight Candidate(s), ${state.syntheses.length} pass(es).`,
     state.phase === 'stopped'
       ? `Call raven_task action=resume taskId=${state.taskId} before steer or checkpoint.`
       : `Correct this call against Task ${state.taskId} instead of starting a replacement Task;`
@@ -2269,6 +2397,9 @@ function guidanceContext(state: RavenTaskState | undefined): string {
 
 function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike | undefined): string {
   const latest = state.checkpoints.at(-1)
+  const latestSynthesis = state.syntheses.at(-1)
+  const outstandingDebt = outstandingSummaryDebt(state.syntheses)
+  const recall = insightCandidateRecall(state.claims, state.insightCandidates, RAVEN_LIMITS.insightInspectionIds)
   return [
     '<raven_task_context>',
     state.phase === 'stopped'
@@ -2280,7 +2411,18 @@ function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike
         + ' contribute Sources, Claims, and Checkpoints to it, and never start a competing Task of your own.']),
     `Outcome: ${state.outcome}. Phase: ${state.phase}. Task revision: ${state.revision}. Steering revision: ${state.steeringRevision}.`,
     `Evidence: ${state.sources.length} Source(s), ${state.claims.length} Claim(s), ${state.limitations.length} Limitation(s).`,
+    `Synthesis: ${state.insightCandidates.length} Insight Candidate(s), ${state.syntheses.length} pass(es).`,
+    ...(state.insightCandidates.length === 0 ? [] : [renderInsightRecall(recall, state.taskId)]),
     `Source Policy: ${JSON.stringify(state.sourcePolicy)}.`,
+    ...(latestSynthesis === undefined
+      ? []
+      : [`Latest synthesis pass ${latestSynthesis.ordinal}: ${latestSynthesis.purpose} for ${latestSynthesis.scope}; summary debt ${latestSynthesis.summaryDebt}.`]),
+    ...(outstandingDebt.length === 0
+      ? []
+      : [
+          `Outstanding Summary Debt remains in ${outstandingDebt.length} synthesis scope(s):`,
+          ...outstandingDebt.map(round => `- ${round.summaryDebt} in ${round.scope}: ${round.summaryDebtDetail}`),
+        ]),
     latest === undefined
       ? 'No Checkpoint exists yet; publish the first useful Artifact early.'
       : `Latest Checkpoint ${latest.ordinal}: ${latest.stage} — ${latest.summary}`,

@@ -83,10 +83,19 @@ type RavenTaskAction =
       failures?: FailureInput[]
     }
   | { action: "discover"; taskId: string; queries: string[] }
+  | {
+      action: "synthesize"
+      taskId: string
+      scope: string
+      purpose: "summary" | "explanation" | "synthesis"
+      claimIds: string[]
+      insights: InsightCandidateInput[]
+    }
   | { action: "draft"; taskId: string; instruction: string; routes?: string[] }
   | { action: "steer"; taskId: string; correction: string; sourcePolicy?: Partial<SourcePolicy> }
   | { action: "complete"; taskId: string; artifact: string }
   | { action: "status"; taskId?: string }
+  | { action: "inspect"; taskId: string; insightIds: string[] }
   | { action: "stop"; taskId: string; reason?: string }
   | { action: "resume"; taskId: string }
   | { action: "export"; taskId: string; title?: string; tags?: string[]; init?: boolean }
@@ -118,6 +127,10 @@ registry.
   what makes a wide first sweep cheaper than a sequence of narrow ones. A query that
   fails becomes a `tool` Limitation on the Task instead of aborting the batch, so the
   Task keeps the angles that worked and still records the angle it lost.
+- `synthesize` records candidate reasoning against an explicit Claim scope before any
+  interpretation becomes accepted analysis. It also diagnoses Summary Debt according to
+  the requested purpose. It is separate from `checkpoint` because considering an
+  explanation and adopting it into an Artifact are different authorities.
 - `checkpoint` atomically commits an independently useful Artifact plus the evidence
   and failures that inform it. Stages are observations, never approval gates.
 - `draft` asks every configured model route for the same bounded instruction and
@@ -152,6 +165,7 @@ One compact JSON state contains:
 - Steering Revisions, including effective Source Policy snapshots when changed;
 - immutable Checkpoint descriptors and the latest Artifact;
 - Sources with distinct Original Resources and Markdown Representations, plus origin-agnostic Claims;
+- durable Insight Candidates, their premise/assumption/alternative lineage, and bounded Synthesis Passes with Summary Debt;
 - Source/tool/coverage Limitations;
 - the most recent verification receipt and exact Artifact SHA-256.
 
@@ -173,6 +187,38 @@ survive a session reload, and re-running discovery is cheaper than storing them.
 candidate returned by several queries is one Lead recording all of them: breadth
 information for the agent's next move, explicitly not corroboration, because one
 backend answering twice is still one observation.
+
+### Insight Candidate and Synthesis Pass
+
+An Insight Candidate is a bounded candidate interpretation of recorded Claims: an
+interpretation, connection, explanation, hypothesis, reframing, implication, or thesis.
+Unlike a Lead, it is durable because its reasoning lineage must survive replay and remain
+inspectable after one candidate is adopted. Each candidate has a stable immutable ID,
+text, intellectual pattern, premise Claim IDs, explicit assumptions, rationale, confidence,
+what evidence would change Raven's mind, and optional `competesWith` links to plausible
+alternatives. Competition is semantically undirected: a later Candidate can point to an
+earlier immutable Candidate, and every projection treats both as competitors. A candidate
+is neither evidence nor accepted analysis.
+
+`action=status` exposes a bounded index of unpromoted Candidate IDs after replay or context
+loss. `action=inspect` accepts 1–8 explicit `insightIds` and returns those exact durable
+records; it never returns all 256 Candidates implicitly. The action is read-only and can
+inspect an active, stopped, or completed Task.
+
+`action=synthesize` records one Synthesis Pass over a named Artifact or section. The pass
+states whether its purpose is `summary`, `explanation`, or `synthesis`, the Claims considered,
+and the candidates produced. For synthesis, no interpretation produces `high` Summary Debt;
+interpretation whose premises are not currently usable produces `low` debt; at least one
+candidate with usable Claim lineage clears it. Debt is tracked independently by exact scope
+using the latest `purpose=synthesis` pass for that scope. A debt-free synthesis pass clears
+only its own scope; explicit summaries and explanations accrue no debt but do not clear a
+different outstanding synthesis scope. Summary Debt is a visible warning rather than a new
+Task phase or Completion authority.
+
+Candidates are written by the existing main Harness agent, not a second model loop. Raven
+validates and persists the structured reasoning; it does not generate an interpretation from
+source text itself. This keeps multi-model Draft Variants limited to wording and deliberately
+does not implement multi-skeleton drafting.
 
 ### Source
 
@@ -212,28 +258,43 @@ reachable Source, preserving both provenance and the reason for exclusion.
 
 ### Claim
 
-A Claim has a stable ID, text, `external | analysis` kind,
-`material | context` importance, `supported | qualified | deferred | rejected`
-disposition, Source IDs, and optional `contradicts` links to Claims it genuinely
-conflicts with. A supported or qualified external Claim cannot have an
-empty, unknown, or failed Source set. Reusing a Claim ID for different text is
-rejected rather than silently rewriting provenance. Contradiction links must resolve
-to Claims in the same Task and cannot be self-referential; they are validated after
-the whole batch so a mutually contradicting pair can be submitted together. The
-rendered Claim trace marks both sides contested, so genuine disagreement between
-authorities survives instead of one side being silently dropped.
+A Claim has a stable ID, text, immutable `external | analysis` kind, mutable
+`material | context` importance, `supported | qualified | deferred | rejected` disposition,
+and optional `contradicts` links to Claims it genuinely conflicts with. An external Claim
+records what a Source says and carries Source IDs. A supported or qualified external Claim
+cannot have an empty, unknown, or failed Source set.
+
+A newly accepted material analysis Claim is an explicit promotion of one Insight
+Candidate. It carries that `insightId`, the candidate's exact text, exact premise Claim IDs,
+and exact assumptions; direct Source IDs are invalid because Sources did not state the
+inference. Every premise must be supported or qualified at first promotion. If a Source or
+upstream premise later becomes unusable, the retained analysis lineage is preserved while
+the Claim is deferred through the same propagation path, and it recovers only when its
+premises recover. An already accepted unlineaged material analysis Claim may remain accepted
+for legacy compatibility, but a new Claim or a deferred/rejected Claim entering supported or
+qualified material analysis must use explicit Insight lineage.
+
+Reusing either a Claim or Insight Candidate ID for different content is rejected rather
+than silently rewriting provenance. Contradiction links must resolve to Claims in the same
+Task and cannot be self-referential; they are validated after the whole batch so a mutually
+contradicting pair can be submitted together. `competesWith` is separate: two candidate
+explanations can remain plausible without logically contradicting each other. The rendered
+traces retain both kinds of disagreement instead of silently choosing a side.
 
 ### Artifact and citations
 
 Artifacts cite Sources with `[@source-id]` tokens. Raven validates the tokens and
 mechanically renders them as Markdown links from Source records, followed by a
-Sources list and a generated Claim trace that maps every material supported/qualified
-Claim ID and escaped text to its Source IDs. Source titles, locators, and Claim text
-are Markdown/HTML escaped before rendering. Unknown IDs and unregistered raw external
-URLs are rejected. This keeps the URL and Claim↔Source mapping outside model memory;
-literal anchor matching does not replace main-agent semantic entailment judgment. The Sources
-list names each Source Origin and whether its Markdown was original or converted (and by
-what), so a Claim trace can always continue from Source ID to the Original Resource.
+Sources list and two generated traces. The Claim trace labels external propositions as
+`source says` and maps every material supported/qualified Claim ID and escaped text to its
+Source IDs. The Analysis lineage labels promoted interpretations as `Raven inference` and
+maps them to their Insight Candidate, premise Claims, assumptions, and still-plausible
+alternatives. Source titles, locators, Claim text, and candidate text are Markdown/HTML
+escaped before rendering. Unknown IDs and unregistered raw external URLs are rejected.
+This keeps both Claim↔Source and analysis↔Claim lineage outside model memory; literal anchor
+matching does not replace main-agent semantic entailment judgment. The Sources list names
+each Source Origin and whether its Markdown was original or converted (and by what), so an
+external Claim trace can always continue from Source ID to the Original Resource.
 
 The Claim trace also annotates independence. A Claim citing two or more Sources that
 all declare one `sourceFamily` renders as a single family and explicitly not as
@@ -250,8 +311,10 @@ A Checkpoint stores its immutable ordinal, stage observation, summary, Artifact
 SHA-256, character count, creation time, and applied Steering Revision. The latest
 Artifact content remains in compact state; older full contents already live in
 prior durable tool results, avoiding quadratic snapshot growth. Request, Artifact,
-summary, correction, Source, Claim, Limitation, Checkpoint, and Steering collections
-all have executable size ceilings shared by action validation and replay decoding.
+summary, correction, Source, Claim, Insight Candidate, Synthesis Pass, Limitation,
+Checkpoint, and Steering collections all have executable size ceilings shared by action
+validation and replay decoding. Schema v3 adds the two synthesis collections; v1 web
+Sources and v2 Tasks migrate forward with empty collections rather than being dropped.
 
 ## Progressive execution
 
@@ -264,6 +327,10 @@ start Raven Task
 → preserve or convert content to Markdown and match bounded excerpts
 → independently re-fetch web Resources; retain non-web Resource and producer provenance
 → checkpoint a useful outline, draft, explanation, or findings
+→ when the requested result needs interpretation, synthesize the relevant Claims into candidates
+→ after replay, use status then bounded inspect calls to recover exact selected Candidate fields
+→ inspect assumptions, reversal evidence, competing explanations, and any per-scope Summary Debt
+→ promote only defensible candidate reasoning as an analysis Claim with exact lineage
 → continue research and evidence checks without asking permission
 → apply user correction as a Steering Revision on the same Task
 → emit a revised Checkpoint for every substantive final edit
@@ -302,16 +369,19 @@ Artifact remains useful after failed dependencies have been removed from accepte
 support, affected Claims are deferred, and coverage Limits are explicit. A broken or
 unverifiable Source cannot appear in the completed Artifact as accepted support.
 Independent verified Sources, Claims, and Artifact sections survive. When a Source
-later fails verification, Raven automatically defers every supported/qualified Claim
-whose usable support set becomes empty and records a Source Limitation. This is a
+later fails verification, Raven automatically defers every supported/qualified external
+Claim whose usable support set becomes empty and every promoted analysis Claim that
+depends on it, then records a Source Limitation. This is a
 two-step recovery: the failed call returns `needs-revision` while the Task remains active;
 the agent removes or narrows unsupported prose in a new Checkpoint, and only a later
 Completion may become `completed-with-limits`. Graceful degradation applies when useful
 verified work remains, not to missing required capabilities or zero valid grounded work.
 
 Every substantive final edit must first become a Checkpoint; Completion requires the
-candidate SHA-256 to equal that exact latest post-steer Checkpoint fingerprint.
-Tool, worker, or scheduler completion is never Raven Completion.
+candidate SHA-256 to equal that exact latest post-steer Checkpoint fingerprint. Outstanding
+Summary Debt remains visible on Checkpoint and Completion results but does not masquerade
+as failed evidence or block an explicit summary. Tool, worker, or scheduler completion is
+never Raven Completion.
 
 ## Internal Modules
 

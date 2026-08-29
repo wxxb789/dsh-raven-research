@@ -162,6 +162,182 @@ describe('Raven Cordis plugin', () => {
     expect(restored.state.latestArtifact).toBe('A useful explanation that survives replay.')
   })
 
+  it('recalls bounded exact Insight Candidates after replay and promotes an inspected Candidate', async () => {
+    interface TestValue {
+      readonly state: RavenPlugin.RavenTaskState
+      readonly status: string
+      readonly recall?: { readonly unpromotedInsightIds: readonly string[]; readonly totalUnpromoted: number }
+      readonly inspection?: { readonly candidates: readonly RavenPlugin.RavenInsightCandidate[] }
+    }
+    interface TestTool extends Record<string, unknown> {
+      execute(args: unknown, exec: unknown): Promise<TestValue>
+      output: {
+        render(args: unknown, value: unknown): Array<{ readonly type: string; readonly text: string }>
+        presentationMeta(args: unknown, value: unknown): unknown
+      }
+    }
+    type PreStep = (
+      event: { readonly agent: unknown },
+      next: () => Promise<{ readonly kind: 'enter'; readonly messages: readonly unknown[] }>,
+    ) => Promise<{ readonly kind: 'enter'; readonly messages: ReadonlyArray<{ readonly content: ReadonlyArray<{ readonly text?: string }> }> }>
+    const capture = () => {
+      let tool: TestTool | undefined
+      let preStep: PreStep | undefined
+      RavenPlugin.apply({
+        tools: { register(definition: TestTool) { tool = definition; return vi.fn() } },
+        systemPrompt: { section() { return vi.fn() } },
+        inject() { return vi.fn() },
+        get() { return undefined },
+        on(event: string, listener: unknown) {
+          if (event === 'agent/pre-step') preStep = listener as PreStep
+          return vi.fn()
+        },
+      } as never)
+      if (tool === undefined || preStep === undefined) throw new Error('Raven recall surface did not register')
+      return { tool, preStep }
+    }
+
+    const first = capture()
+    const signal = new AbortController().signal
+    const firstAgent = { id: 'candidate-replay-session', session: { events: [] as unknown[] } }
+    const started = await first.tool.execute({
+      action: 'start', outcome: 'learning', grounding: 'none', request: 'Preserve candidate reasoning across replay.',
+    }, { agent: firstAgent, signal })
+    const checkpoint = await first.tool.execute({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'analyze', summary: 'Premises recorded.',
+      artifact: 'A durable premise.',
+      claims: [{
+        claimId: 'C1', text: 'A durable premise.', kind: 'analysis', importance: 'context',
+        disposition: 'supported', sourceIds: [],
+      }, {
+        claimId: 'C-DEBT', text: 'An unresolved premise.', kind: 'analysis', importance: 'context',
+        disposition: 'deferred', sourceIds: [],
+      }],
+    }, { agent: firstAgent, signal })
+    const debt = await first.tool.execute({
+      action: 'synthesize', taskId: started.state.taskId, scope: 'Findings', purpose: 'synthesis',
+      claimIds: ['C-DEBT'], insights: [],
+    }, { agent: firstAgent, signal })
+    const summary = await first.tool.execute({
+      action: 'synthesize', taskId: started.state.taskId, scope: 'User summary', purpose: 'summary',
+      claimIds: ['C-DEBT'], insights: [],
+    }, { agent: firstAgent, signal })
+    expect(summary.state.taskId).toBe(debt.state.taskId)
+    const candidates = [{
+      insightId: 'I1',
+      text: 'The durable premise supports an inspectable interpretation.',
+      kind: 'interpretation',
+      pattern: 'unexpected-connection',
+      claimIds: ['C1'],
+      assumptions: ['The premise remains applicable.'],
+      rationale: 'It connects retained state to a later promotion decision.',
+      wouldChangeMind: 'Evidence that the premise no longer applies.',
+      confidence: 'medium',
+    }, {
+      insightId: 'I2',
+      text: 'A second durable interpretation remains available.',
+      kind: 'hypothesis',
+      pattern: 'alternative-causal-mechanism',
+      claimIds: ['C1'],
+      assumptions: [],
+      rationale: 'It preserves an alternative after the first is promoted.',
+      wouldChangeMind: 'Evidence excluding the alternative mechanism.',
+      confidence: 'low',
+      competesWith: ['I1'],
+    }, ...Array.from({ length: 7 }, (_, index) => ({
+      insightId: `I${index + 3}`,
+      text: `Bounded durable interpretation ${index + 3}.`,
+      kind: 'interpretation',
+      pattern: 'other',
+      claimIds: ['C1'],
+      assumptions: [],
+      rationale: 'It proves the status index remains bounded.',
+      wouldChangeMind: 'Evidence that the interpretation is inapplicable.',
+      confidence: 'low',
+    }))]
+    const synthesized = await first.tool.execute({
+      action: 'synthesize', taskId: started.state.taskId, scope: 'Mechanism', purpose: 'synthesis',
+      claimIds: ['C1'], insights: candidates,
+    }, { agent: firstAgent, signal })
+    const meta = JSON.parse(JSON.stringify(first.tool.output.presentationMeta({}, synthesized))) as unknown
+
+    const reloaded = capture()
+    const replayAgent = {
+      id: 'candidate-replay-session',
+      session: { events: [{ type: 'tool/result', data: { meta } }] },
+    }
+    const status = await reloaded.tool.execute({
+      action: 'status', taskId: started.state.taskId,
+    }, { agent: replayAgent, signal })
+    expect(status.recall).toEqual({
+      unpromotedInsightIds: ['I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'I7', 'I8'],
+      totalUnpromoted: 9,
+    })
+    const statusText = reloaded.tool.output.render({}, status)[0]?.text ?? ''
+    expect(statusText).toContain('Unpromoted Insight Candidate IDs (8 shown of 9): I1, I2, I3, I4, I5, I6, I7, I8')
+    expect(statusText).toContain('1 more ID(s) remain outside this bounded status index')
+    expect(statusText).not.toContain('I9')
+    expect(statusText).toContain('action=inspect')
+    expect(statusText).not.toContain(candidates[0]?.text)
+
+    const decision = await reloaded.preStep({ agent: replayAgent }, () => Promise.resolve({ kind: 'enter', messages: [] }))
+    const context = decision.messages.flatMap(message => message.content).map(part => part.text ?? '').join('\n')
+    expect(context).toContain('I1, I2')
+    expect(context).toContain('action=inspect')
+    expect(context).toContain('Outstanding Summary Debt remains in 1 synthesis scope')
+    expect(context).toContain('high in Findings')
+
+    const inspected = await reloaded.tool.execute({
+      action: 'inspect', taskId: started.state.taskId, insightIds: ['I1'],
+    }, { agent: replayAgent, signal })
+    expect(inspected.state).toBe(status.state)
+    expect(inspected.inspection?.candidates).toEqual([synthesized.state.insightCandidates[0]])
+    const inspectText = reloaded.tool.output.render({}, inspected)[0]?.text ?? ''
+    expect(inspectText).toContain('Exact durable Insight Candidate records')
+    expect(inspectText).toContain('"claimIds": [')
+    expect(inspectText).toContain('"assumptions": [')
+    expect(inspectText).toContain('"rationale":')
+    expect(inspectText).toContain('"wouldChangeMind":')
+    expect(inspectText).toContain(candidates[0]?.text)
+
+    await expect(reloaded.tool.execute({
+      action: 'inspect', taskId: started.state.taskId, insightIds: [],
+    }, { agent: replayAgent, signal })).rejects.toThrow(/at least one Insight Candidate/)
+    await expect(reloaded.tool.execute({
+      action: 'inspect', taskId: started.state.taskId, insightIds: ['I1', 'I1'],
+    }, { agent: replayAgent, signal })).rejects.toThrow(/duplicate Insight Candidate IDs/)
+    await expect(reloaded.tool.execute({
+      action: 'inspect', taskId: started.state.taskId, insightIds: ['UNKNOWN'],
+    }, { agent: replayAgent, signal })).rejects.toThrow(/unknown Insight Candidate UNKNOWN/)
+    await expect(reloaded.tool.execute({
+      action: 'inspect', taskId: started.state.taskId,
+      insightIds: Array.from({ length: RavenPlugin.RAVEN_LIMITS.insightInspectionIds + 1 }, (_, index) => `I${index + 1}`),
+    }, { agent: replayAgent, signal })).rejects.toThrow(/at most 8 Insight Candidates/)
+
+    const exact = inspected.inspection?.candidates[0]
+    if (exact === undefined) throw new Error('Expected inspected Candidate I1')
+    const promoted = await reloaded.tool.execute({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'analyze', summary: 'Inspected Candidate promoted.',
+      artifact: `${checkpoint.state.latestArtifact} ${exact.text}`,
+      claims: [{
+        claimId: 'A1', text: exact.text, kind: 'analysis', importance: 'material', disposition: 'qualified',
+        sourceIds: [], insightId: exact.insightId, derivedFromClaimIds: exact.claimIds, assumptions: exact.assumptions,
+      }],
+    }, { agent: replayAgent, signal })
+    const afterPromotion = await reloaded.tool.execute({
+      action: 'status', taskId: started.state.taskId,
+    }, { agent: replayAgent, signal })
+    expect(promoted.state.claims.find(claim => claim.claimId === 'A1')?.insightId).toBe('I1')
+    expect(afterPromotion.recall).toEqual({
+      unpromotedInsightIds: ['I2', 'I3', 'I4', 'I5', 'I6', 'I7', 'I8', 'I9'],
+      totalUnpromoted: 8,
+    })
+    const inspectedAgain = await reloaded.tool.execute({
+      action: 'inspect', taskId: started.state.taskId, insightIds: ['I1'],
+    }, { agent: replayAgent, signal })
+    expect(inspectedAgain.inspection?.candidates[0]?.insightId).toBe('I1')
+  })
+
   it('migrates a real schema-v1 web Task from session metadata and continues it', async () => {
     interface TestTool extends Record<string, unknown> {
       execute(args: unknown, exec: unknown): Promise<{ state: RavenPlugin.RavenTaskState; status: string }>
@@ -222,7 +398,7 @@ describe('Raven Cordis plugin', () => {
     const signal = new AbortController().signal
     const restored = await tool.execute({ action: 'status', taskId }, { agent, signal })
 
-    expect(restored.state.schemaVersion).toBe(2)
+    expect(restored.state.schemaVersion).toBe(3)
     expect(restored.state.sources[0]).toMatchObject({
       url: 'https://example.test/legacy',
       resource: { origin: 'web', uri: 'https://example.test/legacy' },

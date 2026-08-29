@@ -7,6 +7,7 @@
  * tooling can read. See docs/adr/0002-llm-wiki-repo-format.md.
  */
 
+import { insightCompetitionMap, outstandingSummaryDebt } from './analysis.js'
 import {
   markdownText,
   renderWikiPage,
@@ -58,8 +59,15 @@ function rawPagePath(source: RavenSourceRecord): string {
  */
 export function wikiConfidence(state: RavenTaskState): 'high' | 'medium' | 'low' {
   if (state.phase === 'active' || state.phase === 'stopped') return 'low'
-  if (state.phase === 'completed-with-limits') return 'medium'
-  return state.limitations.length > 0 || state.claims.some(claim => claim.disposition === 'deferred')
+  if (state.phase === 'completed-with-limits'
+    || state.limitations.length > 0
+    || outstandingSummaryDebt(state.syntheses).length > 0) return 'medium'
+  const competitionById = insightCompetitionMap(state.insightCandidates)
+  return state.claims.some(claim => claim.disposition === 'deferred'
+    || (claim.kind === 'analysis'
+      && (claim.disposition === 'supported' || claim.disposition === 'qualified')
+      && claim.insightId !== undefined
+      && (competitionById.get(claim.insightId)?.length ?? 0) > 0))
     ? 'medium'
     : 'high'
 }
@@ -170,6 +178,9 @@ tags: [from the taxonomy below]
 sources: [raw/articles/source-name.md]
 confidence: high | medium | low
 contested: true          # set when the page carries unresolved contradictions
+raven_insight_candidates: 2        # optional count of inspectable candidate interpretations
+raven_summary_debt: none           # optional aggregate over outstanding synthesis scopes
+raven_summary_debt_scopes: []      # optional scopes whose latest synthesis pass still carries debt
 ---
 \`\`\`
 
@@ -270,6 +281,10 @@ export function renderWikiPages(
   const artifactPath = `wiki/queries/query-${date}-${artifactSlug}.md`
   const rawPages = renderWikiRawPages(state)
   const contested = state.claims.some(claim => (claim.contradicts ?? []).length > 0)
+  const outstandingDebt = outstandingSummaryDebt(state.syntheses)
+  const summaryDebt = outstandingDebt.some(round => round.summaryDebt === 'high')
+    ? 'high'
+    : outstandingDebt.length > 0 ? 'low' : 'none'
 
   const frontmatter = [
     `title: ${wikiYamlString(options.title)}`,
@@ -281,6 +296,11 @@ export function renderWikiPages(
     `confidence: ${wikiConfidence(state)}`,
   ]
   if (contested) frontmatter.push('contested: true')
+  if (state.insightCandidates.length > 0) frontmatter.push(`raven_insight_candidates: ${state.insightCandidates.length}`)
+  if (state.syntheses.length > 0) frontmatter.push(`raven_summary_debt: ${summaryDebt}`)
+  if (outstandingDebt.length > 0) {
+    frontmatter.push(`raven_summary_debt_scopes: ${wikiYamlList(outstandingDebt.map(round => round.scope))}`)
+  }
   frontmatter.push(
     `raven_task: ${state.taskId}`,
     `raven_outcome: ${state.outcome}`,
@@ -308,6 +328,11 @@ export function renderWikiPages(
       + ` (${external.filter(claim => claim.disposition === 'supported').length} supported,`
       + ` ${external.filter(claim => claim.disposition === 'qualified').length} qualified,`
       + ` ${external.filter(claim => claim.disposition === 'deferred').length} deferred)`,
+    `- Synthesis: ${state.insightCandidates.length} Insight Candidate(s) · ${state.syntheses.length} pass(es)`
+      + `${state.syntheses.length === 0 ? '' : ` · summary debt ${summaryDebt}`}`
+      + (outstandingDebt.length === 0
+        ? ''
+        : ` in ${outstandingDebt.length} scope(s): ${outstandingDebt.map(round => markdownText(round.scope)).join(', ')}`),
     `- Limitations: ${state.limitations.length}${contested ? ' · contested claims present' : ''}`,
     `- Artifact: ${artifactPath}`,
     '',

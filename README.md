@@ -50,6 +50,8 @@ of text, and the citations are whatever the model remembered. Raven changes the 
 | A correction restarts the work | A correction becomes a **Steering Revision** on the same Task; prior evidence and Checkpoints survive |
 | Citations are remembered strings | Citations resolve to **inspected Sources** from web, local files, llm-wiki, or MCP; excerpts are matched against canonical Markdown |
 | Three reprints of one wire story read as three confirmations | Claims sharing a declared `sourceFamily` are marked as **not independent corroboration** |
+| Organized notes are mistaken for insight | A **Synthesis Pass** exposes Summary Debt and retains inspectable Insight Candidates with Claim lineage, assumptions, alternatives, and reversal evidence |
+| Raven's interpretation is presented as sourced fact | External Claims say what Sources say; promoted analysis is separately rendered as a **Raven inference** from named Claims |
 | One dead link fails the whole run | Failed dependencies **defer only the affected Claims**; independently verified work still completes honestly |
 | State dies with the tool call | The latest successfully persisted Task snapshot is **rebuilt from the session log** and supports stop/resume |
 
@@ -77,6 +79,16 @@ external/destructive/sensitive side effect.
 - **Independence-aware Claim trace.** Every Completion appends a trace mapping material Claim IDs and text to Source
   IDs, marking Claims whose Sources share one `sourceFamily` so reprints of a single originating record cannot read
   as several confirmations. Genuinely conflicting Claims are recorded as contested rather than silently resolved.
+- **First-class Insight Candidates.** `synthesize` lets the main agent record candidate interpretations, connections,
+  explanations, hypotheses, reframings, implications, and theses against named Claims. Each candidate retains its
+  assumptions, rationale, confidence, competing explanations, and evidence that would change Raven's mind. It is
+  never automatically fact or accepted analysis.
+- **Defensible analysis lineage.** Promoting a candidate requires a later material `analysis` Claim with the exact
+  candidate text, premise Claim IDs, and assumptions. The Artifact renders Source-backed propositions as `source
+  says` and promoted reasoning as `Raven inference`; a premise failure automatically defers dependent analysis.
+- **Summary Debt without synthesis theater.** A synthesis pass warns when a section merely organizes or restates
+  evidence, and when candidate reasoning has unusable lineage. `purpose=summary` and `purpose=explanation` explicitly
+  suppress that diagnostic, so direct summaries, trivial writing, and ordinary learning remain lightweight.
 - **Honest partial results.** Withdrawn Claims force the asserting prose to be edited in the same Checkpoint; a
   dropped citation may not leave a bare assertion standing. Unverifiable evidence refuses publication rather than
   silently downgrading to "unchecked".
@@ -472,11 +484,13 @@ integrators and tests:
 | --- | --- |
 | `start` | Opens one Task with an Outcome (`research`, `general-writing`, `academic-writing`, `learning`) and a grounding level (`required`, `optional`, `none`). |
 | `discover` | Runs one batch of complementary queries through the Harness `web` search seam and returns **Leads** — uninspected candidates, never Sources. A failing query becomes a Limitation instead of losing the batch. |
+| `synthesize` | Examines named Claims for interpretation, records inspectable **Insight Candidates** with assumptions and alternatives, and reports Summary Debt for a synthesis-heavy scope. It neither publishes nor accepts a candidate. |
 | `draft` | Asks every configured `provider/model` route for the same bounded instruction and returns the candidates for comparison. A **Draft Variant** carries no evidence and can never be cited. |
 | `checkpoint` | Publishes a user-visible Artifact version with new Sources, Claims, and recorded failures, and verifies grounded evidence. |
 | `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. |
 | `complete` | Validates citation identity, material Claim links, matched excerpts, Source reachability, and the exact Artifact fingerprint against the latest post-steer Checkpoint. |
-| `status` | Reports the current Task book. |
+| `status` | Reports the current Task book and a bounded index of unpromoted Insight Candidate IDs. |
+| `inspect` | Returns exact records for 1–8 explicitly named durable Insight Candidates; it never dumps the full Candidate collection. |
 | `stop` | Marks the Task stopped; explicitly not Completion. It prevents later Task mutation after processing but does not cancel Harness work already in flight. |
 | `resume` | Reopens a stopped Task — including an older one — without losing evidence or Artifact. |
 | `export` | Returns llm-wiki page bytes for the agent to write with ordinary file tools. |
@@ -492,6 +506,43 @@ and list or blockquote continuation prefixes are copied through as written.
 The transform is idempotent, and the stored bytes are the ones Completion compares against — so the returned
 Artifact, not the submitted one, is what the model edits next. Set `proseLayout: as-written` to store exactly what
 the agent wrote, or `proseFormat: plain` where Artifacts are not Markdown.
+
+### Reasoning from evidence: Insight Candidates
+
+A Lead is candidate evidence and a Draft Variant is candidate wording. An **Insight Candidate** is candidate reasoning:
+an interpretation, connection, explanation, hypothesis, reframing, implication, or thesis that Raven can derive from
+recorded Claims. `action=synthesize` gives that reasoning a durable, inspectable shape before any of it becomes accepted
+analysis.
+
+Each candidate records:
+
+- stable `insightId`, text, kind, and intellectual pattern;
+- premise `claimIds` rather than direct Source authority;
+- explicit assumptions and a rationale for why the connection may matter;
+- `low | medium | high` confidence as a judgment, never a fact status;
+- evidence that `wouldChangeMind`; and
+- optional `competesWith` links to plausible alternative explanations; competition is semantically undirected, so a later Candidate may name an earlier immutable one.
+
+After replay or context loss, `status` lists up to eight unpromoted Candidate IDs without dumping all durable reasoning. Call `inspect` with 1–8 explicit `insightIds` to recover those exact Candidate records, including the text, premise IDs, assumptions, rationale, reversal evidence, confidence, and alternatives required for a later promotion.
+
+The pattern vocabulary directs Raven toward tension, hidden assumptions, alternative causal mechanisms, boundary
+conditions, counterfactuals, second-order effects, incentive mismatches, temporal and scale shifts, missing variables,
+cross-domain analogies, unexpected connections, and implications individual Sources do not state. It does not reward
+mechanical disagreement: useful candidates compare explanatory structures and name what would reverse them.
+
+A Synthesis Pass names the Artifact or section scope, the Claims considered, and its purpose. With
+`purpose=synthesis`, no interpretation is **high Summary Debt** and interpretation with unusable premises remains weak;
+a candidate with usable Claim lineage clears the debt. Debt is tracked independently for each exact synthesis scope:
+only a later debt-free `purpose=synthesis` pass over that same scope clears it. `purpose=summary` and
+`purpose=explanation` accrue no debt but do not hide another scope's debt. The normal Checkpoint path also remains
+available, so an explicit summary, trivial rewrite, or teaching explanation does not pay synthesis ceremony.
+
+A candidate is never automatically accepted. A later Checkpoint promotes it only through a material
+`kind=analysis` Claim carrying the candidate's unchanged text, `insightId`, exact `derivedFromClaimIds`, and exact
+assumptions. Every premise must still be supported or qualified. Raven rejects the candidate as an `external` Claim,
+renders accepted analysis under **Analysis lineage** as “Raven inference from …,” and automatically defers it if a
+premise later loses support. Competing candidates remain visible after promotion. This is the intellectual substrate for
+future drafting workflows; it does not add multi-skeleton or multi-model synthesis.
 
 ### Comparing wording: Draft Variants
 
@@ -556,8 +607,11 @@ still useful when a user wants one Task and no maintained Workspace.
 flowchart LR
   U[User request] --> S["raven_task start"]
   S --> C1["Checkpoint<br/>early useful Artifact"]
+  C1 --> SY["synthesize Claims<br/>inspectable candidates + debt"]
+  SY --> IC["promote defensible insight<br/>analysis lineage"]
+  IC --> C2["Checkpoint<br/>refined Artifact"]
   C1 --> ST["steer<br/>user correction"]
-  ST --> C2["Checkpoint<br/>refined Artifact"]
+  ST --> C2
   C2 --> V{"Source and Claim<br/>verification"}
   V -- "excerpt matches retrieved bytes" --> D["complete"]
   V -- "unknown citation / broken source" --> L["Claim deferred<br/>Limitation recorded"]
@@ -1022,6 +1076,10 @@ pnpm check:release
 - refuses to present Leads as evidence, and reports withheld or absent discovery instead of an empty search;
 - lays every stored Artifact out one sentence per line, idempotently, without reflowing Markdown structure;
 - returns Draft Variants as candidates only, and reports an unconfigured or unknown route instead of substituting one;
+- derives an inspectable Insight Candidate from multiple Claims, retains a competing explanation, and replays both;
+- renders Source testimony separately from Raven inference with exact Claim and assumption lineage;
+- detects summary-heavy synthesis while leaving explicit summary and explanation paths debt-free;
+- refuses to promote an Insight Candidate as external fact or from a deferred premise;
 - inserts exactly one host-plane row from the bundle patch, and registers the settings card under its namespace key;
 - shares one active Task across a detected Agent Team and refuses a teammate's competing Task;
 - restores persisted PTC mode Task snapshots without writing a plugin-owned session event type, while keeping the documented spill limit explicit;
@@ -1053,6 +1111,11 @@ consumer to this repository.
 **Does Raven replace the Harness agent, or add another model?**
 Neither. Raven adds one task abstraction and one tool. The existing Harness agent does the research and writing
 with its own tools and its own model.
+
+**Does `synthesize` run a new model workflow or choose among several models?**
+No. The existing main agent identifies and submits Insight Candidates; Raven validates, persists, renders, and
+propagates their lineage. Draft Variants remain wording candidates, and this release adds neither multi-skeleton nor
+multi-model synthesis.
 
 **Do I need a vector database, an index, or an embedding pipeline?**
 No. Raven has no connector store of its own. Web Sources are independently reopened through the Harness `web` capability. The agent inspects local files, llm-wiki pages, and MCP resources with ordinary Harness tools and records bounded Markdown plus explicit Original Resource and producer provenance.
