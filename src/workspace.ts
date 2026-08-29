@@ -617,7 +617,7 @@ function health(files: readonly RavenWorkspaceFile[]): RavenWorkspaceHealth {
       const expected = parsed.fields.sha256
       if (expected === undefined) {
         issues.push(issue('error', 'missing-raw-digest', 'Immutable raw page has no sha256 field', file.path))
-      } else if (expected !== sha256Hex(parsed.body)) {
+      } else if (yamlString(expected) !== sha256Hex(parsed.body)) {
         issues.push(issue('error', 'raw-digest-mismatch', 'Immutable raw page body no longer matches sha256', file.path))
       }
       if (parsed.fields.source_uri === undefined) {

@@ -473,6 +473,30 @@ Existing history.
     await expect(workspace.dispatch({ action, complete: true, files }, execution)).resolves.toMatchObject({ action })
   })
 
+  it('decodes quoted raw digests while still rejecting mismatches', async () => {
+    const workspace = createRavenWorkspaceEngine({ now, sourceVerifier })
+    const rawBody = '# Raw\n\nImmutable bytes.\n'
+    const files: RavenWorkspaceFile[] = [
+      { path: 'wiki/SCHEMA.md', content: '# Wiki Schema\n' },
+      { path: 'wiki/log.md', content: '# Wiki Log\n' },
+      { path: 'wiki/index.md', content: '# Wiki Index\n' },
+      {
+        path: 'wiki/raw/documents/quoted.md',
+        content: `---\nsource_uri: "file:///quoted.md"\nsha256: "${createHash('sha256').update(rawBody).digest('hex')}"\ncapture: normalized-markdown\n---\n${rawBody}`,
+      },
+    ]
+
+    const healthy = await workspace.dispatch({ action: 'health', complete: true, files }, execution)
+    expect(healthy.health).toMatchObject({ status: 'healthy', issues: [] })
+
+    const wrongDigestFiles = files.map(file => file.path === 'wiki/raw/documents/quoted.md'
+      ? { ...file, content: file.content.replace(/sha256: "[a-f0-9]+"/, `sha256: "${'0'.repeat(64)}"`) }
+      : file)
+    const unhealthy = await workspace.dispatch({ action: 'health', complete: true, files: wrongDigestFiles }, execution)
+    expect(unhealthy.health?.status).toBe('unhealthy')
+    expect(unhealthy.health?.issues.map(item => item.code)).toEqual(['raw-digest-mismatch'])
+  })
+
   it('regenerates the index, reports health defects, and returns stored knowledge with freshness guidance', async () => {
     const workspace = createRavenWorkspaceEngine({ now, sourceVerifier })
     const badRawBody = '# Raw\n\nChanged bytes.\n'

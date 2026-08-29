@@ -1834,7 +1834,7 @@ const WORKSPACE_RESOURCE_SCHEMA = {
 
 const WORKSPACE_REPRESENTATION_SCHEMA = {
   ...SOURCE_REPRESENTATION_SCHEMA,
-  required: ['format', 'derivation', 'coverage', 'producedBy', 'markdown'],
+  required: ['format', 'derivation', 'coverage', 'producedBy', 'inspectionCallId', 'markdown'],
   properties: {
     ...SOURCE_REPRESENTATION_SCHEMA.properties,
     inspectionCallId: {
