@@ -2,7 +2,7 @@
 
 ## Test surfaces
 
-The requested public contract fixes five test seams:
+The requested public contract fixes six test seams:
 
 1. **Cordis load seam** — named exports, prompt/tool registration, real Loader
    unwrapping, execution through `ctx.tools`, and disposal.
@@ -12,7 +12,10 @@ The requested public contract fixes five test seams:
 3. **SourceVerifier seam** — deterministic adapters, Harness-web observations, and owning-session file/MCP inspection receipts feeding the same source/claim/completion policy.
 4. **DraftGenerator seam** — a deterministic drafter and the real `ctx.llm` adapter
    feeding the same candidate policy, where a variant can never become evidence.
-5. **Composition and browser artifact** — the Bundle patch composed through the
+5. **Raven Workspace interface** — pure Markdown snapshot planning for initialization,
+   adoption, normalization-backed ingest, Task contribution, maintenance, health, and
+   lexical reuse, with conditional writes and a lifecycle separate from Task state.
+6. **Composition and browser artifact** — the Bundle patch composed through the
    Harness's own composer, and the built browser bundle evaluated as the shell
    evaluates it.
 
@@ -25,7 +28,8 @@ agent topology.
 |---|---|
 | Clean install, load, and run against intended Harness | `pnpm test:pack` creates an external staging project with no `lib/`, links only the pinned toolchain, exercises real `prepack` without mutating the repository build, enforces the exact tarball allowlist, and installs it with an isolated pnpm home plus a fresh store by default (or an explicit pre-populated offline store/cache) in a second external consumer before import/apply/execute; `pnpm test:dsh` requires the exact clean Harness commit, loads a real `cordis.yml` through Loader + Include, executes start/checkpoint/complete through the real tool registry and `ctx.web` seam, and removes the composition to verify disposal. |
 | Build, lint, typecheck, and tests pass | `pnpm check` runs Oxlint with warnings denied, strict TypeScript, the tsdown Host and browser builds, and the full Vitest inventory below. The build runs before the tests because the browser half is a build artifact and one suite verifies that artifact rather than its source. |
-| Durable output as a valid llm-wiki | `tests/unit/wiki.test.ts` exports a completed Task as llm-wiki bytes: an artifact page with frontmatter, sources, and contested marking; one immutable `raw/` page per Source whose `sha256` covers exactly its own body; an appendable log entry; and SCHEMA/index/log seeds only under `init`. Raven emits bytes and never writes files, so the repository stays readable by the llm-wiki skill and Obsidian. |
+| Durable output as a valid llm-wiki | `tests/unit/wiki.test.ts` exports a completed Task as llm-wiki bytes: an artifact page with frontmatter, sources, and contested marking; one immutable `raw/` page per Source whose `sha256` covers exactly its own body and remains stable across later projection times; an appendable log entry; and SCHEMA/index/log seeds only under `init`. Raven emits bytes and never writes files, so the repository stays readable by the llm-wiki skill and Obsidian. |
+| Durable compounding Raven Workspace | `tests/unit/workspace.test.ts` covers fresh initialization, byte-preserving existing-wiki adoption, mixed-document folder adoption through Source normalization, time-stable idempotent ingest, immutable `supersedes` revisions, repeated growth of all four llm-wiki page types, conservative confidence and contradiction history, deterministic index regeneration, health codes, path confinement, conditional hashes, and lexical freshness labels. `tests/acceptance/raven.acceptance.test.ts` drives both registered tools end to end: it initializes and adopts material, completes and grows Task A without changing its revision, maintains a healthy wiki, mounts a fresh Raven instance, reuses the persisted Markdown in independent Task B as an attested `llm-wiki` Source, and completes it. No Workspace is required by the existing Task scenarios. |
 | Evidence-backed Keep / Change / Drop assessment | `docs/reverse-engineering/assessment.md` synthesizes the Hermes profile, nana-research, Harness, and skill-corpus reports — `hermes-research-skills.md` (all 258 files across 18 research skills), `hermes-r-round-references.md`, and `hermes-nana-wiki.md` — and maps preserved mechanisms to source files and line ranges. |
 | Four first-class Outcomes | `tests/acceptance/raven.acceptance.test.ts` has end-to-end scenarios for `research`, `general-writing`, `academic-writing`, and `learning` through the same tool and Task state. |
 | Progressive research and mid-run correction | The first acceptance scenario verifies one initial Source and publishes an active early Artifact before the second Source, broader collection, and final Completion verification; it then continues research, applies `steer`, emits a revised Checkpoint, and completes with the original Task ID. |
@@ -63,7 +67,20 @@ agent topology.
   - immutable `raw/` page whose `sha256` covers exactly its own body;
   - appendable log entry that never rewrites `wiki/log.md`;
   - SCHEMA/index/log seeds only under `init`;
-  - confidence reported from Task phase and recorded limits.
+  - confidence reported from Task phase and recorded limits;
+  - immutable raw bytes stable across projection dates.
+- `tests/unit/workspace.test.ts`
+  - fresh initialize and byte-preserving existing llm-wiki adoption;
+  - mixed-folder adoption and later ingest through the Source normalization seam;
+  - immutable content-addressed revisions, idempotency, and conditional write hashes;
+  - repeated Task growth across query, concept, entity, and comparison pages;
+  - provenance, confidence, contradiction and body history retention;
+  - derived index regeneration, deterministic health codes, and lexical freshness labels;
+  - unsafe-path, unavailable-normalization, and slug-collision failure paths.
+- `tests/unit/workspace-tool-schema.test.ts`
+  - separate `raven_workspace` registration;
+  - exact schema/runtime action fields and shared Source provenance schema;
+  - conditional-write and append-marker rendering.
 - `tests/unit/codec.test.ts`
   - complete JSON round-trip;
   - unknown-version and unknown-field rejection;

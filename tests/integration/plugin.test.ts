@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import * as RavenPlugin from '../../src/index.js'
 
 describe('Raven Cordis plugin', () => {
-  it('registers one scoped tool and one concise prompt section with named exports', () => {
+  it('registers separate Task and Workspace tools with one concise prompt section and named exports', () => {
     const tools: Array<Record<string, unknown>> = []
     const sections: Array<Record<string, unknown>> = []
     const listeners: Array<{ event: string; listener: unknown }> = []
@@ -38,9 +38,10 @@ describe('Raven Cordis plugin', () => {
 
     RavenPlugin.apply(ctx as never)
 
-    expect(tools).toHaveLength(1)
-    expect(tools[0]?.name).toBe('raven_task')
-    const parameters = tools[0]?.parameters as { properties: Record<string, { description?: string }> }
+    expect(tools.map(tool => tool.name)).toEqual(['raven_workspace', 'raven_task'])
+    const [workspaceTool, taskTool] = tools
+    expect(workspaceTool?.description).toContain('lifecycle is separate')
+    const parameters = taskTool?.parameters as { properties: Record<string, { description?: string }> }
     expect(parameters.properties.artifact?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.artifactChars))
     expect(parameters.properties.sources?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.sources))
     const sourceItems = (parameters.properties.sources as unknown as {

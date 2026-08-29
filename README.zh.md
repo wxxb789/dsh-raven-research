@@ -89,9 +89,13 @@ Raven 改变的是这项工作的形态。
   Harness 端无需改动。
 - **Web GUI 里的 settings 卡片。** Raven 附带一个浏览器半边，为自己的命名空间在 Settings › Plugins 下注册一张
   卡片 —— 前置条件见[配置](#配置)。
-- **可持久化导出。** `export` 产出一个合法的 [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) 仓库 —— artifact 页、
-  每个 Source 一张带验证回执的不可变 `raw/` 页、以及可追加的 `log.md` —— 由 agent 用普通文件工具写入，
-  Raven 自身从不碰文件系统。
+- **持久化 Raven Workspace。** 独立的 `raven_workspace` 生命周期可以初始化或安全采纳
+  [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md)、摄入经 Source 层规范化的文档、把已完成 Task 的成果持续累积到
+  query/concept/entity/comparison 页面、重建派生 index、报告健康问题，并在后续 Task 中用词法检索复用既有知识。
+  条件 hash 与幂等 log marker 防止静默覆盖；原始文档和旧 raw revision 始终保留。Markdown 是事实源，核心能力不需要
+  embedding 或 vector database。
+- **兼容的一次性导出。** 只想完成一个 Task 的用户仍可使用 `raven_task action=export`，生成 artifact、不可变 `raw/`
+  页面与可追加的 `log.md`。所有字节仍由 agent 通过普通 Harness 文件工具应用；Raven 自身从不碰文件系统。
 
 ## 安装
 
@@ -367,18 +371,20 @@ npx dsh-raven-install-preset --snapshot --force
 
 3. 可选：如果你之前开启过 settings 卡片，从用户的 `settings.yaml` 中删除 `raven-research` 部分。
 
-Raven 的每一处注册 —— `raven_task` 工具、prompt section、`agent/pre-step` 监听器、`tools/ptc-dispatch-log`
-监听器、settings section 以及浏览器卡片 —— 都由 Cordis fiber 持有 disposer，卸载会把它们一并撤销，不会留下孤儿工具
+Raven 的每一处注册 —— `raven_task`/`raven_workspace` 工具、prompt section、`agent/pre-step` 监听器、
+`tools/ptc-dispatch-log` 监听器、settings section 以及浏览器卡片 —— 都由 Cordis fiber 持有 disposer，卸载会把它们
+一并撤销，不会留下孤儿工具
 或残留 prompt 文本（`pnpm test:dsh` 正是针对真实 Harness Loader 验证这条释放路径）。如果你的部署不会在 composition
 变更时重载，请重启 Harness。
 
-除此之外没有任何残留：Raven 没有数据库、没有缓存；运行期不写任何文件（安装器写出的那个 preset 目录，正是上面第 2
-步删掉的东西）。Task 状态存在 Harness session log 中，导出的内容则是一个本来就属于你的普通 llm-wiki 仓库。
+除此之外没有数据库或缓存残留；Raven 运行期不直接写文件（安装器写出的 preset 目录正是上面第 2 步删除的对象）。
+Task 状态存在 Harness session log 中；已应用的一次性导出与 Workspace 都是用户本来就拥有的普通 llm-wiki，卸载不会
+删除它们。
 
 ## 使用
 
-`raven_task` 由 `raven` agent preset 注册，因此它**只在 Raven 模式下存在**。请在新建会话时选择该模式；在其他任何
-模式下，agent 都没有 Raven 工具，会直接作答而不开 Task。
+`raven_task` 与 `raven_workspace` 由 `raven` agent preset 注册，因此它们**只在 Raven 模式下存在**。请在新建会话时
+选择该模式；在其他任何模式下，agent 都没有 Raven 工具，会直接作答而不开 Task。
 
 在 Raven 模式内部，没有启动咒语，也没有独立 Raven UI —— 用户照常和 Harness agent 对话。直接说“只用这些站点”“屏蔽这个站点”“使用这个本地文件夹”“包含这个 llm-wiki”“排除这个 MCP source”“只看一手来源”“先暂停”“继续”或“保留这份结果”即可，主 Agent 会把自然语言翻译成 Raven 的内部协议。`guidance: auto` 仅在有帮助时提示一项相关能力；在 Raven preset 行（或选择性开启的 settings 卡片）设 `guidance: off`，即可关闭提示而不改变工作流。
 
@@ -441,13 +447,41 @@ route 清单归部署所有：agent 只能从 `draftRoutes` 里选子集，不�
 数据通路。未配置的 route 会被拒绝并列出已配置的集合，而不是被悄悄替换成默认值。在部署设置 `draftRoutes` 之前，
 Draft Variants 处于**关闭**状态，调用会如实报告这一点，而不是转而用会话模型起草。
 
-### 让成果活过本次会话：llm-wiki 导出
+### 让知识跨 Task 累积：Raven Workspace
 
-Completion 之后调用 `action=export`，Raven 返回一个 [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) 仓库的页面
-字节：`wiki/queries` 下的 artifact 页、每个 Source 一张携带已验证摘录与验证回执的不可变 `wiki/raw` 页
-（`capture: excerpt-only`），以及一条可追加的 `wiki/log.md` 记录。对尚无 wiki 的仓库传 `init=true`，会一并生成
-`SCHEMA.md`、`index.md` 与 `log.md`。产物是合法的 llm-wiki，可被 Obsidian 及该 skill 自己的工具读取。返回的字节要
-原样写入 —— 每张 raw 页的摘要覆盖其自身正文，导出后再编辑会使其失效。
+**Raven Task** 是一次有界研究或写作工作；**Raven Workspace** 是与之分离、由用户所有、可长期维护的
+[llm-wiki](docs/adr/0002-llm-wiki-repo-format.md)。Task 完成不会关闭 Workspace，采纳 Workspace 也不会启动 Task；
+完全不使用 Workspace 时，原有一次性 Task 工作流不变。
+
+`raven_workspace` 提供完整生命周期：
+
+| Action | 效果 |
+| --- | --- |
+| `initialize` | 只为新 wiki 创建缺失的 `SCHEMA.md`、`index.md` 与 `log.md`。 |
+| `adopt kind=wiki` | 采纳现有 llm-wiki，不重写任何既有页面，只补缺失结构。 |
+| `adopt kind=folder` | 原始文档留在原位，在 `wiki/raw/documents/` 下添加不可变的规范化 Markdown。 |
+| `ingest` | 持续摄入非 Web 的 Source-normalized 新材料；相同输入是 no-op，内容变化则创建带 `supersedes` 的新 revision。Web 材料通过已完成 Task 与 `grow` 进入，避免用摘录校验冒充完整文档校验。 |
+| `grow` | 把已完成 Task 累积到 query、concept、entity 或 comparison 页，同时保留历史、Source、置信度、Task provenance 与矛盾。 |
+| `maintain` | 只在显式完整的 Markdown snapshot（`complete=true`）上确定性重建可随时丢弃的 `index.md`。 |
+| `health` | 在 `complete=true` 的全量 snapshot 上报告结构/frontmatter、类型、raw digest、悬空 Source、矛盾说明与 index freshness 问题。 |
+| `reuse` | 不用 embedding，以标题、tag 和正文做词法排序；明确结果是既有知识而非刚刚验证的新证据。 |
+
+Raven 仍没有文件系统权限。Agent 先用普通 Harness 文件工具读取所需 `wiki/**/*.md` 的精确字节，再调用 Workspace。
+`health` 与 `maintain` 还要求 Agent 明确声明这些字节覆盖完整 Workspace；部分 snapshot 既不能报告全局 healthy，也不能
+替换全局 index。返回计划里的每次写入都带 `absent` 或当前内容 `sha256` 前置条件，每次 log 追加都带确定性的 operation marker。Agent 必须
+重新读取目标、核对条件、用普通文件工具应用，再重新读取最终字节。因此重复执行同一次采纳、摄入或 Task 累积会成为
+no-op，而不会重复写 log 或覆盖新知识。
+
+混合文档目录不会引入第二条转换流水线。Markdown 以 `derivation=original` 原样传入；PDF、HTML、office 等材料必须复用
+普通 Source 层的 Markdown normalization，并携带 Original Resource URI/media type、`producedBy`、`inspectionCallId`、
+coverage 与精确的转换结果。转换失败必须显式报告，原始文件保持不动。
+
+`reuse` 不是 freshness 豁免。稳定概念可在后续 Task 中把选中的 Workspace 页读回并登记为 `llm-wiki` Source；价格、
+任职者、产品状态、数量等易变或“当前”事实仍必须重新打开权威 Original Resource 做新验证。
+
+兼容的一次性路径仍保留：Task 已有 Artifact 后，`raven_task action=export` 继续返回 `wiki/queries` 下的 artifact 页、每个
+Source 一张 `capture: excerpt-only` 的不可变 `wiki/raw` 页与一条可追加的 `wiki/log.md` 记录。只想完成一个 Task 的用户
+无需建立 Workspace。
 
 ## 工作原理 (under the hood)
 
@@ -461,7 +495,9 @@ flowchart LR
   V -- "摘录与抓取字节匹配" --> D["complete"]
   V -- "未知引用 / 失效 Source" --> L["Claim 延后<br/>记录 Limitation"]
   L --> C2
-  D --> E["export<br/>llm-wiki 页面"]
+  D --> E["export<br/>一次性 llm-wiki 页面"]
+  D --> W["raven_workspace grow<br/>持久 llm-wiki 知识"]
+  W --> S2["后续 Raven Task<br/>复用既有知识"]
 ```
 
 ### 插件注册了什么
@@ -469,7 +505,7 @@ flowchart LR
 Raven 导出的是普通的 Cordis 插件元数据（`name`、`inject = ['tools', 'systemPrompt']`、Schemastery `Config` 与
 `apply`），并让 `apply` 保持很薄。在 host plane 上它注册：
 
-- 通过 `ctx.tools` 注册的一个 `raven_task` 模型工具；
+- 通过 `ctx.tools` 分别注册 `raven_task` 与 `raven_workspace` 模型工具；
 - 通过 `ctx.systemPrompt` 注册的一段紧凑静态 section；
 - 一个 `agent/pre-step` 监听器，在每一步之前把当前 Task book 放到模型面前；
 - 一个 `tools/ptc-dispatch-log` 监听器，让 PTC mode 中的 Task step 保持持久（见下文）；以及
@@ -536,13 +572,14 @@ Completion 会再次核对引用身份、关键 Claim 链接、Source 可达性�
 
 ### 包的边界与非目标
 
-Raven 是一个依赖极少的 ESM 包：一个 Cordis 插件、一个模型工具、一段 prompt section、一个纯 TypeScript Task engine、
-一个只贡献单张 settings 卡片的浏览器半边、基于官方 `tool/result.meta` 与 `tool/code-dispatch` 的同会话紧凑重放，
-以及架在官方 Harness 能力之上的三个接缝 —— 基于 `ctx.web` 产出 Lead 的 `SourceSearcher` 与校验证据的
-`SourceVerifier`，以及产出 Draft Variant 的 drafter。
+Raven 是一个依赖极少的 ESM 包：一个 Cordis 插件、彼此分离的 Task 与 Workspace 模型工具、一段 prompt section、
+纯 TypeScript Task/Workspace engine、一个只贡献单张 settings 卡片的浏览器半边、基于官方 `tool/result.meta` 与
+`tool/code-dispatch` 的同会话 Task 紧凑重放，以及架在官方 Harness 能力之上的三个接缝 —— 产出 Lead 的
+`SourceSearcher`、校验证据及 Workspace 文档 normalization receipt 的 `SourceVerifier`，以及产出 Draft Variant 的 drafter。
 
-它刻意不做 Task GUI、模型宿主、向量库、自定义调度器、通用 agent 框架和 Raven 自有数据库。长期目标、subagent、
-workflow、文件与持久化仍归 Harness 负责。
+它刻意不做 Task GUI、模型宿主、向量库、embedding 必需项、自定义调度器、通用 agent 框架和 Raven 自有数据库。
+Workspace Markdown 是由普通 Harness 文件工具应用的用户自有状态；长期目标、subagent、workflow、文件与持久化仍归
+Harness 负责。
 
 <details>
 <summary><b>设计依据与决策记录</b></summary>
@@ -914,8 +951,8 @@ pnpm check:release
   而不是基于规则的文本分类器去猜测纠正意图。
 - 未组合 Harness `web` 能力时，web Claim 保持 deferred；由 Source Policy 显式准入且 inspection receipt 有效的本地、llm-wiki 与 MCP Source 仍可用于 grounding。
 - 最近一次成功持久化的 Task snapshot 可从所属 Harness session record 重放，包括多个 stopped/completed Task 身份及稍后
-  resume 旧 Task。超大的 nested PTC mode log 可能漏掉那一步；后续直接 mutation 会重新发布完整 snapshot。跨会话项目、
-  可复用语料库和间隔重复存储不在范围内；要留存成果请用 `export`。
+  resume 旧 Task。超大的 nested PTC mode log 可能漏掉那一步；后续直接 mutation 会重新发布完整 snapshot。跨会话可复用
+  知识属于独立的 Markdown Workspace，而不是 Task state；定时维护与间隔重复存储仍不在范围内。
 - Raven 通过普通的工具结果与聊天呈现 Task 进度；它在浏览器里唯一的界面是 settings 卡片，v1 没有针对 Task 本身的
   自定义 UI。
 - 在部署配置 `draftRoutes` 之前 Draft Variants 处于关闭状态；变体本身永远不是证据：不可被引用，也不计入证据底线。

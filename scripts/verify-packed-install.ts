@@ -386,8 +386,8 @@ Raven.apply({
   get() { return undefined },
   on() { return () => undefined },
 })
-assert.equal(tools.length, 1)
-assert.equal(tools[0].name, 'raven_task')
+assert.deepEqual(tools.map(tool => tool.name), ['raven_workspace', 'raven_task'])
+const [workspaceTool, taskTool] = tools
 assert.equal(sections.length, 1)
 assert.deepEqual(injected, [['settings']])
 assert.equal(Raven.RAVEN_SETTINGS_NAMESPACE, 'raven-research')
@@ -408,27 +408,30 @@ assert.equal(
 )
 const agent = { id: 'packed-session', session: { events: [] } }
 const signal = new AbortController().signal
-const value = await tools[0].execute(
+const initialized = await workspaceTool.execute({ action: 'initialize', files: [] }, { agent, signal })
+assert.deepEqual(initialized.pages.map(page => page.path), ['wiki/SCHEMA.md', 'wiki/index.md', 'wiki/log.md'])
+assert.equal(initialized.preconditions.every(item => item.expected === 'absent'), true)
+const value = await taskTool.execute(
   { action: 'start', outcome: 'learning', grounding: 'none', request: 'Teach one concept.' },
   { agent, signal },
 )
 assert.equal(value.status, 'active')
 // A deployment with no web capability must report discovery as unavailable rather
 // than as an empty search the agent could read as "nothing exists".
-const found = await tools[0].execute(
+const found = await taskTool.execute(
   { action: 'discover', taskId: value.state.taskId, queries: ['one angle', 'another angle'] },
   { agent, signal },
 )
 assert.match(found.leads.unavailable, /web search capability is not composed/)
 assert.equal(found.state.limitations.length, 1)
 // Likewise for drafting: no configured route must say so, never quietly draft.
-const drafted = await tools[0].execute(
+const drafted = await taskTool.execute(
   { action: 'draft', taskId: value.state.taskId, instruction: 'Draft the opening.' },
   { agent, signal },
 )
 assert.match(drafted.variants.unavailable, /no Draft Variant route is configured/)
 // The stored Artifact carries the Prose Layout the deployment configured.
-const checkpoint = await tools[0].execute(
+const checkpoint = await taskTool.execute(
   {
     action: 'checkpoint',
     taskId: value.state.taskId,
@@ -440,7 +443,7 @@ const checkpoint = await tools[0].execute(
 )
 assert.equal(checkpoint.state.latestArtifact, 'A concept holds.\\nA second sentence explains it.')
 assert.equal(checkpoint.state.checkpoints[0].proseLayout, 'sentence-per-line')
-console.log('packed install: isolated staged prepack, exact files, bundle manifest and patch, clean external install, import, apply, settings defaults, discovery and drafting degradation, prose layout, and tool execution passed')
+console.log('packed install: isolated staged prepack, exact files, bundle manifest and patch, clean external install, import, apply, Workspace initialization, settings defaults, discovery and drafting degradation, prose layout, and tool execution passed')
 `)
   await runProcess(process.execPath, ['verify.mjs'], {
     cwd: consumer,

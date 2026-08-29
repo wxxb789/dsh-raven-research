@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 
 import { apply } from '../../src/plugin.js'
 import type { RavenConfig } from '../../src/config.js'
 import { SOURCE_ORIGINS, type RavenTaskState } from '../../src/domain.js'
+import type { RavenWorkspaceFile, RavenWorkspaceResult } from '../../src/workspace.js'
 
 interface ToolValue {
   readonly kind: 'raven-task-result'
@@ -13,9 +15,10 @@ interface ToolValue {
   readonly renderedArtifact?: string
 }
 
-interface CapturedTool {
+interface CapturedTool<T = unknown> {
+  readonly name: string
   readonly parameters: Record<string, unknown>
-  execute(args: unknown, exec: unknown): Promise<ToolValue>
+  execute(args: unknown, exec: unknown): Promise<T>
 }
 
 interface PreStepDecision {
@@ -31,14 +34,14 @@ function createHarness(web?: {
     statusCode: number
     body: { kind: 'html' | 'text'; content: string }
   }>
-}, config: RavenConfig = {}) {
-  let tool: CapturedTool | undefined
+}, config: RavenConfig = {}, options: { readonly agentId?: string } = {}) {
+  const tools = new Map<string, CapturedTool>()
   let preStep: PreStep | undefined
   const sections: Array<Record<string, unknown>> = []
   const ctx = {
     tools: {
       register(definition: CapturedTool) {
-        tool = definition
+        tools.set(definition.name, definition)
         return () => undefined
       },
     },
@@ -60,9 +63,10 @@ function createHarness(web?: {
     },
   }
   apply(ctx as never, { sourceNetworkPolicy: 'unrestricted', ...config })
-  if (tool === undefined) throw new Error('Raven tool did not register')
-  const registeredTool = tool
-  const agent = { id: 'acceptance-session', session: { events: [] as unknown[] } }
+  const registeredTool = tools.get('raven_task') as CapturedTool<ToolValue> | undefined
+  const workspaceTool = tools.get('raven_workspace') as CapturedTool<RavenWorkspaceResult> | undefined
+  if (registeredTool === undefined || workspaceTool === undefined) throw new Error('Raven tools did not register')
+  const agent = { id: options.agentId ?? 'acceptance-session', session: { events: [] as unknown[] } }
   const signal = new AbortController().signal
   return {
     sections,
@@ -88,6 +92,7 @@ function createHarness(web?: {
     },
     clearInspections: () => { agent.session.events.length = 0 },
     run: (args: unknown) => registeredTool.execute(args, { agent, signal }),
+    runWorkspace: (args: unknown) => workspaceTool.execute(args, { agent, signal }),
     context: async () => {
       if (preStep === undefined) throw new Error('Raven pre-step hook did not register')
       const decision = await preStep({ agent }, async () => ({ kind: 'enter', messages: [] }))
@@ -97,6 +102,28 @@ function createHarness(web?: {
         .join('\n')
     },
   }
+}
+
+function applyWorkspacePlan(files: Map<string, string>, result: RavenWorkspaceResult): void {
+  for (const page of result.pages) {
+    const precondition = result.preconditions.find(item => item.path === page.path)
+    if (precondition === undefined) throw new Error(`missing precondition for ${page.path}`)
+    const current = files.get(page.path)
+    const observed = current === undefined
+      ? 'absent'
+      : `sha256:${createHash('sha256').update(current).digest('hex')}`
+    if (observed !== precondition.expected) throw new Error(`stale plan for ${page.path}`)
+    files.set(page.path, page.content)
+  }
+  if (result.logEntry !== undefined) {
+    const marker = /<!-- raven-workspace-op:[a-f0-9]+ -->/.exec(result.logEntry)?.[0]
+    const log = files.get('wiki/log.md') ?? ''
+    if (marker === undefined || !log.includes(marker)) files.set('wiki/log.md', log + result.logEntry)
+  }
+}
+
+function workspaceFiles(files: ReadonlyMap<string, string>): RavenWorkspaceFile[] {
+  return Array.from(files, ([path, content]) => ({ path, content }))
 }
 
 const source = (sourceId: string, suffix: string) => ({
@@ -584,6 +611,150 @@ describe('Raven end-to-end acceptance', () => {
     expect(offStopped.status).toBe('stopped')
     expect(offResumed.state.taskId).toBe(offStarted.state.taskId)
     expect(offCompleted.status).toBe('completed')
+  })
+
+  it('compounds a Markdown Workspace and reuses it in a later independent Task', async () => {
+    const first = createHarness(undefined, {}, { agentId: 'workspace-task-a' })
+    const files = new Map<string, string>()
+    const initialized = await first.runWorkspace({ action: 'initialize', files: [] })
+    applyWorkspacePlan(files, initialized)
+
+    const notesUri = 'file:///Q:/workspace/material/notes.md'
+    const briefUri = 'file:///Q:/workspace/material/brief.pdf'
+    const notesMarkdown = '# Notes\n\nOriginal Markdown survives adoption.\n'
+    const briefMarkdown = '# Brief\n\nThe Source layer produced this normalized Markdown.\n'
+    first.recordInspection({
+      callId: 'workspace-read-notes', name: 'read', arguments: { file_path: notesUri }, text: '',
+      meta: {
+        offset: 1,
+        totalLines: 4,
+        path: fileURLToPath(notesUri),
+        lines: notesMarkdown.split('\n').map((text, index) => ({ number: index + 1, text })),
+      },
+    })
+    first.recordInspection({
+      callId: 'workspace-convert-brief', name: 'document_to_markdown', arguments: { file_path: briefUri },
+      text: briefMarkdown,
+    })
+    const adopted = await first.runWorkspace({
+      action: 'adopt', kind: 'folder', files: workspaceFiles(files),
+      documents: [
+        {
+          title: 'Original notes',
+          resource: { origin: 'local', uri: notesUri, mediaType: 'text/markdown' },
+          representation: {
+            format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read',
+            inspectionCallId: 'workspace-read-notes', markdown: notesMarkdown,
+          },
+        },
+        {
+          title: 'Converted brief',
+          resource: { origin: 'local', uri: briefUri, mediaType: 'application/pdf' },
+          representation: {
+            format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'document_to_markdown',
+            inspectionCallId: 'workspace-convert-brief', markdown: briefMarkdown,
+          },
+        },
+      ],
+    })
+    expect(adopted.status).toBe('ready')
+    applyWorkspacePlan(files, adopted)
+    const originalRaw = [...files].filter(([path]) => path.startsWith('wiki/raw/documents/'))
+    expect(originalRaw).toHaveLength(2)
+    expect(files.has('notes.md')).toBe(false)
+    expect(files.has('brief.pdf')).toBe(false)
+
+    const started = await first.run({
+      action: 'start', outcome: 'general-writing', grounding: 'none', request: 'Explain durable workspaces.',
+    })
+    const checkpoint = await first.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'draft', summary: 'Reusable Workspace concept.',
+      artifact: 'Durable workspaces preserve useful context across bounded tasks.',
+    })
+    const completed = await first.run({
+      action: 'complete', taskId: started.state.taskId, artifact: checkpoint.state.latestArtifact,
+    })
+    const revisionBeforeGrow = completed.state.revision
+    const grown = await first.runWorkspace({
+      action: 'grow', files: workspaceFiles(files),
+      taskId: completed.state.taskId, pageType: 'concept', title: 'Durable Workspace', tags: ['research'],
+    })
+    applyWorkspacePlan(files, grown)
+    const afterGrow = await first.run({ action: 'status', taskId: completed.state.taskId })
+    expect(afterGrow.state.revision).toBe(revisionBeforeGrow)
+    expect([...files].filter(([path]) => path.startsWith('wiki/raw/documents/'))).toEqual(originalRaw)
+
+    const maintained = await first.runWorkspace({
+      action: 'maintain', files: workspaceFiles(files), complete: true,
+    })
+    applyWorkspacePlan(files, maintained)
+    const healthy = await first.runWorkspace({
+      action: 'health', files: workspaceFiles(files), complete: true,
+    })
+    expect(healthy.health?.status).toBe('healthy')
+
+    const later = createHarness(undefined, {}, { agentId: 'workspace-task-b' })
+    const reused = await later.runWorkspace({
+      action: 'reuse', files: workspaceFiles(files),
+      query: 'durable workspace context', freshness: 'durable', maxResults: 5,
+    })
+    expect(reused.candidates?.[0]).toMatchObject({
+      path: 'wiki/concepts/durable-workspace.md', knowledgeStatus: 'stored', requiresFreshVerification: false,
+    })
+
+    const conceptPath = 'wiki/concepts/durable-workspace.md'
+    const concept = files.get(conceptPath)
+    if (concept === undefined) throw new Error('missing compounded concept')
+    const conceptUri = 'file:///Q:/workspace/wiki/concepts/durable-workspace.md'
+    const conceptLines = concept.split('\n')
+    later.recordInspection({
+      callId: 'reuse-workspace-concept', name: 'read', arguments: { file_path: conceptUri }, text: '',
+      meta: {
+        offset: 1,
+        totalLines: conceptLines.length,
+        path: fileURLToPath(conceptUri),
+        lines: conceptLines.map((text, index) => ({ number: index + 1, text })),
+      },
+    })
+    const laterTask = await later.run({
+      action: 'start', outcome: 'research', request: 'Reuse prior Workspace knowledge.',
+      sourcePolicy: { llmWikiRoots: ['file:///Q:/workspace/wiki'] },
+    })
+    const claimText = 'A durable Workspace can preserve useful context across bounded Tasks.'
+    const laterCheckpoint = await later.run({
+      action: 'checkpoint', taskId: laterTask.state.taskId, stage: 'read', summary: 'Reused stored knowledge.',
+      artifact: `${claimText} [@WIKI-STORED].`,
+      sources: [{
+        sourceId: 'WIKI-STORED', title: 'Durable Workspace', locator: 'Raven update',
+        excerpt: 'Durable workspaces preserve useful context across bounded tasks.', role: 'secondary',
+        resource: { origin: 'llm-wiki', uri: conceptUri, mediaType: 'text/markdown', sourceName: 'raven-workspace' },
+        representation: {
+          format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read',
+          inspectionCallId: 'reuse-workspace-concept', markdown: concept,
+        },
+      }],
+      claims: [claim('WIKI-CLAIM', 'WIKI-STORED', claimText)],
+    })
+    const laterCompleted = await later.run({
+      action: 'complete', taskId: laterTask.state.taskId, artifact: laterCheckpoint.state.latestArtifact,
+    })
+
+    expect(laterTask.state.taskId).not.toBe(started.state.taskId)
+    expect(laterCompleted.status).toBe('completed')
+    expect(laterCompleted.state.sources[0]?.resource.origin).toBe('llm-wiki')
+    expect(laterCompleted.state.sources[0]?.check.status).toBe('reachable')
+  })
+
+  it('exposes plain Workspace discovery to the agent before substantial research', () => {
+    const raven = createHarness()
+    const prompt = String(raven.sections.find(section => section.name === 'tool:raven-task')?.text)
+
+    expect(prompt).toContain('Before starting substantial research from zero')
+    expect(prompt).toContain('wiki/index.md')
+    expect(prompt).toContain('current Harness workspace')
+    expect(prompt).toContain('read it when present')
+    expect(prompt).toContain('rather than persisting it in Task state')
+    expect(prompt).toContain('No Workspace is required')
   })
 
   it('has no confirmation action between normal research stages', () => {

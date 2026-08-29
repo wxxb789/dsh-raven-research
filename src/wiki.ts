@@ -7,8 +7,14 @@
  * tooling can read. See docs/adr/0002-llm-wiki-repo-format.md.
  */
 
-import { createHash } from 'node:crypto'
-
+import {
+  markdownText,
+  renderWikiPage,
+  sha256Hex,
+  wikiSlug,
+  wikiYamlList,
+  wikiYamlString,
+} from './wiki-format.js'
 import type {
   RavenClaimRecord,
   RavenSourceRecord,
@@ -21,46 +27,8 @@ export interface RavenWikiOptions {
   readonly title: string
   readonly tags: readonly string[]
   readonly init: boolean
-  /** Emission time; the page date and `ingested` come from here, not from Task history. */
+  /** Emission time for the knowledge page and log; immutable raw pages use Source inspection time. */
   readonly at: string
-}
-
-/** Filesystem-safe slug that keeps CJK intact, since research corpora are frequently not Latin. */
-function slug(value: string): string {
-  return value
-    .toLowerCase()
-    .replaceAll(/[\\/:*?"<>|#[\]]/g, ' ')
-    .replaceAll(/\s+/g, '-')
-    .replaceAll(/-{2,}/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80)
-    || 'untitled'
-}
-
-function yamlString(value: string): string {
-  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll(/\s+/g, ' ').trim()}"`
-}
-
-function yamlList(values: readonly string[]): string {
-  return `[${values.join(', ')}]`
-}
-
-function digest(body: string): string {
-  return createHash('sha256').update(body).digest('hex')
-}
-
-function page(frontmatter: readonly string[], body: string): string {
-  return `---\n${frontmatter.join('\n')}\n---\n${body}`
-}
-
-function markdownText(value: string): string {
-  return value
-    .replace(/([\\`*_[\]{}()#+.!|-])/g, '\\$1')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll(/\s+/g, ' ')
-    .trim()
 }
 
 function blockquote(value: string): string {
@@ -80,7 +48,7 @@ function blockquote(value: string): string {
  */
 function rawPagePath(source: RavenSourceRecord): string {
   const identity = `${source.sourceId} ${source.title}`
-  return `wiki/raw/articles/${slug(identity)}-${digest(identity).slice(0, 8)}.md`
+  return `wiki/raw/articles/${wikiSlug(identity)}-${sha256Hex(identity).slice(0, 8)}.md`
 }
 
 /**
@@ -88,7 +56,7 @@ function rawPagePath(source: RavenSourceRecord): string {
  * never high confidence, and any recorded limit or deferral caps it at medium, so a page
  * cannot silently harden into wiki fact.
  */
-function confidence(state: RavenTaskState): 'high' | 'medium' | 'low' {
+export function wikiConfidence(state: RavenTaskState): 'high' | 'medium' | 'low' {
   if (state.phase === 'active' || state.phase === 'stopped') return 'low'
   if (state.phase === 'completed-with-limits') return 'medium'
   return state.limitations.length > 0 || state.claims.some(claim => claim.disposition === 'deferred')
@@ -100,7 +68,7 @@ function materialExternal(claims: readonly RavenClaimRecord[]): RavenClaimRecord
   return claims.filter(claim => claim.kind === 'external' && claim.importance === 'material')
 }
 
-function renderRawPage(source: RavenSourceRecord, state: RavenTaskState, at: string): RavenWikiPage {
+function renderRawPage(source: RavenSourceRecord, state: RavenTaskState): RavenWikiPage {
   const representation = source.representation === null
     ? 'unavailable'
     : `${source.representation.derivation} ${source.representation.coverage} Markdown by ${source.representation.producedBy}`
@@ -137,23 +105,24 @@ function renderRawPage(source: RavenSourceRecord, state: RavenTaskState, at: str
   const body = lines.join('\n')
 
   const frontmatter = [
-    `source_url: ${yamlString(source.url)}`,
+    `source_url: ${wikiYamlString(source.url)}`,
     `source_origin: ${source.resource.origin}`,
-    `source_uri: ${yamlString(source.resource.uri)}`,
+    `source_uri: ${wikiYamlString(source.resource.uri)}`,
     `representation: ${source.representation?.derivation ?? 'unavailable'}`,
-    `representation_produced_by: ${yamlString(source.representation?.producedBy ?? 'unavailable')}`,
-    `ingested: ${at.slice(0, 10)}`,
-    `sha256: ${digest(body)}`,
+    `representation_produced_by: ${wikiYamlString(source.representation?.producedBy ?? 'unavailable')}`,
+    // Immutable Source bytes must not change merely because the same Task is projected later.
+    `ingested: ${source.inspectedAt.slice(0, 10)}`,
+    `sha256: ${sha256Hex(body)}`,
     'capture: excerpt-only',
-    `locator: ${yamlString(source.locator)}`,
+    `locator: ${wikiYamlString(source.locator)}`,
     `source_role: ${source.role}`,
   ]
-  if (source.representation?.inspectionCallId !== undefined) frontmatter.push(`inspection_call_id: ${yamlString(source.representation.inspectionCallId)}`)
+  if (source.representation?.inspectionCallId !== undefined) frontmatter.push(`inspection_call_id: ${wikiYamlString(source.representation.inspectionCallId)}`)
   if (source.inspectionSha256 !== undefined) frontmatter.push(`inspection_sha256: ${source.inspectionSha256.slice('sha256:'.length)}`)
-  if (source.resource.mediaType !== undefined) frontmatter.push(`source_media_type: ${yamlString(source.resource.mediaType)}`)
-  if (source.resource.sourceName !== undefined) frontmatter.push(`source_name: ${yamlString(source.resource.sourceName)}`)
-  if (source.sourceFamily !== undefined) frontmatter.push(`source_family: ${yamlString(source.sourceFamily)}`)
-  if (source.asOf !== undefined) frontmatter.push(`as_of: ${yamlString(source.asOf)}`)
+  if (source.resource.mediaType !== undefined) frontmatter.push(`source_media_type: ${wikiYamlString(source.resource.mediaType)}`)
+  if (source.resource.sourceName !== undefined) frontmatter.push(`source_name: ${wikiYamlString(source.resource.sourceName)}`)
+  if (source.sourceFamily !== undefined) frontmatter.push(`source_family: ${wikiYamlString(source.sourceFamily)}`)
+  if (source.asOf !== undefined) frontmatter.push(`as_of: ${wikiYamlString(source.asOf)}`)
   // An unchecked Source must declare itself unverified rather than simply omitting
   // the field. Omission left the page carrying only `capture: excerpt-only` and a
   // sha256, which read exactly like a verified capture — the sha256 covers the page
@@ -165,7 +134,7 @@ function renderRawPage(source: RavenSourceRecord, state: RavenTaskState, at: str
     frontmatter.push(`verification: ${source.check.status}`, `verified_at: ${source.check.checkedAt}`)
   }
   frontmatter.push(`raven_task: ${state.taskId}`)
-  return { path: rawPagePath(source), content: page(frontmatter, body) }
+  return { path: rawPagePath(source), content: renderWikiPage(frontmatter, body) }
 }
 
 const SCHEMA_SEED = `# Wiki Schema
@@ -268,11 +237,27 @@ const INDEX_SEED = `# Wiki Index
 ## Comparisons
 `
 
-const LOG_SEED = `# Wiki Log
+export const WIKI_LOG_SEED = `# Wiki Log
 
 > Chronological record of wiki actions. Append-only.
 > Format: \`## [YYYY-MM-DD] action | subject\`
 `
+
+/** Render the immutable Source projection shared by one-off export and maintained Workspaces. */
+export function renderWikiRawPages(state: RavenTaskState): RavenWikiPage[] {
+  // Deduplicate by path as a second line of defence. Source IDs are unique, so
+  // the digested path already is — but an emission that ever repeated a path
+  // would ask the agent to write one file twice with different bytes.
+  const rawPages: RavenWikiPage[] = []
+  const seenRawPaths = new Set<string>()
+  for (const source of state.sources) {
+    const rendered = renderRawPage(source, state)
+    if (seenRawPaths.has(rendered.path)) continue
+    seenRawPaths.add(rendered.path)
+    rawPages.push(rendered)
+  }
+  return rawPages
+}
 
 /** Project one Raven Task into llm-wiki page bytes plus one appendable log entry. */
 export function renderWikiPages(
@@ -281,30 +266,19 @@ export function renderWikiPages(
   options: RavenWikiOptions,
 ): RavenWikiEmission {
   const date = options.at.slice(0, 10)
-  const artifactSlug = slug(options.title)
+  const artifactSlug = wikiSlug(options.title)
   const artifactPath = `wiki/queries/query-${date}-${artifactSlug}.md`
-  // Deduplicate by path as a second line of defence. Source IDs are unique, so
-  // the digested path already is — but an emission that ever repeated a path
-  // would ask the agent to write one file twice with different bytes, and a
-  // silently discarded write is exactly the failure the digest above prevents.
-  const rawPages: RavenWikiPage[] = []
-  const seenRawPaths = new Set<string>()
-  for (const source of state.sources) {
-    const rendered = renderRawPage(source, state, options.at)
-    if (seenRawPaths.has(rendered.path)) continue
-    seenRawPaths.add(rendered.path)
-    rawPages.push(rendered)
-  }
+  const rawPages = renderWikiRawPages(state)
   const contested = state.claims.some(claim => (claim.contradicts ?? []).length > 0)
 
   const frontmatter = [
-    `title: ${yamlString(options.title)}`,
+    `title: ${wikiYamlString(options.title)}`,
     `created: ${state.startedAt.slice(0, 10)}`,
     `updated: ${state.updatedAt.slice(0, 10)}`,
     'type: query',
-    `tags: ${yamlList(options.tags)}`,
-    `sources: ${yamlList(rawPages.map(item => item.path.replace(/^wiki\//, '')))}`,
-    `confidence: ${confidence(state)}`,
+    `tags: ${wikiYamlList(options.tags)}`,
+    `sources: ${wikiYamlList(rawPages.map(item => item.path.replace(/^wiki\//, '')))}`,
+    `confidence: ${wikiConfidence(state)}`,
   ]
   if (contested) frontmatter.push('contested: true')
   frontmatter.push(
@@ -315,12 +289,12 @@ export function renderWikiPages(
   if (state.finalArtifactSha256 !== null) frontmatter.push(`raven_artifact_sha256: ${state.finalArtifactSha256}`)
 
   const body = `# ${options.title}\n\n${renderedArtifact.trimEnd()}\n`
-  const pages: RavenWikiPage[] = [{ path: artifactPath, content: page(frontmatter, body) }, ...rawPages]
+  const pages: RavenWikiPage[] = [{ path: artifactPath, content: renderWikiPage(frontmatter, body) }, ...rawPages]
   if (options.init) {
     pages.push(
       { path: 'wiki/SCHEMA.md', content: SCHEMA_SEED },
       { path: 'wiki/index.md', content: INDEX_SEED },
-      { path: 'wiki/log.md', content: LOG_SEED },
+      { path: 'wiki/log.md', content: WIKI_LOG_SEED },
     )
   }
 

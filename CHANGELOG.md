@@ -10,6 +10,24 @@ tested compatibility family.
 
 ## [Unreleased]
 
+### Durable Raven Workspace
+
+#### Added
+
+- Added a separate `raven_workspace` lifecycle over plain llm-wiki Markdown: fresh initialization, byte-preserving
+  existing-wiki adoption, mixed-folder adoption through the existing Source normalization seam, incremental ingest,
+  Task-backed query/concept/entity/comparison growth, deterministic index regeneration, health reporting, and lexical
+  reuse in later Tasks without embeddings or a vector database.
+- Added immutable content-addressed normalized-document revisions with Original Resource and conversion provenance,
+  `supersedes` links, conservative confidence, retained contradictions and Task history, conditional write hashes,
+  and idempotent log markers.
+
+#### Changed
+
+- Made one-off export raw pages stable across later projection times by deriving `ingested` from Source inspection time.
+- Expanded the Raven prompt, acceptance matrix, architecture, security policy, and bilingual operating documentation
+  while preserving the existing no-Workspace Task and `raven_task action=export` paths.
+
 ### DeepSeek Harness 0.1.2-alpha.1 migration
 
 #### Changed

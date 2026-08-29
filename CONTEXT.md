@@ -4,6 +4,10 @@
 
 The single user-visible unit of work. A Raven Task has one continuing identity from the initial request through research, drafting, steering, verification, and completion, regardless of how many agents or tools contribute internally. Each owning Agent or detected Task Team has at most one active Task at a time; stopped and completed Task histories may remain addressable.
 
+## Raven Workspace
+
+A user-owned, long-lived llm-wiki repository that Raven can initialize, adopt, grow, inspect, and maintain across many Raven Tasks. Markdown pages are its source of truth; `index.md` is disposable derived structure and `log.md` is append-only history. A Workspace never owns, starts, stops, or completes a Task. Raven emits conditional file plans and the Harness agent applies them with ordinary file tools, so the Workspace remains a plain llm-wiki rather than a Raven database.
+
 ## Outcome
 
 The kind of useful result the user wants from a Raven Task. The four first-class Outcomes are **Research**, **General Writing**, **Academic Writing**, and **Learning**.

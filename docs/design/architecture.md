@@ -445,34 +445,59 @@ available to the main agent. The prompt may recommend them proportionately, but 
 Raven package neither wraps nor requires them. Their topology never enters Raven
 Task state.
 
-## Durable output: llm-wiki emission
+## Durable knowledge: Raven Workspace
 
-A Task that only renders into chat evaporates at session end, so `export` projects the
-Task into llm-wiki page bytes: one artifact page under `wiki/queries`, one immutable
-`wiki/raw` page per Source, and one appendable `wiki/log.md` entry. `init` additionally
-seeds `SCHEMA.md`, `index.md`, and `log.md`, so a repository Raven starts is a valid
-llm-wiki rather than a Raven-specific format.
+A Raven Task is bounded session-replayed work. A Raven Workspace is a separate, user-owned,
+long-lived llm-wiki repository. Task Completion never closes a Workspace, Workspace adoption
+never starts a Task, and deployments that need only one Task keep the existing workflow.
+Workspace state is the Markdown already on disk, not a field in `RavenTaskState`.
 
-The projection is pure and Raven never writes files; the agent writes the returned bytes
-with ordinary Harness file tools. That keeps the plugin free of a filesystem dependency
-and keeps the write inside the agent's existing approval and sandbox boundary.
+The compatible `raven_task action=export` remains a pure one-off projection: one artifact
+page under `wiki/queries`, one immutable `wiki/raw` page per Source, and one appendable
+`wiki/log.md` entry. `init` can still seed `SCHEMA.md`, `index.md`, and `log.md`. Immutable raw
+bytes use Source inspection time rather than export time, so projecting the same Task later
+cannot change an existing raw page.
 
-Frontmatter is derived, never asserted. `sources:` comes from the registered Sources,
-`contested: true` from Claim contradiction links, and `confidence` from the Task phase and
-its recorded limits — an unfinished Artifact is `low`, any limitation or deferral caps it
-at `medium`, so a page cannot silently harden into wiki fact. Each `raw/` page carries
-`capture: excerpt-only` and a `sha256` over exactly its own body: Raven stores the verified
-excerpt plus its verification receipt rather than a full page capture, so the digest detects
-drift in what was stored and the difference from a full-body llm-wiki ingest stays visible.
+The sibling `raven_workspace` tool owns the maintained corpus lifecycle:
 
-Scale, quality, and insight machinery from that skill — lint/health scripts, index
-regeneration, tier promotion, stub materialization, log rotation — is deferred. See
-`docs/adr/0002-llm-wiki-repo-format.md`.
+- `initialize` creates only missing standard llm-wiki structure;
+- `adopt` preserves an existing llm-wiki byte-for-byte or expands a regular folder into
+  immutable normalized-Markdown raw pages without touching Original Resources;
+- `ingest` adds later non-web material idempotently and links changed Source revisions with
+  `supersedes`; web material enters through a completed Task and `grow`, because Task web
+  verification attests an excerpt rather than caller-supplied full Markdown;
+- `grow` folds a completed Task into a query, concept, entity, or comparison page while
+  preserving prior body history, Task provenance, Sources, confidence, and contradictions;
+- `maintain` deterministically rebuilds the disposable `index.md` projection only from an explicitly complete Markdown snapshot;
+- `health` checks structure, frontmatter/type alignment, raw digests, Source links,
+  contradictions, and index freshness after the same `complete=true` attestation; and
+- `reuse` performs bounded lexical ranking over supplied Markdown and labels hits as stored
+  knowledge rather than freshly verified evidence.
+
+Both projections are pure. Raven accepts exact bytes already inspected with ordinary Harness
+tools and returns relative `wiki/...` bytes; it never reads or writes the filesystem. Each
+Workspace write carries an `absent` or current-content `sha256` precondition, and every log
+append carries a deterministic operation marker. The agent re-reads targets, enforces those
+conditions, writes with ordinary Harness file tools, and re-reads the final bytes. This keeps
+race detection, approval, sandbox, and filesystem authority in the Harness boundary.
+
+Mixed-document adoption reuses the existing Source normalization contract. Original Markdown
+is preserved; other media must name the producer, coverage, inspection call, media type,
+Original Resource URI, and exact converted Markdown. Failed normalization is an explicit
+issue, never a silent skip. Raw pages use content-addressed paths; an identical retry is a
+no-op and changed content creates a new immutable revision.
+
+Frontmatter is derived, never asserted. `sources:` comes from registered Sources,
+`contested: true` and `contradictions:` come from Claim links, and `confidence` comes from
+Task evidence and limitations. Markdown remains authoritative. `index.md` is disposable,
+there is no required manifest, cache, embedding, or vector database, and a future optional
+index must remain a rebuildable projection. See `docs/adr/0002-llm-wiki-repo-format.md`.
 
 ## Cordis lifetime and composition
 
 The plugin declares `inject = ["tools", "systemPrompt"]`. It registers one scoped
-prompt section, one scoped tool, and one scoped `agent/pre-step` listener. The listener
+prompt section, separate `raven_task` and `raven_workspace` tools, and one scoped
+`agent/pre-step` listener. The listener
 always restores compact continuity context for an active or stopped Task. Separately,
 `guidance: auto` adds one policy block telling the main agent to offer at most one brief,
 context-relevant capability hint and avoid repetition, tutorials, protocol exposure, and
@@ -493,7 +518,8 @@ src/
   prose.ts        # pure, idempotent, Markdown-aware Prose Layout
   engine.ts       # deep Task Module
   codec.ts        # replay validation of the compact snapshot
-  wiki.ts         # llm-wiki page projection
+  wiki.ts         # compatible one-off Task-to-llm-wiki projection
+  workspace.ts    # durable llm-wiki adoption, growth, health, maintenance, and reuse
   config.ts       # deployment settings schema
   prompt.ts       # concise stable protocol
   plugin.ts       # direct Harness registrations and the web, model, and settings Adapters

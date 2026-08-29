@@ -98,9 +98,14 @@ external/destructive/sensitive side effect.
   a Harness deployment composes; there is nothing to add to the Harness itself.
 - **A settings card in the Web GUI.** Raven ships a browser half that registers a card under Settings › Plugins for
   its own namespace — see [Configuration](#configuration) for what that requires.
-- **Durable export.** `export` emits a valid [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md) repository — artifact
-  page, immutable `raw/` source pages with verification receipts, and an appendable `log.md` — that the agent writes
-  with ordinary file tools. Raven never touches the filesystem itself.
+- **Durable Raven Workspace.** The separate `raven_workspace` lifecycle initializes or safely adopts an
+  [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md), ingests Source-normalized documents, compounds completed Tasks
+  into query/concept/entity/comparison pages, rebuilds the derived index, reports health defects, and lexically reuses
+  stored knowledge in later Tasks. Conditional hashes and idempotent log markers prevent silent overwrites; originals
+  and prior raw revisions remain intact. Markdown is authoritative, and no embedding or vector database is required.
+- **Compatible one-off export.** `raven_task action=export` still emits artifact and immutable `raw/` pages plus an
+  appendable `log.md` entry for users who want one Task without a maintained Workspace. Raven never touches the
+  filesystem itself; the agent applies all bytes with ordinary Harness file tools.
 
 ## Install
 
@@ -503,14 +508,47 @@ a model is naming spend and a data path. An unknown route is refused with the co
 quietly substituted. Drafting is **off** until a deployment sets `draftRoutes`; until then the call reports that
 instead of drafting from the session model.
 
-### Keeping the result after the session: llm-wiki export
+### Keeping knowledge across Tasks: Raven Workspace
 
-After Completion, `action=export` returns page bytes for an [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md)
-repository: an artifact page under `wiki/queries`, one immutable `wiki/raw` page per Source carrying the verified
-excerpt and its verification receipt (`capture: excerpt-only`), and one appendable `wiki/log.md` entry. Pass
-`init=true` to also seed `SCHEMA.md`, `index.md`, and `log.md` for a repository with no wiki yet. The result is a
-valid llm-wiki, readable by Obsidian and by that skill's own tooling. Write the returned bytes exactly — each
-raw-page digest covers its own body, so editing after export invalidates it.
+A **Raven Task** is one bounded research or writing job. A **Raven Workspace** is a separate, user-owned,
+long-lived [llm-wiki](docs/adr/0002-llm-wiki-repo-format.md). Task Completion does not close it, Workspace adoption
+does not start a Task, and Raven remains fully usable when no Workspace exists.
+
+The internal `raven_workspace` tool supports the practical lifecycle:
+
+| Action | Effect |
+| --- | --- |
+| `initialize` | Create only missing `wiki/SCHEMA.md`, `wiki/index.md`, and `wiki/log.md` for a fresh wiki. |
+| `adopt kind=wiki` | Recognize an existing llm-wiki without rewriting any existing page; seed only missing standard structure. |
+| `adopt kind=folder` | Leave every Original Resource in place and add immutable normalized-Markdown pages under `wiki/raw/documents/`. |
+| `ingest` | Add later non-web Source-normalized material; identical input is a no-op and changed content creates a `supersedes` revision. Web material enters through a completed Task and `grow`, so excerpt verification cannot impersonate a full capture. |
+| `grow` | Fold one completed Task into an existing or new query, concept, entity, or comparison page while retaining history, Sources, confidence, Task provenance, and contradictions. |
+| `maintain` | Deterministically regenerate the disposable `wiki/index.md` catalog, but only from an explicitly complete Markdown snapshot (`complete=true`). |
+| `health` | Report missing structure/frontmatter, type mismatches, raw digest drift, dangling Sources, unexplained contestation, and a stale generated index; global health also requires `complete=true`. |
+| `reuse` | Lexically rank stored Markdown by title, tags, and body without embeddings; mark results as stored rather than freshly verified knowledge. |
+
+Raven still owns no filesystem authority. Before a Workspace action, the agent inspects the needed `wiki/**/*.md`
+files with ordinary Harness file tools and passes their exact bytes. `health` and `maintain` refuse to run unless the
+agent explicitly attests that this is the complete Markdown snapshot; a partial set can neither report global health
+nor replace the global index. The returned plan carries `absent` or current
+`sha256` preconditions for every write and a deterministic marker for every append. The agent must re-read targets,
+enforce those conditions, apply the bytes with ordinary file tools, and re-read the result. Re-running the same
+adoption, ingest, or Task contribution is therefore a no-op rather than a duplicate log entry or overwrite.
+
+Mixed-document folders do not create another converter. Existing Markdown is passed byte-for-byte as
+`derivation=original`; PDF, HTML, office, and other media must use the ordinary Source layer's existing Markdown
+normalization and carry the Original Resource URI/media type, `producedBy`, `inspectionCallId`, coverage, and exact
+converted Markdown. Unsupported or failed normalization is reported and the original stays untouched.
+
+`reuse` is prior knowledge, not a freshness waiver. For durable concepts, the later Task may inspect the selected
+Workspace page and register it as an `llm-wiki` Source. For prices, office holders, product status, counts, or other
+volatile/current Claims, Raven labels the stored result as requiring fresh verification and the agent must reopen the
+authoritative Original Resource.
+
+The compatible one-off path remains: after a Task has an Artifact, `raven_task action=export` returns an artifact page
+under `wiki/queries`, one immutable `wiki/raw` excerpt page per Source with its verification receipt
+(`capture: excerpt-only`), and one appendable `wiki/log.md` entry. Pass `init=true` only for a new repository. This is
+still useful when a user wants one Task and no maintained Workspace.
 
 ## How it works (under the hood)
 
@@ -524,7 +562,9 @@ flowchart LR
   V -- "excerpt matches retrieved bytes" --> D["complete"]
   V -- "unknown citation / broken source" --> L["Claim deferred<br/>Limitation recorded"]
   L --> C2
-  D --> E["export<br/>llm-wiki pages"]
+  D --> E["export<br/>one-off llm-wiki pages"]
+  D --> W["raven_workspace grow<br/>durable llm-wiki knowledge"]
+  W --> S2["later Raven Task<br/>reuse stored knowledge"]
 ```
 
 ### What the plugin registers
@@ -532,7 +572,7 @@ flowchart LR
 Raven exports plain Cordis plugin metadata (`name`, `inject = ['tools', 'systemPrompt']`, a Schemastery `Config`,
 and `apply`) and keeps `apply` thin. On the host plane it registers:
 
-- one `raven_task` model tool through `ctx.tools`;
+- separate `raven_task` and `raven_workspace` model tools through `ctx.tools`;
 - one compact static section through `ctx.systemPrompt`;
 - one `agent/pre-step` listener that puts the live Task book in front of the model before each step;
 - one `tools/ptc-dispatch-log` listener that keeps a PTC mode Task step durable (see below); and
@@ -614,14 +654,15 @@ fingerprint, and appends the independence-aware Claim trace.
 
 ### Package surface and non-goals
 
-Raven ships as one dependency-light ESM package: one Cordis plugin, one model tool, one prompt section, a pure
-TypeScript Task engine, a browser half contributing a single settings card, compact same-session replay through
-official `tool/result.meta` and `tool/code-dispatch`, and three seams over official Harness capabilities — a
-`SourceSearcher` for Leads and a `SourceVerifier` for evidence over `ctx.web`, and a drafter for Draft Variants.
+Raven ships as one dependency-light ESM package: one Cordis plugin, separate Task and Workspace model tools, one
+prompt section, pure TypeScript Task and Workspace engines, a browser half contributing a single settings card,
+compact same-session Task replay through official `tool/result.meta` and `tool/code-dispatch`, and three seams over
+official Harness capabilities — a `SourceSearcher` for Leads, a `SourceVerifier` for evidence and Workspace document
+normalization receipts, and a drafter for Draft Variants.
 
-It deliberately excludes a Task GUI, model host, vector store, custom scheduler, general agent framework, and
-Raven-owned database. Long-running goals, subagents, workflows, files, and persistence remain Harness
-responsibilities.
+It deliberately excludes a Task GUI, model host, vector store, embedding requirement, custom scheduler, general agent
+framework, and Raven-owned database. Workspace Markdown is user-owned filesystem state applied through ordinary
+Harness tools; long-running goals, subagents, workflows, files, and persistence remain Harness responsibilities.
 
 <details>
 <summary><b>Design evidence and decisions</b></summary>
@@ -808,7 +849,11 @@ Note the third row: **Artifact and instruction text is sent to each draft route*
 route pointed at a third-party provider is a data path for the text being written. That
 is the reason `draftRoutes` is a deployment setting and not something the agent can widen.
 
-Nothing else is transmitted by Raven. Original Resource metadata, bounded non-web Markdown representations, excerpts, Claims, Limitations, Source Policy, and Artifacts live in the Harness **session log** and nowhere else. Do not register sensitive local or MCP content unless that session log is an acceptable persistence location. Raven writes no file at any point.
+Nothing else is transmitted by Raven. Task Source metadata, bounded non-web Markdown representations, excerpts,
+Claims, Limitations, Source Policy, and Artifacts live in the Harness **session log**. Workspace tool calls likewise
+carry the inspected Markdown snapshots and normalized documents needed for that operation; do not pass sensitive local
+or MCP content unless that session log is an acceptable persistence location. Applied Workspace pages also live in the
+user-owned llm-wiki. Raven itself writes no file at any point.
 
 **On `export`, Raven still writes nothing.** `action=export` is a pure projection: it
 returns llm-wiki page bytes and their intended paths, and the *agent* writes them with
@@ -825,13 +870,22 @@ wiki/SCHEMA.md            seeded only with init=true
 wiki/index.md             seeded only with init=true
 ```
 
-The `raw/` pages store the bounded excerpt and provenance, **not** the full Original Resource or full Markdown representation, so an export is not a copy of the sources you read.
+The one-off `raw/` pages store the bounded excerpt and provenance, **not** the full Original Resource or full
+Markdown representation, so an export is not a copy of the sources you read. A maintained Workspace adds:
+
+```text
+wiki/raw/documents/<title>-<identity>.md  immutable normalized Markdown plus Original Resource provenance
+wiki/{queries,concepts,entities,comparisons}/<title>.md
+                                           compounding knowledge pages with Task/source/history metadata
+wiki/index.md                              deterministic disposable catalog
+wiki/log.md                                append-only operations with idempotency markers
+```
 
 ### Limits
 
-Every ceiling is per Task and enforced by the engine, so a direct caller cannot bypass
-it. They exist because Task state is replayed from the session log on every resume:
-unbounded state would eventually make a session unloadable.
+Task ceilings are per Task; Workspace ceilings are per operation. Both are enforced by their engines so a direct
+caller cannot bypass them. Inputs ride the Harness session log, so an unbounded Task snapshot or Workspace scan would
+eventually make a session unloadable.
 
 | Cap | Limit | What happens at the limit |
 | --- | --- | --- |
@@ -843,6 +897,9 @@ unbounded state would eventually make a session unloadable.
 | Artifact | **100,000 characters** | The submitted Artifact is rejected before it is laid out or hashed. Split the work or export and continue. |
 | Steering Revisions | **128** | `steer` is refused; existing Checkpoints and evidence are untouched. |
 | Durable Task snapshot | **1,000,000 UTF-8 JSON bytes** | Non-final mutations leave 64,000 bytes reserved for Completion. A mutation whose combined Sources, Claims, excerpts, corrections, Limitations, and Artifact exceed its aggregate budget is refused without replacing accepted state. |
+| Workspace Markdown snapshots | **512 files, 200,000 characters each, 4,000,000 total** | The operation is rejected before producing a partial plan. Split ingest/grow work into batches; a Workspace beyond this complete-snapshot ceiling cannot run global `health` or `maintain` in one call. |
+| Workspace documents per adopt/ingest | **64** | The whole submitted batch is rejected rather than silently dropping Original Resources. |
+| Workspace reuse results | **20** | A larger requested result set is rejected; ranking itself remains lexical and derived. |
 
 Capacity refusals leave the previously accepted state untouched, and a Task that has hit
 a cap can still `complete` and `export`. Individual field ceilings (a request or correction at
@@ -865,6 +922,8 @@ locator at 4,000) are reported the same way.
 | Completion is refused: a Steering Revision has no subsequent Checkpoint | A correction arrived after the last Checkpoint. | Publish a Checkpoint that applies the correction, then complete. |
 | A cited Source reports its excerpt absent, naming the nearest passage | The excerpt does not occur in the retrieved body. | Repair the excerpt from the named passage. Do not weaken a correct excerpt until it fits — an *absent* excerpt is a different signal from a *diverging* one. |
 | A Source reports `unavailable` on a truncated retrieval | The fetch was cut off; a cut-off body cannot disprove an excerpt from the tail. | Not an accusation of fabrication. Retry, or cite a locator earlier in the document. |
+| Workspace write precondition no longer matches | A page changed after Raven inspected the Workspace, so applying the plan could overwrite newer knowledge. | Do not write. Re-read the current Markdown and re-run the same Workspace action. |
+| Workspace health reports `raw-digest-mismatch` or `dangling-source` | Immutable material was edited, or a knowledge page references a missing raw page. | Preserve the damaged bytes, restore/re-ingest the Source, repair the reference, run `maintain`, then run `health` again. |
 | A grounded Task will not complete despite good work | No material supported/qualified external Claim has a currently reachable, excerpt-matched Source. | Verify at least one Source, or accept `completed-with-limits` by deferring the affected Claims explicitly. |
 | The settings card is missing from Settings › Plugins | The deployment does not compose `@deepseek-ai/dsh-client-ui-settings-plugins`, or the client shell lacks the `locale`/`settingsSchema` services. | Edit `settings.yaml` directly. The Harness web app bundle does compose it. |
 | An in-flight Task vanished | Task state lives in the session, not on disk. | `export` before swapping builds or ending a session. Use `status` after a resume to reconstruct the book. |
@@ -1029,8 +1088,8 @@ Not yet. Build and pack from a checkout — see [Install](#install).
 Only the pinned prerelease listed under [Compatibility](#compatibility).
 
 **How do I remove it cleanly?**
-Drop one preset row and one dependency — see [Uninstall](#uninstall). Raven leaves no database, cache, or files
-behind.
+Drop one preset row and one dependency — see [Uninstall](#uninstall). Raven leaves no database or cache behind and
+does not delete user-owned llm-wiki Workspace files.
 
 ## v1 limits
 
@@ -1043,8 +1102,9 @@ behind.
 - Without a composed Harness `web` capability, web Claims stay deferred; explicitly scoped local, llm-wiki, and MCP Sources remain available through their recorded Markdown.
 - The latest successfully persisted Task snapshot is replayable from the owning Harness session records, including
   multiple stopped or completed Task identities and later resume of an older Task. An oversized nested PTC mode log
-  can omit that one step; a later direct mutation republishes a full snapshot. Cross-session projects, reusable corpora,
-  and spaced-repetition storage are out of scope; `export` is the supported way to keep work.
+  can omit that one step; a later direct mutation republishes a full snapshot. Cross-session reusable knowledge belongs
+  to the separate Markdown Workspace rather than Task state. Scheduled maintenance and spaced-repetition storage remain
+  out of scope.
 - Raven renders Task progress through ordinary tool results and chat; its only browser surface is the settings card,
   and v1 has no custom UI for the Task itself.
 - Draft Variants are off until a deployment configures `draftRoutes`, and a variant is never evidence: it cannot be

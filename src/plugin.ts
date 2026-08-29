@@ -32,6 +32,12 @@ import { RAVEN_PROMPT } from './prompt.js'
 import type { ProseLayoutOptions } from './prose.js'
 import { sourceInspectionSha256 } from './source.js'
 import { canonicalSourceUrl, redactedLeadUrl, sameSourceIdentity } from './url.js'
+import {
+  createRavenWorkspaceEngine,
+  WORKSPACE_ACTION_FIELDS,
+  WORKSPACE_PAGE_TYPES,
+  type RavenWorkspaceResult,
+} from './workspace.js'
 import { RavenError, RAVEN_LIMITS } from './domain.js'
 import type {
   DraftGenerator,
@@ -54,13 +60,17 @@ import type {
 
 const META_KIND = 'dsh-raven-research/task-state'
 const TOOL_NAME = 'raven_task'
-/**
- * Rendered from the runtime allow-list so the advertised per-action field sets
- * cannot drift from the ones the engine enforces.
- */
-const ACTION_FIELD_SUMMARY = Object.entries(ACTION_FIELDS)
-  .map(([action, fields]) => `${action}(${fields.filter(field => field !== 'action').join(', ') || 'no other field'})`)
-  .join('; ')
+const WORKSPACE_TOOL_NAME = 'raven_workspace'
+
+/** Render model guidance from the same per-action allow-list the runtime enforces. */
+function summarizeActionFields(fieldsByAction: Readonly<Record<string, readonly string[]>>): string {
+  return Object.entries(fieldsByAction)
+    .map(([action, fields]) => `${action}(${fields.filter(field => field !== 'action').join(', ') || 'no other field'})`)
+    .join('; ')
+}
+
+const WORKSPACE_ACTION_FIELD_SUMMARY = summarizeActionFields(WORKSPACE_ACTION_FIELDS)
+const ACTION_FIELD_SUMMARY = summarizeActionFields(ACTION_FIELDS)
 /**
  * A nested PTC mode sub-call has no result card, so the Harness registry computes
  * no presentation metadata for it and the dispatch bridge logs rendered content
@@ -160,6 +170,10 @@ interface RavenToolValue extends RavenDispatchResult {
   readonly currentTaskId: string
   /** Whether this result advanced durable Task state and therefore needs a replay snapshot. */
   readonly durableState: boolean
+}
+
+interface RavenWorkspaceToolValue extends RavenWorkspaceResult {
+  readonly kind: 'raven-workspace-result'
 }
 
 interface RavenTaskMeta {
@@ -1657,6 +1671,47 @@ function renderToolValue(value: RavenToolValue): string {
   return lines.join('\n\n')
 }
 
+function fencedMarkdown(content: string): string {
+  let longest = 0
+  for (const match of content.matchAll(/`+/g)) longest = Math.max(longest, match[0].length)
+  const fence = '`'.repeat(Math.max(3, longest + 1))
+  return `${fence}markdown\n${content}\n${fence}`
+}
+
+function renderWorkspaceValue(value: RavenWorkspaceToolValue): string {
+  const lines = [
+    value.message,
+    `Workspace action: ${value.action} | Status: ${value.status}`,
+    'No files have been changed. Apply this conditional plan with ordinary Harness file tools, then re-read the final bytes.',
+  ]
+  if (value.issues.length > 0) {
+    lines.push(`Issues:\n${value.issues.map(item => `- ${item.severity} ${item.code}${item.path === undefined ? '' : ` (${item.path})`}: ${item.detail}`).join('\n')}`)
+  }
+  for (const pageValue of value.pages) {
+    const expected = value.preconditions.find(item => item.path === pageValue.path)?.expected
+    lines.push(
+      `Write \`${pageValue.path}\` only if its current state is still \`${expected ?? 'unknown; re-run raven_workspace'}\`:\n\n`
+      + fencedMarkdown(pageValue.content),
+    )
+  }
+  if (value.logEntry !== undefined) {
+    lines.push(
+      'Append to `wiki/log.md` only if its operation marker is absent (append only if its operation marker is absent):\n\n'
+      + fencedMarkdown(value.logEntry),
+    )
+  }
+  if (value.candidates !== undefined && value.candidates.length > 0) {
+    lines.push([
+      'Stored knowledge candidates (these are prior Workspace knowledge, not freshly verified evidence):',
+      ...value.candidates.map(candidate => `- ${candidate.path} | ${candidate.type} | ${candidate.confidence}`
+        + ` | ${candidate.freshness} | fresh verification required: ${candidate.requiresFreshVerification}`
+        + `\n  ${candidate.summary}`),
+    ].join('\n'))
+  }
+  if (value.health !== undefined) lines.push(`Health: ${value.health.status}`)
+  return lines.join('\n\n')
+}
+
 const SOURCE_RESOURCE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -1758,6 +1813,143 @@ const FAILURE_SCHEMA = {
     sourceId: { type: 'string' },
   },
 } as const
+
+const WORKSPACE_FILE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['path', 'content'],
+  properties: {
+    path: { type: 'string', description: 'Slash-separated Markdown path below wiki/.' },
+    content: { type: 'string', description: 'Exact current Markdown bytes inspected with ordinary Harness file tools.' },
+  },
+} as const
+
+const WORKSPACE_RESOURCE_SCHEMA = {
+  ...SOURCE_RESOURCE_SCHEMA,
+  properties: {
+    ...SOURCE_RESOURCE_SCHEMA.properties,
+    origin: { type: 'string', enum: ['local', 'llm-wiki', 'mcp'] },
+  },
+} as const
+
+const WORKSPACE_REPRESENTATION_SCHEMA = {
+  ...SOURCE_REPRESENTATION_SCHEMA,
+  required: ['format', 'derivation', 'coverage', 'producedBy', 'inspectionCallId', 'markdown'],
+  properties: {
+    ...SOURCE_REPRESENTATION_SCHEMA.properties,
+    inspectionCallId: {
+      type: 'string',
+      description: 'Prior successful ordinary Harness tool call that produced these Markdown bytes; required for non-web material.',
+    },
+  },
+} as const
+
+const WORKSPACE_DOCUMENT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['title', 'resource', 'representation'],
+  properties: {
+    title: { type: 'string', description: 'Human-readable title for this adopted or ingested document.' },
+    resource: WORKSPACE_RESOURCE_SCHEMA,
+    representation: {
+      oneOf: [{ type: 'null' }, WORKSPACE_REPRESENTATION_SCHEMA],
+      description: 'Exact Source-layer Markdown normalization, or null when normalization failed.',
+    },
+    asOf: { type: 'string', description: 'Optional evidence currency label retained on the immutable raw page.' },
+  },
+} as const
+
+function workspaceToolDefinition(
+  ctx: Context,
+  engine: ReturnType<typeof createRavenWorkspaceEngine>,
+  books: Map<string, SessionTaskBook>,
+): ToolDefinition {
+  return {
+    name: WORKSPACE_TOOL_NAME,
+    description: 'Maintain a durable Markdown llm-wiki Workspace whose lifecycle is separate from Raven Task lifecycle. Initialize or adopt without overwriting existing knowledge; ingest Source-normalized documents; grow concept, entity, comparison, or query pages from a completed Task; rebuild derived indexes; report deterministic health issues; and retrieve stored lexical candidates without embeddings. The tool only returns conditional file writes. It never writes files itself.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['action'],
+      properties: {
+        action: {
+          type: 'string',
+          enum: Object.keys(WORKSPACE_ACTION_FIELDS),
+          description: `Workspace action. Each action accepts only its own fields — ${WORKSPACE_ACTION_FIELD_SUMMARY}.`,
+        },
+        files: {
+          type: 'array',
+          items: WORKSPACE_FILE_SCHEMA,
+          description: 'Current Workspace Markdown snapshots for action=initialize, action=adopt, action=ingest, action=grow, action=maintain, action=health, or action=reuse. Supply files read with ordinary Harness tools; empty is valid for a new Workspace.',
+        },
+        kind: {
+          type: 'string',
+          enum: ['wiki', 'folder'],
+          description: 'Whether action=adopt is adopting an existing llm-wiki or a regular document folder.',
+        },
+        documents: {
+          type: 'array',
+          items: WORKSPACE_DOCUMENT_SCHEMA,
+          description: 'Non-web Source-layer normalized documents for action=adopt with kind=folder or action=ingest. Add web material through a completed Raven Task with action=grow; never invent another conversion pipeline.',
+        },
+        taskId: {
+          type: 'string',
+          description: 'Completed Raven Task to contribute with action=grow. The Task is read without changing its lifecycle or revision.',
+        },
+        pageType: {
+          type: 'string',
+          enum: WORKSPACE_PAGE_TYPES,
+          description: 'Knowledge page type for action=grow.',
+        },
+        title: { type: 'string', description: 'Knowledge page title for action=grow.' },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'llm-wiki tags for action=grow; lowercase letters, digits, and hyphens.',
+        },
+        query: { type: 'string', description: 'Lexical knowledge query for action=reuse.' },
+        freshness: {
+          type: 'string',
+          enum: ['durable', 'current'],
+          description: 'Whether action=reuse is for durable background knowledge or a claim requiring current verification.',
+        },
+        maxAgeDays: { type: 'number', description: 'Age after which action=reuse labels stored knowledge stale.' },
+        maxResults: { type: 'number', description: 'Maximum lexical candidates returned by action=reuse.' },
+        complete: {
+          type: 'boolean',
+          description: 'Completeness attestation for action=health or action=maintain. May be true only after the agent inspected the complete Workspace Markdown snapshot with ordinary Harness tools.',
+        },
+      },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: renderWorkspaceValue(value as unknown as RavenWorkspaceToolValue) }],
+    },
+    async execute(args, exec) {
+      const agent = requireAgent(exec)
+      const membership = teamMembership(ctx, agent)
+      const input = asRecord(args)
+      let contribution: { readonly state: RavenTaskState; readonly renderedArtifact: string } | undefined
+      if (input?.action === 'grow') {
+        if (typeof input.taskId !== 'string') throw new Error('action=grow requires taskId')
+        const book = taskBookFor(ctx, books, agent, membership)
+        const state = book.tasks.get(input.taskId)
+        if (state === undefined) throw new Error(`Raven Task ${input.taskId} is not available in this session`)
+        if (state.latestArtifact === null) throw new Error(`Raven Task ${input.taskId} has no Artifact to contribute`)
+        contribution = {
+          state,
+          renderedArtifact: renderArtifact(state.latestArtifact, state.sources, state.claims),
+        }
+      }
+      const result = await engine.dispatch(args, {
+        sessionId: membership?.id ?? agent.id,
+        signal: exec.signal,
+        inspectionEvents: agent.session.events,
+      }, contribution)
+      return { kind: 'raven-workspace-result', ...result } satisfies RavenWorkspaceToolValue
+    },
+  }
+}
 
 /**
  * Outcomes whose evidence floor defaults to `required` and cannot be switched off.
@@ -2268,15 +2460,17 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
       format: config.proseFormat ?? 'markdown',
     }
   }
+  const verifier = sourceVerifier(ctx, now, () => settings())
   const engine = createRavenEngine({
     now,
-    sourceVerifier: sourceVerifier(ctx, now, () => settings()),
+    sourceVerifier: verifier,
     sourceSearcher: sourceSearcher(ctx, () => settings()),
     searchLimits,
     draftGenerator: draftGenerator(ctx, () => settings()),
     draftLimits,
     proseLayout,
   })
+  const workspaceEngine = createRavenWorkspaceEngine({ now, sourceVerifier: verifier })
   const pendingLogState = new Map<string, RavenTaskMeta>()
 
   // Probe the retrieval seam AT MOUNT, and say so loudly. Every grounded Raven Task
@@ -2313,7 +2507,7 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
       ctx,
       'Raven is mounted ' + liveMounts[role] + ' times with role "' + role + '" in this process.'
       + (isAgent
-        ? ' The raven_task tool is registered once per agent-role mount, into a different registry'
+        ? ' The raven_task and raven_workspace tools are registered once per agent-role mount, into a different registry'
         + ' layer each time, and each mount keeps its OWN Task book -- a Checkpoint recorded through'
         + ' one mount is invisible to the other.'
         : '')
@@ -2339,12 +2533,15 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
     // A host without this primitive keeps the warning conservative, nothing more.
   }
 
-  // Everything below is the AGENT half: the tool, the prompt that describes it, the
+  // Everything below is the AGENT half: both tools, the prompt that describes them, the
   // per-step Task context, and the PTC mode durability seam. A host-role mount
   // registers none of it, so a reduced host serves configuration without ever
-  // putting raven_task in front of an agent.
+  // putting Raven lifecycle tools in front of an agent.
   if (!isAgent) return
   ctx.systemPrompt.section({ name: 'tool:raven-task', order: RAVEN_PROMPT_ORDER, text: RAVEN_PROMPT })
+  // Workspace lifecycle is deliberately a sibling tool. It reads completed Task contributions but never
+  // mutates the Task book; Markdown on disk remains the Workspace's only durable state.
+  ctx.tools.register(workspaceToolDefinition(ctx, workspaceEngine, books))
   ctx.tools.register(toolDefinition(ctx, engine, books, pendingLogState))
   // The durable half of the PTC mode path: attach the Task record to the logged
   // copy of Raven's own sub-dispatch. Total by contract — the bridge contains a
