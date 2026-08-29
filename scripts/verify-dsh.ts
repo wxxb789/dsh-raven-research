@@ -221,7 +221,9 @@ try {
   })
   await ctx.loader.await()
 
-  assert.ok(ctx.tools.schemas().some((schema: { name: string }) => schema.name === 'raven_task'))
+  const ravenToolNames = ctx.tools.schemas().map((schema: { name: string }) => schema.name)
+  assert.ok(ravenToolNames.includes('raven_task'))
+  assert.ok(ravenToolNames.includes('raven_workspace'))
   const assembly = await ctx.systemPrompt.assemble()
   assert.ok(assembly.sections.some((section: { name: string }) => section.name === 'tool:raven-task'))
   ctx.web.registerFetchProvider({
@@ -293,6 +295,16 @@ try {
     .map(block => block.type === 'text' ? block.text ?? '' : '')
     .join('')
   const execute = async (arguments_: Record<string, unknown>) => textOf(await run(arguments_))
+  const workspaceInitialized = await ctx.tools.execute({
+    callId: `raven-dsh-smoke-${++call}`,
+    name: 'raven_workspace',
+    arguments: { action: 'initialize', files: [] },
+    agent,
+    signal,
+  })
+  assert.equal(workspaceInitialized.isError, false, 'raven_workspace initialize failed inside the real Harness composition')
+  assert.match(textOf(workspaceInitialized), /wiki\/SCHEMA\.md/)
+  assert.match(textOf(workspaceInitialized), /No files have been changed/)
 
   const started = await execute({
     action: 'start',
@@ -720,11 +732,14 @@ try {
 
     const toolNames = (scope?: object): string[] =>
       modeCtx.tools.schemas(scope).map((schema: { name: string }) => schema.name)
-    assert.equal(
-      toolNames().includes('raven_task'),
-      false,
-      'raven_task is registered outside the Raven preset; every other mode would carry a research tool it never asked for',
-    )
+    const globalToolNames = toolNames()
+    for (const toolName of ['raven_task', 'raven_workspace']) {
+      assert.equal(
+        globalToolNames.includes(toolName),
+        false,
+        `${toolName} is registered outside the Raven preset; every other mode would carry a Raven tool it never asked for`,
+      )
+    }
     // Isolation is not only about the tool. A settings namespace is served
     // process-wide and the settings page is global, so a namespace registered by
     // a default install would show a Raven card to a user sitting in any other
@@ -736,10 +751,13 @@ try {
       'the raven-research settings namespace is served without a Raven row; a card would be visible in every mode',
     )
     const presetScope = await modeCtx.agentPresets.standingKeyFor('raven')
-    assert.ok(
-      toolNames(presetScope).includes('raven_task'),
-      'the Raven preset composed no raven_task; selecting the mode would give an agent without the tool the mode exists for',
-    )
+    const presetToolNames = toolNames(presetScope)
+    for (const toolName of ['raven_task', 'raven_workspace']) {
+      assert.ok(
+        presetToolNames.includes(toolName),
+        `the Raven preset composed no ${toolName}; selecting the mode would omit part of Raven's Task/Workspace contract`,
+      )
+    }
   } finally {
     await modeCtx.fiber.dispose()
     await rm(modeRoot, { recursive: true, force: true })

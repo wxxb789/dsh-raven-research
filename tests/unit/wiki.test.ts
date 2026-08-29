@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import { createRavenEngine } from '../../src/engine.js'
 import type { RavenDispatchResult, SourceVerifier } from '../../src/domain.js'
+import { renderWikiPages } from '../../src/wiki.js'
 
 const signal = new AbortController().signal
 const now = () => '2026-08-16T16:00:00.000Z'
@@ -365,6 +366,21 @@ describe('llm-wiki emission', () => {
       .filter(path => path.startsWith('wiki/raw/'))
     expect(rawPaths).toHaveLength(2)
     expect(new Set(rawPaths).size).toBe(2)
+  })
+
+  it('keeps immutable raw Source bytes stable when the same Task is projected later', async () => {
+    const { completed } = await completedResearchTask('wiki-later-projection')
+    const artifact = completed.renderedArtifact ?? completed.state.latestArtifact ?? ''
+    const first = renderWikiPages(completed.state, artifact, {
+      title: 'Durable Event Stores', tags: ['research'], init: false, at: '2026-08-16T16:00:00.000Z',
+    })
+    const later = renderWikiPages(completed.state, artifact, {
+      title: 'Durable Event Stores', tags: ['research'], init: false, at: '2027-09-20T08:00:00.000Z',
+    })
+    const firstRaw = first.pages.filter(page => page.path.startsWith('wiki/raw/'))
+    const laterRaw = later.pages.filter(page => page.path.startsWith('wiki/raw/'))
+
+    expect(laterRaw).toEqual(firstRaw)
   })
 
   it('exports the same Task twice as byte-identical pages and one log entry', async () => {

@@ -8,5 +8,6 @@ export type { ProseFormat, ProseLayout, ProseLayoutOptions, ProseLayoutReport } 
 export { decodeRavenTaskState, RAVEN_SCHEMA_VERSION } from './codec.js'
 export { renderWikiPages } from './wiki.js'
 export type { RavenWikiOptions } from './wiki.js'
+export * from './workspace.js'
 export { RAVEN_PROMPT } from './prompt.js'
 export { apply, inject, name } from './plugin.js'

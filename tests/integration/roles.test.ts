@@ -119,7 +119,7 @@ describe('Raven mount roles', () => {
   it('registers only the agent surface for an agent row', () => {
     const agent = mount({ role: 'agent' })
     try {
-      expect(agent.tools.map(definition => definition.name)).toEqual(['raven_task'])
+      expect(agent.tools.map(definition => definition.name)).toEqual(['raven_workspace', 'raven_task'])
       expect(agent.sections).toEqual([expect.objectContaining({ name: 'tool:raven-task' })])
       expect(Number.isFinite(agent.sections[0]?.order)).toBe(true)
       expect(agent.events).toEqual(['tools/ptc-dispatch-log', 'agent/pre-step'])
@@ -137,7 +137,7 @@ describe('Raven mount roles', () => {
     try {
       expect(shape(omitted)).toEqual(shape(both))
       expect(shape(both)).toEqual({
-        tools: ['raven_task'],
+        tools: ['raven_workspace', 'raven_task'],
         sections: ['tool:raven-task'],
         events: ['tools/ptc-dispatch-log', 'agent/pre-step'],
         namespaces: 1,
@@ -152,9 +152,9 @@ describe('Raven mount roles', () => {
     const host = mount({ role: 'host' })
     const agent = mount({ role: 'agent' })
     try {
-      // Exactly one of each surface across the pair: the split is complete and
-      // registers nothing twice.
-      expect(host.tools.length + agent.tools.length).toBe(1)
+      // Exactly one Task tool and one Workspace tool across the pair: the split is
+      // complete and registers nothing twice.
+      expect(host.tools.length + agent.tools.length).toBe(2)
       expect(host.registrations.length + agent.registrations.length).toBe(1)
       expect(host.sections.length + agent.sections.length).toBe(1)
       expect([...host.warnings, ...agent.warnings].filter(text => text.includes('is mounted'))).toEqual([])
@@ -174,7 +174,7 @@ describe('Raven mount roles', () => {
       const agentWarning = secondAgent.warnings.join(' ')
       expect(agentWarning).toContain('role "agent"')
       expect(agentWarning).toContain('2 times')
-      expect(agentWarning).toContain('raven_task tool is registered')
+      expect(agentWarning).toContain('raven_task and raven_workspace tools are registered')
     } finally {
       firstAgent.release()
       secondAgent.release()
@@ -188,7 +188,7 @@ describe('Raven mount roles', () => {
       expect(hostWarning).toContain('role "host"')
       expect(hostWarning).toContain('settings namespace')
       // The agent-only half of the message has no business in a host collision.
-      expect(hostWarning).not.toContain('raven_task tool is registered')
+      expect(hostWarning).not.toContain('raven_task and raven_workspace tools are registered')
     } finally {
       firstHost.release()
       secondHost.release()

@@ -21,8 +21,8 @@ together.
 ## What is and is not in Raven's trust boundary
 
 Raven's runtime plugin lives inside a Harness process. It runs no server, opens no port,
-and owns no database, cache, Task-state file, or export file. The separate preset installer
-writes only its documented user preset directory, and exported paths/bytes become files
+and owns no database, cache, Task-state file, export file, or Workspace file. The separate preset installer
+writes only its documented user preset directory, and exported or Workspace-planned paths/bytes become files
 only when the Harness agent or user writes them. That shapes what a vulnerability report
 here can mean.
 
@@ -38,11 +38,14 @@ here can mean.
   scope.
 - **Injection through recorded evidence.** Source titles, locators, and Claim text are
   Markdown/HTML escaped before rendering; an escape that can be broken is in scope.
-- **Export path traversal.** `export` returns page bytes and file paths for the agent to
-  write. A projected path that escapes the intended wiki directory is in scope even
-  though Raven itself never writes it.
-- **Denial of service through the caps.** A submission that evades the per-Task ceilings
-  (individual fields plus the aggregate durable-snapshot byte budget) to exhaust memory.
+- **Export or Workspace path traversal.** Both tools return page bytes and file paths for the agent to write. A
+  projected path that escapes `wiki/`, accepts absolute/backslash/parent segments, or rebinds an immutable raw path
+  is in scope even though Raven itself never writes it.
+- **Workspace transition integrity.** A plan that silently overwrites bytes different from its inspected snapshot,
+  duplicates an operation log on retry, rewrites an adopted Original Resource, or accepts unattested Markdown
+  normalization is in scope. Agents still must enforce the returned preconditions before writing.
+- **Denial of service through the caps.** A submission that evades per-Task state ceilings or per-Workspace-operation
+  file, byte, document, and result ceilings to exhaust memory.
 
 ### Source destination filtering and residual SSRF risk
 
