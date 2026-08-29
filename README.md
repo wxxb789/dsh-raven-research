@@ -489,7 +489,7 @@ integrators and tests:
 | `checkpoint` | Publishes a user-visible Artifact version with new Sources, Claims, and recorded failures, and verifies grounded evidence. |
 | `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. |
 | `complete` | Validates citation identity, material Claim links, matched excerpts, Source reachability, and the exact Artifact fingerprint against the latest post-steer Checkpoint. |
-| `status` | Reports the current Task book and a bounded index of unpromoted Insight Candidate IDs. |
+| `status` | Reports the current Task book and one bounded page of unpromoted Insight Candidate IDs; optional nonnegative `insightOffset` advances through later pages. |
 | `inspect` | Returns exact records for 1–8 explicitly named durable Insight Candidates; it never dumps the full Candidate collection. |
 | `stop` | Marks the Task stopped; explicitly not Completion. It prevents later Task mutation after processing but does not cancel Harness work already in flight. |
 | `resume` | Reopens a stopped Task — including an older one — without losing evidence or Artifact. |
@@ -523,7 +523,7 @@ Each candidate records:
 - evidence that `wouldChangeMind`; and
 - optional `competesWith` links to plausible alternative explanations; competition is semantically undirected, so a later Candidate may name an earlier immutable one.
 
-After replay or context loss, `status` lists up to eight unpromoted Candidate IDs without dumping all durable reasoning. Call `inspect` with 1–8 explicit `insightIds` to recover those exact Candidate records, including the text, premise IDs, assumptions, rationale, reversal evidence, confidence, and alternatives required for a later promotion.
+After replay or context loss, `status` lists up to eight unpromoted Candidate IDs without dumping all durable reasoning. Its recall reports the current `insightOffset` and a `nextInsightOffset` when another bounded page exists; call `status` with that offset to reach later IDs. Call `inspect` with 1–8 explicit `insightIds` to recover those exact Candidate records, including the text, premise IDs, assumptions, rationale, reversal evidence, confidence, and alternatives required for a later promotion.
 
 The pattern vocabulary directs Raven toward tension, hidden assumptions, alternative causal mechanisms, boundary
 conditions, counterfactuals, second-order effects, incentive mismatches, temporal and scale shifts, missing variables,

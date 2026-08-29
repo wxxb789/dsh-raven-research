@@ -5,6 +5,7 @@ import { settleWithAbort } from './abort.js'
 import {
   acceptedAnalysisPremise,
   analysisLineageCycle,
+  appendBoundedSynthesisRound,
   assessSummaryDebt,
   insightCandidateRecall,
   insightCompetitionMap,
@@ -155,7 +156,7 @@ export const ACTION_FIELDS: Record<string, readonly string[]> = {
   checkpoint: ['action', 'taskId', 'stage', 'summary', 'artifact', 'sources', 'claims', 'failures'],
   steer: ['action', 'taskId', 'correction', 'sourcePolicy'],
   complete: ['action', 'taskId', 'artifact'],
-  status: ['action', 'taskId'],
+  status: ['action', 'taskId', 'insightOffset'],
   inspect: ['action', 'taskId', 'insightIds'],
   stop: ['action', 'taskId', 'reason'],
   resume: ['action', 'taskId'],
@@ -218,6 +219,14 @@ function member<T extends string>(value: unknown, values: readonly T[], label: s
 function optionalArray(value: unknown, label: string): unknown[] {
   if (value === undefined) return []
   if (!Array.isArray(value)) throw new RavenTypeError('invalid-value', `${label} must be an array`)
+  return value
+}
+
+function optionalNonnegativeInteger(value: unknown, label: string): number {
+  if (value === undefined) return 0
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new RavenTypeError('invalid-value', `${label} must be a nonnegative safe integer`)
+  }
   return value
 }
 
@@ -1837,10 +1846,12 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         if (args.taskId !== undefined && requiredText(args.taskId, 'taskId') !== previous.taskId) {
           throw new RavenError('task-not-found', `Raven Task ${String(args.taskId)} was not found in this session`)
         }
+        const insightOffset = optionalNonnegativeInteger(args.insightOffset, 'insightOffset')
         const recall = insightCandidateRecall(
           previous.claims,
           previous.insightCandidates,
           RAVEN_LIMITS.insightInspectionIds,
+          insightOffset,
         )
         return {
           status: previous.phase,
@@ -2001,9 +2012,17 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           summaryDebtDetail: debt.detail,
           createdAt: at,
         }
-        const syntheses = [...state.syntheses]
-        if (syntheses.length >= RAVEN_LIMITS.synthesisRounds) syntheses.shift()
-        syntheses.push(synthesis)
+        const syntheses = appendBoundedSynthesisRound(
+          state.syntheses,
+          synthesis,
+          RAVEN_LIMITS.synthesisRounds,
+        )
+        if (syntheses === undefined) {
+          throw new RavenError(
+            'limit-exceeded',
+            `Raven Task may retain at most ${RAVEN_LIMITS.synthesisRounds} synthesis rounds without discarding outstanding per-scope summary debt`,
+          )
+        }
         const next: RavenTaskState = {
           ...state,
           revision: state.revision + 1,

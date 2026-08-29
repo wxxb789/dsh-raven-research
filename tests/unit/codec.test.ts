@@ -730,6 +730,43 @@ describe('Raven Task snapshot codec', () => {
     expect(historicalDebt?.syntheses[0]?.summaryDebt).toBe('high')
   })
 
+  it('round-trips capped synthesis history after a non-front eviction preserves debt', async () => {
+    const state = await validState()
+    const claim = {
+      claimId: 'C1', text: 'A context premise.', kind: 'analysis', importance: 'context',
+      disposition: 'supported', sourceIds: [],
+    }
+    const syntheses = [{
+      ordinal: 1,
+      scope: 'Outstanding scope',
+      purpose: 'synthesis',
+      claimIds: ['C1'],
+      insightIds: [],
+      summaryDebt: 'high',
+      summaryDebtDetail: 'The scope still only restates evidence.',
+      createdAt: now(),
+    }, ...Array.from({ length: RAVEN_LIMITS.synthesisRounds - 1 }, (_value, index) => ({
+      ordinal: index + 3,
+      scope: `Other scope ${index + 1}`,
+      purpose: 'summary',
+      claimIds: ['C1'],
+      insightIds: [],
+      summaryDebt: 'none',
+      summaryDebtDetail: 'The user explicitly requested a summary.',
+      createdAt: now(),
+    }))]
+    const snapshot = { ...state, claims: [claim], syntheses }
+    const decoded = decodeRavenTaskState(JSON.parse(JSON.stringify(snapshot)) as unknown)
+
+    expect(decoded).toEqual(snapshot)
+    expect(decoded?.syntheses).toHaveLength(RAVEN_LIMITS.synthesisRounds)
+    expect(decoded?.syntheses.map(round => round.ordinal)).toEqual([
+      1,
+      ...Array.from({ length: RAVEN_LIMITS.synthesisRounds - 1 }, (_value, index) => index + 3),
+    ])
+    expect(decoded?.syntheses[0]).toMatchObject({ scope: 'Outstanding scope', summaryDebt: 'high' })
+  })
+
   it('protects Limitation identity by shape and uniqueness, NOT by array position', async () => {
     const state = await validState()
     const limitation = (limitationId: string, kind: string) => ({

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { decodeRavenTaskState } from '../../src/codec.js'
 import { createRavenEngine, renderArtifact, renderSynthesis } from '../../src/engine.js'
-import type { RavenTaskState, SourceVerifier } from '../../src/domain.js'
+import { RAVEN_LIMITS, type RavenTaskState, type SourceVerifier } from '../../src/domain.js'
 import { wikiConfidence } from '../../src/wiki.js'
 
 const now = () => '2026-08-30T12:00:00.000Z'
@@ -295,6 +295,78 @@ describe('Raven synthesis and Insight Candidates', () => {
 
     expect(repaired.state.syntheses.at(-1)?.summaryDebt).toBe('none')
     expect(checkpoint.issues.join(' ')).not.toContain('summary debt')
+  })
+
+  it('retains outstanding per-scope debt while evicting older debt-free rounds at the history cap', async () => {
+    const fixture = await evidenceState()
+    let state = fixture.state
+    const debt = await fixture.engine.dispatch(state, {
+      action: 'synthesize', taskId: state.taskId, scope: 'Findings section', purpose: 'synthesis',
+      claimIds: ['C1', 'C2'], insights: [],
+    }, { sessionId: 'synthesis-debt-retention', signal })
+    state = debt.state
+
+    for (let index = 1; index <= RAVEN_LIMITS.synthesisRounds; index += 1) {
+      const pass = await fixture.engine.dispatch(state, {
+        action: 'synthesize', taskId: state.taskId, scope: `Other scope ${index}`, purpose: 'synthesis',
+        claimIds: ['C1', 'C2'],
+        insights: [candidate({
+          insightId: `I-OTHER-${index}`,
+          text: `Interpretation ${index} connects the timing constraints for a different scope.`,
+          competesWith: [],
+        })],
+      }, { sessionId: 'synthesis-debt-retention', signal })
+      state = pass.state
+    }
+
+    expect(state.syntheses).toHaveLength(RAVEN_LIMITS.synthesisRounds)
+    expect(state.syntheses.find(round => round.scope === 'Findings section')).toMatchObject({
+      ordinal: 1,
+      summaryDebt: 'high',
+    })
+    expect(state.syntheses.some(round => round.ordinal === 2)).toBe(false)
+    expect(state.syntheses.at(-1)).toMatchObject({ ordinal: RAVEN_LIMITS.synthesisRounds + 1, scope: 'Other scope 64' })
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(state)) as unknown)).toEqual(state)
+  })
+
+  it('refuses an entirely protected history until same-scope synthesis clears one debt record', async () => {
+    const { engine, state } = await evidenceState()
+    const saturated: RavenTaskState = {
+      ...state,
+      syntheses: Array.from({ length: RAVEN_LIMITS.synthesisRounds }, (_value, index) => ({
+        ordinal: index + 1,
+        scope: `Debt scope ${index + 1}`,
+        purpose: 'synthesis' as const,
+        claimIds: ['C1', 'C2'],
+        insightIds: [],
+        summaryDebt: 'high' as const,
+        summaryDebtDetail: `Debt scope ${index + 1} still only restates evidence.`,
+        createdAt: now(),
+      })),
+    }
+
+    for (const purpose of ['summary', 'explanation'] as const) {
+      await expect(engine.dispatch(saturated, {
+        action: 'synthesize', taskId: state.taskId, scope: 'Debt scope 1', purpose,
+        claimIds: ['C1', 'C2'], insights: [],
+      }, { sessionId: 'synthesis-protected-cap', signal })).rejects.toMatchObject({ code: 'limit-exceeded' })
+    }
+
+    const repaired = await engine.dispatch(saturated, {
+      action: 'synthesize', taskId: state.taskId, scope: 'Debt scope 1', purpose: 'synthesis',
+      claimIds: ['C1', 'C2'], insights: [candidate({ insightId: 'I-REPAIR', competesWith: [] })],
+    }, { sessionId: 'synthesis-protected-cap', signal })
+
+    expect(repaired.state.syntheses).toHaveLength(RAVEN_LIMITS.synthesisRounds)
+    expect(repaired.state.syntheses.some(round => round.ordinal === 1)).toBe(false)
+    expect(repaired.state.syntheses.filter(round => round.summaryDebt !== 'none')).toHaveLength(
+      RAVEN_LIMITS.synthesisRounds - 1,
+    )
+    expect(repaired.state.syntheses.at(-1)).toMatchObject({
+      ordinal: RAVEN_LIMITS.synthesisRounds + 1,
+      scope: 'Debt scope 1',
+      summaryDebt: 'none',
+    })
   })
 
   it('automatically defers promoted analysis when one of its premise Claims loses support', async () => {

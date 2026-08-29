@@ -94,7 +94,7 @@ type RavenTaskAction =
   | { action: "draft"; taskId: string; instruction: string; routes?: string[] }
   | { action: "steer"; taskId: string; correction: string; sourcePolicy?: Partial<SourcePolicy> }
   | { action: "complete"; taskId: string; artifact: string }
-  | { action: "status"; taskId?: string }
+  | { action: "status"; taskId?: string; insightOffset?: number }
   | { action: "inspect"; taskId: string; insightIds: string[] }
   | { action: "stop"; taskId: string; reason?: string }
   | { action: "resume"; taskId: string }
@@ -146,7 +146,8 @@ registry.
 - `complete` verifies the exact candidate Artifact and recorded source references.
   It either completes, completes with explicit Limitations, or returns actionable
   issues while leaving the Task active.
-- `status` reconstructs compact state after resume or compaction.
+- `status` reconstructs compact state after resume or compaction. Its optional nonnegative
+  `insightOffset` pages through unpromoted Candidate IDs while preserving the eight-ID bound.
 - `stop` marks an active Task stopped, preserving its accepted state; `resume` reopens
   only a stopped Task after an explicit current-user request. Stop prevents later Task
   mutation after it is processed, but it does not cancel Harness execution, providers,
@@ -200,10 +201,12 @@ alternatives. Competition is semantically undirected: a later Candidate can poin
 earlier immutable Candidate, and every projection treats both as competitors. A candidate
 is neither evidence nor accepted analysis.
 
-`action=status` exposes a bounded index of unpromoted Candidate IDs after replay or context
-loss. `action=inspect` accepts 1–8 explicit `insightIds` and returns those exact durable
-records; it never returns all 256 Candidates implicitly. The action is read-only and can
-inspect an active, stopped, or completed Task.
+`action=status` exposes one bounded page of unpromoted Candidate IDs after replay or context
+loss. The recall carries its current `insightOffset` and a nullable `nextInsightOffset`; the
+rendered result names the exact next status call when another page remains. `action=inspect`
+accepts 1–8 explicit `insightIds` and returns those exact durable records; neither action
+returns all 256 Candidates implicitly. Both actions are read-only and can inspect an active,
+stopped, or completed Task.
 
 `action=synthesize` records one Synthesis Pass over a named Artifact or section. The pass
 states whether its purpose is `summary`, `explanation`, or `synthesis`, the Claims considered,

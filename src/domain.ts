@@ -578,10 +578,12 @@ export interface RavenWikiEmission {
   readonly logEntry: string
 }
 
-/** Bounded discovery data attached to status without rendering every durable Candidate. */
+/** One bounded page of discovery data attached to status without rendering every durable Candidate. */
 export interface RavenInsightRecall {
   readonly unpromotedInsightIds: readonly string[]
   readonly totalUnpromoted: number
+  readonly insightOffset: number
+  readonly nextInsightOffset: number | null
 }
 
 /** Exact selected Candidate records returned by the read-only inspect action. */

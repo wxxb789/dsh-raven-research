@@ -1657,13 +1657,21 @@ function renderInsightRecall(
   if (recall.totalUnpromoted === 0) {
     return 'Every durable Insight Candidate has already been promoted; explicitly inspect an ID only when its lineage is needed.'
   }
+  if (recall.unpromotedInsightIds.length === 0) {
+    return `No unpromoted Insight Candidate IDs exist at insightOffset=${recall.insightOffset}`
+      + ` (${recall.totalUnpromoted} total). Restart the bounded index with raven_task action=status`
+      + ` taskId=${taskId} insightOffset=0.`
+  }
   const visible = recall.unpromotedInsightIds.join(', ')
-  const hidden = recall.totalUnpromoted - recall.unpromotedInsightIds.length
   return [
-    `Unpromoted Insight Candidate IDs (${recall.unpromotedInsightIds.length} shown of ${recall.totalUnpromoted}): ${visible}`,
+    `Unpromoted Insight Candidate IDs at insightOffset=${recall.insightOffset}`
+      + ` (${recall.unpromotedInsightIds.length} shown of ${recall.totalUnpromoted}): ${visible}`,
     `Inspect exact Candidate fields with raven_task action=inspect taskId=${taskId}`
-      + ` insightIds=${JSON.stringify(recall.unpromotedInsightIds)}.`
-      + `${hidden === 0 ? '' : ` Inspect these first; ${hidden} more ID(s) remain outside this bounded status index.`}`,
+      + ` insightIds=${JSON.stringify(recall.unpromotedInsightIds)}.`,
+    ...(recall.nextInsightOffset === null
+      ? []
+      : [`More unpromoted IDs remain; call raven_task action=status taskId=${taskId}`
+          + ` insightOffset=${recall.nextInsightOffset} for the next bounded page.`]),
   ].join('\n')
 }
 
@@ -2118,6 +2126,11 @@ function toolDefinition(
           description: `Requested Task action. Each action accepts only its own fields — ${ACTION_FIELD_SUMMARY} — and any other field fails the call.`,
         },
         taskId: { type: 'string', description: 'Existing Raven Task ID. Required by every action except start.' },
+        insightOffset: {
+          type: 'integer',
+          minimum: 0,
+          description: `Zero-based offset into unpromoted Insight Candidate IDs, returning at most ${RAVEN_LIMITS.insightInspectionIds} IDs. Only with action=status; omit for the first page.`,
+        },
         title: { type: 'string', description: `Wiki page title for export, at most ${RAVEN_LIMITS.summaryChars} characters; defaults to the Task request. Only with action=export.` },
         tags: {
           type: 'array',

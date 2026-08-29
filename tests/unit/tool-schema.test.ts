@@ -94,7 +94,10 @@ describe('raven_task action field contract', () => {
 
     expect(properties.action?.enum).toContain('synthesize')
     expect(properties.action?.enum).toContain('inspect')
+    expect(ACTION_FIELDS.status).toEqual(['action', 'taskId', 'insightOffset'])
     expect(ACTION_FIELDS.inspect).toEqual(['action', 'taskId', 'insightIds'])
+    expect(properties.insightOffset).toMatchObject({ type: 'integer', minimum: 0 })
+    expect(properties.insightOffset?.description).toContain(String(RAVEN_LIMITS.insightInspectionIds))
     expect(properties.insightIds?.description).toContain(`1-${RAVEN_LIMITS.insightInspectionIds}`)
     expect(properties.insightIds?.description).toContain('no implicit inspect-all')
     expect(properties.purpose?.enum).toEqual(['summary', 'explanation', 'synthesis'])

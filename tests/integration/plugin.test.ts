@@ -166,7 +166,12 @@ describe('Raven Cordis plugin', () => {
     interface TestValue {
       readonly state: RavenPlugin.RavenTaskState
       readonly status: string
-      readonly recall?: { readonly unpromotedInsightIds: readonly string[]; readonly totalUnpromoted: number }
+      readonly recall?: {
+        readonly unpromotedInsightIds: readonly string[]
+        readonly totalUnpromoted: number
+        readonly insightOffset: number
+        readonly nextInsightOffset: number | null
+      }
       readonly inspection?: { readonly candidates: readonly RavenPlugin.RavenInsightCandidate[] }
     }
     interface TestTool extends Record<string, unknown> {
@@ -272,18 +277,34 @@ describe('Raven Cordis plugin', () => {
     expect(status.recall).toEqual({
       unpromotedInsightIds: ['I1', 'I2', 'I3', 'I4', 'I5', 'I6', 'I7', 'I8'],
       totalUnpromoted: 9,
+      insightOffset: 0,
+      nextInsightOffset: 8,
     })
     const statusText = reloaded.tool.output.render({}, status)[0]?.text ?? ''
-    expect(statusText).toContain('Unpromoted Insight Candidate IDs (8 shown of 9): I1, I2, I3, I4, I5, I6, I7, I8')
-    expect(statusText).toContain('1 more ID(s) remain outside this bounded status index')
+    expect(statusText).toContain('Unpromoted Insight Candidate IDs at insightOffset=0 (8 shown of 9): I1, I2, I3, I4, I5, I6, I7, I8')
+    expect(statusText).toContain(`action=status taskId=${started.state.taskId} insightOffset=8`)
     expect(statusText).not.toContain('I9')
     expect(statusText).toContain('action=inspect')
     expect(statusText).not.toContain(candidates[0]?.text)
+
+    const nextStatus = await reloaded.tool.execute({
+      action: 'status', taskId: started.state.taskId, insightOffset: 8,
+    }, { agent: replayAgent, signal })
+    expect(nextStatus.recall).toEqual({
+      unpromotedInsightIds: ['I9'],
+      totalUnpromoted: 9,
+      insightOffset: 8,
+      nextInsightOffset: null,
+    })
+    const nextStatusText = reloaded.tool.output.render({}, nextStatus)[0]?.text ?? ''
+    expect(nextStatusText).toContain('Unpromoted Insight Candidate IDs at insightOffset=8 (1 shown of 9): I9')
+    expect(nextStatusText).not.toContain('insightOffset=16')
 
     const decision = await reloaded.preStep({ agent: replayAgent }, () => Promise.resolve({ kind: 'enter', messages: [] }))
     const context = decision.messages.flatMap(message => message.content).map(part => part.text ?? '').join('\n')
     expect(context).toContain('I1, I2')
     expect(context).toContain('action=inspect')
+    expect(context).toContain(`action=status taskId=${started.state.taskId} insightOffset=8`)
     expect(context).toContain('Outstanding Summary Debt remains in 1 synthesis scope')
     expect(context).toContain('high in Findings')
 
@@ -300,6 +321,12 @@ describe('Raven Cordis plugin', () => {
     expect(inspectText).toContain('"wouldChangeMind":')
     expect(inspectText).toContain(candidates[0]?.text)
 
+    await expect(reloaded.tool.execute({
+      action: 'status', taskId: started.state.taskId, insightOffset: -1,
+    }, { agent: replayAgent, signal })).rejects.toThrow(/insightOffset must be a nonnegative safe integer/)
+    await expect(reloaded.tool.execute({
+      action: 'status', taskId: started.state.taskId, insightOffset: 1.5,
+    }, { agent: replayAgent, signal })).rejects.toThrow(/insightOffset must be a nonnegative safe integer/)
     await expect(reloaded.tool.execute({
       action: 'inspect', taskId: started.state.taskId, insightIds: [],
     }, { agent: replayAgent, signal })).rejects.toThrow(/at least one Insight Candidate/)
@@ -331,6 +358,8 @@ describe('Raven Cordis plugin', () => {
     expect(afterPromotion.recall).toEqual({
       unpromotedInsightIds: ['I2', 'I3', 'I4', 'I5', 'I6', 'I7', 'I8', 'I9'],
       totalUnpromoted: 8,
+      insightOffset: 0,
+      nextInsightOffset: null,
     })
     const inspectedAgain = await reloaded.tool.execute({
       action: 'inspect', taskId: started.state.taskId, insightIds: ['I1'],

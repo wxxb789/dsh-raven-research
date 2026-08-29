@@ -28,19 +28,26 @@ export function insightCompetitionMap(
   return competitors
 }
 
-/** Return bounded unpromoted Candidate IDs for status and replay context. */
+/** Return one bounded page of unpromoted Candidate IDs for status and replay context. */
 export function insightCandidateRecall(
   claims: readonly RavenClaimRecord[],
   candidates: readonly RavenInsightCandidate[],
   limit: number,
+  insightOffset = 0,
 ): RavenInsightRecall {
   const promoted = new Set(claims
     .map(claim => claim.insightId)
     .filter((insightId): insightId is string => insightId !== undefined))
   const unpromoted = candidates.filter(candidate => !promoted.has(candidate.insightId))
+  const unpromotedInsightIds = unpromoted
+    .slice(insightOffset, insightOffset + Math.max(0, limit))
+    .map(candidate => candidate.insightId)
+  const nextInsightOffset = insightOffset + unpromotedInsightIds.length
   return {
-    unpromotedInsightIds: unpromoted.slice(0, Math.max(0, limit)).map(candidate => candidate.insightId),
+    unpromotedInsightIds,
     totalUnpromoted: unpromoted.length,
+    insightOffset,
+    nextInsightOffset: nextInsightOffset < unpromoted.length ? nextInsightOffset : null,
   }
 }
 
@@ -55,6 +62,29 @@ export function outstandingSummaryDebt(
   return [...latestByScope.values()]
     .filter(round => round.summaryDebt !== 'none')
     .sort((left, right) => left.ordinal - right.ordinal)
+}
+
+/**
+ * Append one pass without evicting the newest pass or any scope's outstanding debt.
+ *
+ * Protection is computed after the append: a debt-free synthesis over the same scope
+ * supersedes its debt record, while summary and explanation passes deliberately do not.
+ */
+export function appendBoundedSynthesisRound(
+  rounds: readonly RavenSynthesisRound[],
+  next: RavenSynthesisRound,
+  limit: number,
+): RavenSynthesisRound[] | undefined {
+  const bounded = [...rounds, next]
+  while (bounded.length > limit) {
+    const protectedRounds = new Set(outstandingSummaryDebt(bounded))
+    const newest = bounded.at(-1)
+    if (newest !== undefined) protectedRounds.add(newest)
+    const evictionIndex = bounded.findIndex(round => !protectedRounds.has(round))
+    if (evictionIndex === -1) return undefined
+    bounded.splice(evictionIndex, 1)
+  }
+  return bounded
 }
 
 /**
