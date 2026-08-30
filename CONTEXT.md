@@ -40,6 +40,18 @@ A candidate interpretation Raven has derived from one or more Claims, such as a 
 
 An explicit examination of a bounded Artifact or section for what follows from its Claims. A Synthesis Pass may seek synthesis, honor a request for summary, or provide explanation without a novelty requirement. It records the Claims considered, the Insight Candidates produced, and any Summary Debt found; it does not publish an Artifact or accept a candidate by itself.
 
+## Skeleton Candidate
+
+One proposed argument architecture for a substantive long-form Artifact. It is more than an outline: it defines a distinct frame and thesis, central question, reasoning flow, purposeful sections, relevant Claim and Insight links, evidence needs, counterarguments, unresolved weaknesses, and intended reader takeaway. Candidates in one Structure Studio round must make materially different claims about what the Artifact is explaining, not merely reorder headings.
+
+## Structure Battle
+
+Raven's private comparative critique of every current Skeleton Candidate. It records what each architecture explains better, fails to explain, assumes, repeats from conventional wisdom, requires as evidence, contributes as non-obvious insight, and offers for a hybrid. The user receives only the strongest alternatives, tradeoffs, and Raven's recommendation rather than tournament noise.
+
+## Selected Skeleton
+
+The intentionally resolved argument architecture that constrains substantive drafting. It may adopt one Candidate or preserve a user-directed or Raven-selected hybrid. Its section-level Claim and Insight links, counterargument-specific lineage, evidence gaps, weaknesses, and reader takeaway remain in Task state and in drafting context. The selection records its Task revision, and every prose Checkpoint records that revision so Completion cannot reuse prose written for an obsolete Skeleton. A later Steering Revision invalidates the selection until Raven battles and resolves a current architecture again.
+
 ## Summary Debt
 
 A visible deficit in material that is organized but still consists mostly of restatement, chronology, or description. Summary Debt means the requested synthesis has not yet produced enough defensible interpretation, explanation, connection, or implication. It does not apply when summary is the requested result or when explanation rather than novelty is the goal.

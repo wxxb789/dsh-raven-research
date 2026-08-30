@@ -1733,7 +1733,7 @@ describe('Raven task engine', () => {
     }, { sessionId: 'session-local-markdown', signal })
 
     expect(checkpoint.status).toBe('active')
-    expect(checkpoint.state.schemaVersion).toBe(3)
+    expect(checkpoint.state.schemaVersion).toBe(4)
     expect(checkpoint.state.sources[0]?.representation?.markdown).toBe(markdown)
     expect(received[0]?.resource).toEqual({ origin: 'local', uri: 'file:///workspace/docs/guide.md', mediaType: 'text/markdown' })
     expect(checkpoint.renderedArtifact).toContain('local; original full Markdown by read')

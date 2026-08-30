@@ -31,6 +31,11 @@ export const RAVEN_LIMITS = {
   insightAssumptions: 32,
   insightInspectionIds: 8,
   synthesisRounds: 64,
+  structureRounds: 16,
+  skeletonCandidates: 4,
+  skeletonSections: 16,
+  skeletonItems: 16,
+  skeletonTextChars: 4_000,
   limitations: 256,
   checkpoints: 128,
   steeringRevisions: 128,
@@ -43,6 +48,7 @@ export const RAVEN_LIMITS = {
   leadNoteChars: 2_000,
   draftRoutes: 4,
   draftInstructionChars: 8_000,
+  draftContextChars: 64_000,
   draftRounds: 32,
   draftVariantChars: 40_000,
   /** Maximum UTF-8 JSON size of one durable Task snapshot. */
@@ -51,7 +57,7 @@ export const RAVEN_LIMITS = {
   stateCompletionReserveBytes: 64_000,
 } as const
 
-export const RAVEN_SCHEMA_VERSION = 3 as const
+export const RAVEN_SCHEMA_VERSION = 4 as const
 
 export const OUTCOMES = [
   'research',
@@ -166,6 +172,19 @@ export const SYNTHESIS_PURPOSES = ['summary', 'explanation', 'synthesis'] as con
 
 export type SynthesisPurpose = typeof SYNTHESIS_PURPOSES[number]
 
+/** Whether this Task needs a collaborative, delegated, or deliberately skipped pre-writing structure decision. */
+export const STRUCTURE_MODES = ['collaborative', 'autonomous', 'skip'] as const
+
+export type StructureMode = typeof STRUCTURE_MODES[number]
+
+export const SKELETON_RECOMMENDATION_KINDS = ['candidate', 'hybrid'] as const
+
+export type SkeletonRecommendationKind = typeof SKELETON_RECOMMENDATION_KINDS[number]
+
+export const SKELETON_SELECTION_ACTORS = ['user', 'raven'] as const
+
+export type SkeletonSelectionActor = typeof SKELETON_SELECTION_ACTORS[number]
+
 export const SUMMARY_DEBT_LEVELS = ['none', 'low', 'high'] as const
 
 export type SummaryDebtLevel = typeof SUMMARY_DEBT_LEVELS[number]
@@ -265,11 +284,89 @@ export interface RavenSynthesisResult {
   readonly candidates: readonly RavenInsightCandidate[]
 }
 
+/** A challenge to one section of an argument, with the same reasoning links as the section it tests. */
+export interface RavenSkeletonCounterargument {
+  readonly text: string
+  readonly claimIds: readonly string[]
+  readonly insightIds: readonly string[]
+}
+
+/** One purposeful step in an argument rather than a heading-only outline entry. */
+export interface RavenSkeletonSection {
+  readonly sectionId: string
+  readonly title: string
+  readonly purpose: string
+  readonly claimIds: readonly string[]
+  readonly insightIds: readonly string[]
+  readonly evidenceNeeds: readonly string[]
+  readonly counterarguments: readonly RavenSkeletonCounterargument[]
+}
+
+/** The complete argument architecture later drafting must follow. */
+export interface RavenArgumentSkeleton {
+  readonly frame: string
+  readonly thesis: string
+  readonly centralQuestion: string
+  readonly reasoningFlow: readonly string[]
+  readonly sections: readonly RavenSkeletonSection[]
+  readonly unresolvedWeaknesses: readonly string[]
+  readonly readerTakeaway: string
+}
+
+/** One materially distinct candidate architecture considered by Structure Studio. */
+export interface RavenSkeletonCandidate {
+  readonly candidateId: string
+  readonly label: string
+  readonly skeleton: RavenArgumentSkeleton
+}
+
+/** Structured critique of one candidate; the user receives only a compact projection of this battle. */
+export interface RavenSkeletonBattleEntry {
+  readonly candidateId: string
+  readonly explainsBetter: readonly string[]
+  readonly failsToExplain: readonly string[]
+  readonly conventionalWisdom: readonly string[]
+  readonly evidenceRequired: readonly string[]
+  readonly assumptions: readonly string[]
+  readonly nonObviousInsights: readonly string[]
+  readonly mergeableElements: readonly string[]
+}
+
+export type RavenSkeletonChoice =
+  | { readonly kind: 'candidate'; readonly candidateIds: readonly [string] }
+  | { readonly kind: 'hybrid'; readonly candidateIds: readonly string[] }
+
+export type RavenSkeletonRecommendation = RavenSkeletonChoice & {
+  readonly rationale: string
+}
+
+/** One candidate generation and critique round under a specific Steering Revision. */
+export interface RavenStructureRound {
+  readonly ordinal: number
+  readonly steeringRevision: number
+  readonly candidates: readonly RavenSkeletonCandidate[]
+  readonly battle: readonly RavenSkeletonBattleEntry[]
+  readonly recommendation: RavenSkeletonRecommendation
+  readonly createdAt: string
+}
+
+/** The intentionally resolved architecture that constrains drafting. */
+export type RavenSelectedSkeleton = RavenSkeletonChoice & {
+  readonly chosenBy: SkeletonSelectionActor
+  readonly skeleton: RavenArgumentSkeleton
+  readonly rationale: string
+  /** Task revision created by select-structure; later prose Checkpoints must record this exact revision. */
+  readonly selectedAtRevision: number
+  readonly steeringRevision: number
+  readonly selectedAt: string
+}
+
 export interface RavenSteeringRevision {
   readonly revision: number
   readonly correction: string
   readonly createdAt: string
   readonly sourcePolicy?: RavenSourcePolicy
+  readonly structureMode?: StructureMode
 }
 
 export interface RavenLimitation {
@@ -288,6 +385,8 @@ export interface RavenCheckpointRecord {
   readonly artifactSha256: string
   readonly artifactChars: number
   readonly steeringRevision: number
+  /** Selected Skeleton Task revision this Artifact follows; absent on skip and pre-v4 records. */
+  readonly selectedStructureRevision?: number
   readonly createdAt: string
   /**
    * The Prose Layout the stored bytes are in. Absent on a record written before
@@ -385,6 +484,7 @@ export interface RavenTaskState {
   readonly request: string
   readonly grounding: GroundingPolicy
   readonly sourcePolicy: RavenSourcePolicy
+  readonly structureMode: StructureMode
   readonly phase: RavenTaskPhase
   readonly revision: number
   readonly steeringRevision: number
@@ -394,6 +494,8 @@ export interface RavenTaskState {
   readonly claims: readonly RavenClaimRecord[]
   readonly insightCandidates: readonly RavenInsightCandidate[]
   readonly syntheses: readonly RavenSynthesisRound[]
+  readonly structureRounds: readonly RavenStructureRound[]
+  readonly selectedSkeleton: RavenSelectedSkeleton | null
   readonly limitations: readonly RavenLimitation[]
   readonly latestArtifact: string | null
   /** Draft comparison rounds, oldest first. Absent on a record written before Draft Variants existed. */
@@ -601,6 +703,8 @@ export interface RavenDispatchResult {
   readonly leads?: LeadSearchResult
   readonly variants?: DraftResult
   readonly synthesis?: RavenSynthesisResult
+  readonly studio?: RavenStructureRound
+  readonly selection?: RavenSelectedSkeleton
   readonly recall?: RavenInsightRecall
   readonly inspection?: RavenInsightInspection
   /** Set when the Prose Layout rewrote the submitted Artifact bytes before storing them. */

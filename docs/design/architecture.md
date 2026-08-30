@@ -71,6 +71,7 @@ type RavenTaskAction =
       request: string
       grounding?: "required" | "optional" | "none"
       sourcePolicy?: Partial<SourcePolicy>
+      structureMode?: "collaborative" | "autonomous" | "skip"
     }
   | {
       action: "checkpoint"
@@ -91,8 +92,29 @@ type RavenTaskAction =
       claimIds: string[]
       insights: InsightCandidateInput[]
     }
+  | {
+      action: "structure"
+      taskId: string
+      candidates: SkeletonCandidateInput[]
+      battle: SkeletonBattleInput[]
+      recommendation: SkeletonRecommendationInput
+    }
+  | {
+      action: "select-structure"
+      taskId: string
+      chosenBy: "user" | "raven"
+      candidateIds: string[]
+      hybrid?: ArgumentSkeletonInput
+      rationale: string
+    }
   | { action: "draft"; taskId: string; instruction: string; routes?: string[] }
-  | { action: "steer"; taskId: string; correction: string; sourcePolicy?: Partial<SourcePolicy> }
+  | {
+      action: "steer"
+      taskId: string
+      correction: string
+      sourcePolicy?: Partial<SourcePolicy>
+      structureMode?: "collaborative" | "autonomous" | "skip"
+    }
   | { action: "complete"; taskId: string; artifact: string }
   | { action: "status"; taskId?: string; insightOffset?: number }
   | { action: "inspect"; taskId: string; insightIds: string[] }
@@ -117,7 +139,9 @@ registry.
   evidence floor belongs to the Outcome, not to the executor: `research` and
   `academic-writing` default to `required` and may be narrowed to `optional`, but
   never to `none`. An executor that could switch its own floor off could relabel
-  ungrounded prose as research and still complete cleanly.
+  ungrounded prose as research and still complete cleanly. It also records the internal
+  `collaborative | autonomous | skip` Structure Studio mode; omission preserves old Tasks
+  on the lightweight `skip` path.
 - `discover` runs ONE batch of complementary queries through the Harness `ctx.web`
   search half and returns Leads. It is a separate action rather than a `checkpoint`
   field because finding candidates and committing evidence are different authorities:
@@ -131,9 +155,19 @@ registry.
   interpretation becomes accepted analysis. It also diagnoses Summary Debt according to
   the requested purpose. It is separate from `checkpoint` because considering an
   explanation and adopting it into an Artifact are different authorities.
+- `structure` records 2–4 materially different argument architectures and one complete
+  comparative critique per Candidate. Frame and thesis uniqueness provide an executable
+  floor against cosmetic copies; the prompt remains responsible for semantic quality.
+  The rendered result projects only compact alternatives, tradeoffs, and Raven's recommendation.
+- `select-structure` resolves one current Candidate or a modified/hybrid Skeleton. The
+  selection snapshots section-level Claim/Insight links, evidence needs, counterarguments,
+  weaknesses, and reader takeaway so drafting reads reasoning structure rather than headings.
 - `checkpoint` atomically commits an independently useful Artifact plus the evidence
-  and failures that inform it. Stages are observations, never approval gates.
-- `draft` asks every configured model route for the same bounded instruction and
+  and failures that inform it. Stages are observations, never approval gates. Draft, verify,
+  and refine Checkpoints require a current selected Skeleton on Studio-enabled Tasks.
+- `draft` requires a current selected Skeleton on Studio-enabled Tasks, includes the
+  complete architecture in a delimiter-safe data envelope, caps combined context at 64,000
+  characters, then asks every configured model route for the same bounded instruction and
   returns the candidates side by side. It is a separate action for the same reason
   `discover` is: producing candidate wording and committing evidence are different
   authorities. A Draft Variant has been written, not verified, so it may never reach
@@ -141,13 +175,16 @@ registry.
   list and the agent may only select a subset of it, because naming a model is naming
   spend and a data path. A route that fails becomes one labelled variant rather than a
   failed round, so the comparison survives one dead provider.
-- `steer` appends a Steering Revision to the same Task and invalidates stale final
-  verification.
+- `steer` appends a Steering Revision to the same Task, may move between Structure
+  Studio modes as the user delegates or skips, and invalidates stale final verification
+  plus any prior selected Skeleton.
 - `complete` verifies the exact candidate Artifact and recorded source references.
   It either completes, completes with explicit Limitations, or returns actionable
   issues while leaving the Task active.
-- `status` reconstructs compact state after resume or compaction. Its optional nonnegative
-  `insightOffset` pages through unpromoted Candidate IDs while preserving the eight-ID bound.
+- `status` reconstructs compact state after resume or compaction. It re-renders the exact
+  selected Skeleton on demand so always-on pre-step context needs only a bounded digest; its
+  optional nonnegative `insightOffset` pages through unpromoted Candidate IDs while preserving
+  the eight-ID bound.
 - `stop` marks an active Task stopped, preserving its accepted state; `resume` reopens
   only a stopped Task after an explicit current-user request. Stop prevents later Task
   mutation after it is processed, but it does not cancel Harness execution, providers,
@@ -162,19 +199,22 @@ verification job, workflow stage controller, or approval action.
 
 One compact JSON state contains:
 
-- Task ID, Outcome, request, grounding policy, steerable Source Policy, phase, monotonic revision, and times;
-- Steering Revisions, including effective Source Policy snapshots when changed;
+- Task ID, Outcome, request, grounding policy, steerable Source Policy, Structure Studio mode, phase, monotonic revision, and times;
+- Steering Revisions, including effective Source Policy and Structure Studio mode snapshots when changed;
 - immutable Checkpoint descriptors and the latest Artifact;
 - Sources with distinct Original Resources and Markdown Representations, plus origin-agnostic Claims;
 - durable Insight Candidates, their premise/assumption/alternative lineage, and bounded Synthesis Passes with Summary Debt;
+- bounded Structure Studio rounds containing materially distinct Skeleton Candidates, private Battle records, recommendations, and the current selected or hybrid evidence-linked Skeleton;
 - Source/tool/coverage Limitations;
 - the most recent verification receipt and exact Artifact SHA-256.
 
 A mutation is admitted only when the whole UTF-8 JSON snapshot remains at or below
 1,000,000 bytes; non-final mutations leave 64,000 bytes of that ceiling reserved so
-Completion cannot deadlock on the cap. This aggregate budget closes the multiplicative
-gap left by independent per-field caps. Results that do not advance Task revision carry only a compact metadata
-pointer rather than persisting the same snapshot again.
+Completion cannot deadlock on the cap. Replay applies the same aggregate budget with an early-aborting JSON walker
+before deep validation. A new Studio round is also refused unless every exact Candidate still has enough reserved
+headroom to become the selected snapshot. These checks close the multiplicative gap left by independent per-field
+caps. Results that do not advance Task revision carry only a compact metadata pointer rather than persisting the same
+snapshot again.
 
 Task phases are `active`, `stopped`, `completed`, and `completed-with-limits`.
 Normal research stages do not appear as phases.
@@ -220,8 +260,41 @@ Task phase or Completion authority.
 
 Candidates are written by the existing main Harness agent, not a second model loop. Raven
 validates and persists the structured reasoning; it does not generate an interpretation from
-source text itself. This keeps multi-model Draft Variants limited to wording and deliberately
-does not implement multi-skeleton drafting.
+source text itself. Structure Studio consumes this reasoning without requiring another model.
+
+### Skeleton Candidate, Structure Battle, and selection
+
+A Skeleton Candidate is one complete argument architecture: distinct frame and thesis,
+central question, ordered reasoning moves, purposeful sections, Claim and Insight links,
+evidence needs, counterarguments with their own reasoning links, unresolved weaknesses, and
+intended reader takeaway. It is not an outline or heading list, and its complete section tree
+must retain at least one recorded Claim or Insight link. A Studio round requires 2–4 Candidates
+and rejects punctuation/case/whitespace-equivalent frames or theses plus combined
+frame/thesis/question/flow lexical overlap at or above 0.85. The prompt still owns the stronger
+semantic condition that each Candidate make a different claim about what the Artifact explains.
+
+Every Candidate has exactly one private Structure Battle entry covering explanatory advantage,
+failure, conventional wisdom, evidence requirements, assumptions, non-obvious insights, and
+mergeable elements. The durable record remains available for replay and audit, while the normal
+tool rendering exposes only Candidate labels, frames, theses, one compact tradeoff, and Raven's
+candidate-or-hybrid recommendation. Internal tournament detail is not a user-facing Artifact.
+
+`structureMode=collaborative` reserves one high-leverage discussion for user preference;
+`autonomous` lets Raven resolve the recommendation without pausing; `skip` preserves lightweight
+research-only, summary, learning, small-writing, and explicit-skip paths. `select-structure`
+records `chosenBy=user | raven`, source Candidate IDs, rationale, and either the exact selected
+Candidate or a modified/hybrid Skeleton. A selected Skeleton is a snapshot rather than a pointer
+so all evidence, insight, counterargument, and gap links constrain later drafting even when older
+Studio rounds are trimmed. Selection records its Task revision; prose Checkpoints copy that value,
+and Completion requires the latest Checkpoint to match the current selection. Pre-step context
+carries a delimiter-safe bounded frame/thesis/section-ID digest; `status` renders the current
+compact alternatives or exact selected snapshot on demand after replay or context loss. A
+Steering Revision clears selection; changed framing must be battled and selected again.
+
+The main model can generate and battle all Candidates itself. Optional configured routes or
+subagents may increase private diversity or criticism, but they are not a dependency or a new
+public seam. Multi-model Draft Variants remain wording candidates and cannot run before selection
+on a Studio-enabled Task.
 
 ### Source
 
@@ -314,10 +387,11 @@ A Checkpoint stores its immutable ordinal, stage observation, summary, Artifact
 SHA-256, character count, creation time, and applied Steering Revision. The latest
 Artifact content remains in compact state; older full contents already live in
 prior durable tool results, avoiding quadratic snapshot growth. Request, Artifact,
-summary, correction, Source, Claim, Insight Candidate, Synthesis Pass, Limitation,
-Checkpoint, and Steering collections all have executable size ceilings shared by action
-validation and replay decoding. Schema v3 adds the two synthesis collections; v1 web
-Sources and v2 Tasks migrate forward with empty collections rather than being dropped.
+summary, correction, Source, Claim, Insight Candidate, Synthesis Pass, Structure Round,
+Skeleton, Limitation, Checkpoint, and Steering collections all have executable size ceilings
+shared by action validation and replay decoding. Schema v4 adds Structure Studio mode,
+rounds, and selected Skeleton; v1–v3 Tasks migrate forward with empty structure and the
+compatibility `skip` mode rather than being dropped.
 
 ## Progressive execution
 
@@ -329,13 +403,17 @@ start Raven Task
 → use existing Harness tools to inspect an initial credible source set
 → preserve or convert content to Markdown and match bounded excerpts
 → independently re-fetch web Resources; retain non-web Resource and producer provenance
-→ checkpoint a useful outline, draft, explanation, or findings
+→ checkpoint useful evidence, analysis, explanation, or findings
 → when the requested result needs interpretation, synthesize the relevant Claims into candidates
 → after replay, use status then bounded inspect calls to recover exact selected Candidate fields
 → inspect assumptions, reversal evidence, competing explanations, and any per-scope Summary Debt
 → promote only defensible candidate reasoning as an analysis Claim with exact lineage
+→ for Studio-enabled long-form work, privately generate and battle materially different Skeleton Candidates
+→ present compact alternatives once, or select autonomously when delegated; skip for lightweight work
+→ persist one selected or hybrid evidence-linked Skeleton
+→ draft substantive prose against that architecture
 → continue research and evidence checks without asking permission
-→ apply user correction as a Steering Revision on the same Task
+→ apply user correction as a Steering Revision on the same Task and re-resolve stale structure
 → emit a revised Checkpoint for every substantive final edit
 → complete only those exact latest Checkpoint bytes
 ```
@@ -358,6 +436,7 @@ is therefore not necessarily a byte-for-byte no-op.
 
 - the final Artifact has unknown citation IDs or unknown raw URLs;
 - no useful prior Checkpoint exists;
+- a Studio-enabled Task has no selected Skeleton current to the latest Steering Revision;
 - the latest Steering Revision has no subsequent Checkpoint;
 - the candidate bytes differ from the exact latest Checkpoint fingerprint;
 - a material supported/qualified external Claim lacks a Source citation in the

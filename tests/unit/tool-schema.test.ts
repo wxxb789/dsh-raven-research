@@ -113,6 +113,57 @@ describe('raven_task action field contract', () => {
     expect(insightProperties.wouldChangeMind?.description).toContain('reverse or materially weaken')
   })
 
+  it('exposes Structure Studio candidates, battle criteria, steering modes, and explicit selection', () => {
+    const properties = toolParameters().properties as unknown as Record<string, Record<string, unknown>>
+    const candidates = properties.candidates
+    const candidate = candidates?.items as Record<string, unknown>
+    const candidateProperties = candidate?.properties as Record<string, Record<string, unknown>>
+    const skeleton = candidateProperties.skeleton
+    const skeletonProperties = skeleton?.properties as Record<string, Record<string, unknown>>
+    const sections = skeletonProperties.sections
+    const section = sections?.items as Record<string, unknown>
+    const battle = properties.battle
+    const battleEntry = battle?.items as Record<string, unknown>
+    const recommendation = properties.recommendation
+    if (skeleton === undefined || recommendation === undefined) {
+      throw new Error('expected Structure Studio schemas')
+    }
+
+    expect(properties.action?.enum).toContain('structure')
+    expect(properties.action?.enum).toContain('select-structure')
+    expect(ACTION_FIELDS.structure).toEqual(['action', 'taskId', 'candidates', 'battle', 'recommendation'])
+    expect(ACTION_FIELDS['select-structure']).toEqual([
+      'action', 'taskId', 'chosenBy', 'candidateIds', 'hybrid', 'rationale',
+    ])
+    expect(properties.structureMode?.enum).toEqual(['collaborative', 'autonomous', 'skip'])
+    expect(properties.structureMode?.description).toContain('action=start or action=steer')
+    expect(candidate.required).toEqual(['candidateId', 'label', 'skeleton'])
+    expect(skeleton.required).toEqual([
+      'frame', 'thesis', 'centralQuestion', 'reasoningFlow', 'sections',
+      'unresolvedWeaknesses', 'readerTakeaway',
+    ])
+    expect(section.required).toEqual([
+      'sectionId', 'title', 'purpose', 'claimIds', 'insightIds', 'evidenceNeeds', 'counterarguments',
+    ])
+    expect(battleEntry.required).toEqual([
+      'candidateId', 'explainsBetter', 'failsToExplain', 'conventionalWisdom', 'evidenceRequired',
+      'assumptions', 'nonObviousInsights', 'mergeableElements',
+    ])
+    const recommendationChoices = recommendation.oneOf as Array<{
+      readonly required: string[]
+      readonly properties: Record<string, { readonly const?: string; readonly description?: string }>
+    }>
+    expect(recommendationChoices).toHaveLength(2)
+    expect(recommendationChoices.map(choice => choice.properties.kind?.const)).toEqual(['candidate', 'hybrid'])
+    expect(recommendationChoices[0]?.required).toEqual(['kind', 'candidateIds', 'rationale'])
+    expect(recommendationChoices[0]?.properties.candidateIds?.description).toContain('Exactly one')
+    expect(recommendationChoices[1]?.properties.candidateIds?.description)
+      .toContain(`One to ${RAVEN_LIMITS.skeletonCandidates}`)
+    expect(properties.chosenBy?.enum).toEqual(['user', 'raven'])
+    expect(properties.hybrid).toMatchObject({ type: 'object' })
+    expect(properties.candidateIds?.description).toContain('action=select-structure')
+  })
+
   it('keeps legacy migration Source IDs out of tool and engine input', async () => {
     const properties = toolParameters().properties as unknown as Record<string, Record<string, unknown>>
     const claim = properties.claims?.items as Record<string, unknown>

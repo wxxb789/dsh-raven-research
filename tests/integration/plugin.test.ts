@@ -427,7 +427,7 @@ describe('Raven Cordis plugin', () => {
     const signal = new AbortController().signal
     const restored = await tool.execute({ action: 'status', taskId }, { agent, signal })
 
-    expect(restored.state.schemaVersion).toBe(3)
+    expect(restored.state.schemaVersion).toBe(RavenPlugin.RAVEN_SCHEMA_VERSION)
     expect(restored.state.sources[0]).toMatchObject({
       url: 'https://example.test/legacy',
       resource: { origin: 'web', uri: 'https://example.test/legacy' },
@@ -651,6 +651,28 @@ describe('Raven Cordis plugin', () => {
       signal,
     }).then(() => 'restored', (error: unknown) => (error as Error).message)
     expect(withoutRecord).toContain('No Raven Task exists in this session')
+
+    const oversized = capture()
+    const oversizedPayload = 'A'.repeat(Math.ceil((RavenPlugin.RAVEN_LIMITS.stateBytes + 4_096) * 4 / 3) + 100)
+    const oversizedRecord = await oversized.tool.execute({ action: 'status' }, {
+      agent: {
+        id: 'ptc-mode-session',
+        session: {
+          events: [{
+            type: 'tool/code-dispatch',
+            data: {
+              name: 'raven_task',
+              content: [{
+                type: 'text',
+                text: `<!-- dsh-raven-research/task-state ${oversizedPayload} -->`,
+              }],
+            },
+          }],
+        },
+      },
+      signal,
+    }).then(() => 'restored', (error: unknown) => (error as Error).message)
+    expect(oversizedRecord).toContain('No Raven Task exists in this session')
   })
 
   it('keeps a nested sub-call working when the host exposes a read-only session view', async () => {

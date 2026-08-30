@@ -2,7 +2,7 @@
 
 ## Test surfaces
 
-The requested public contract fixes seven test seams:
+The requested public contract fixes eight test seams:
 
 1. **Cordis load seam** — named exports, prompt/tool registration, real Loader
    unwrapping, execution through `ctx.tools`, and disposal.
@@ -14,10 +14,13 @@ The requested public contract fixes seven test seams:
    feeding the same candidate policy, where a variant can never become evidence.
 5. **Synthesis contract** — durable Insight Candidates, Summary Debt, explicit promotion,
    competing interpretations, and analysis-to-Claim-to-Source lineage through the same Task state.
-6. **Raven Workspace interface** — pure Markdown snapshot planning for initialization,
+6. **Structure Studio contract** — materially distinct evidence-linked Skeleton Candidates,
+   complete private comparative Battles, compact user alternatives, collaborative or delegated
+   selection and hybridization, draft gating, Steering invalidation, and lightweight bypass.
+7. **Raven Workspace interface** — pure Markdown snapshot planning for initialization,
    adoption, normalization-backed ingest, Task contribution, maintenance, health, and
    lexical reuse, with conditional writes and a lifecycle separate from Task state.
-7. **Composition and browser artifact** — the Bundle patch composed through the
+8. **Composition and browser artifact** — the Bundle patch composed through the
    Harness's own composer, and the built browser bundle evaluated as the shell
    evaluates it.
 
@@ -44,6 +47,7 @@ agent topology.
 | Writing edited a line at a time | `tests/unit/prose.test.ts` covers sentence splitting for Latin and CJK, abbreviations, initials, decimals, inline code, link destinations, and every protected Markdown structure, plus idempotence. `tests/integration/drafting.test.ts` covers the stored bytes, the reflow report, Completion of either line shape, and the layout-change diagnosis. |
 | Multi-model drafting that cannot become evidence | `tests/integration/drafting.test.ts` asserts a Draft Variant never reaches the evidence floor: adopting variant wording verbatim still leaves a grounding-required Completion refused until a recorded Source excerpt supports it. It also covers route-subset selection, refusal of an unconfigured route, survival of a failed route, and bounded provenance that retains no variant text. |
 | Inspectable synthesis and defensible analysis | `tests/integration/synthesis.test.ts`, `tests/integration/plugin.test.ts`, and `tests/acceptance/raven.acceptance.test.ts` distinguish Source testimony, Insight Candidates, and promoted Raven inference; treat cross-round competition as undirected; retain and replay candidate lineage; expose bounded Candidate IDs through status/context and exact selected records through inspect; track Summary Debt per synthesis scope across unrelated summaries; reject deferred/rejected-to-accepted unlineaged analysis; and preserve deferred promoted lineage through recovery and multi-hop restoration. Existing General Writing and Learning scenarios still complete without a synthesis step. |
+| Intentional pre-writing argument architecture | `tests/integration/structure-studio.test.ts` and `tests/acceptance/raven.acceptance.test.ts` prove materially distinct frames and theses, one complete private battle per Candidate, compact rendering that omits tournament detail, collaborative user selection and hybridization, delegated Raven selection, Steering invalidation, replay-safe selected state, bounded always-on selection digest plus current-round/exact-selection status recall, delimiter-safe selected Skeleton injection into bounded drafting context, section-level external Claim/analysis Claim/Insight/counterargument/evidence-gap linkage, pre-selection draft refusal, post-reselection Checkpoint enforcement, history and selection headroom bounds, and direct `skip` completion for lightweight writing. Prompt assertions cover natural discussion, rejection, combination, redirection, delegation, and explicit skipping without an approval action. |
 
 ## Vitest inventory
 
@@ -87,6 +91,8 @@ agent topology.
 - `tests/unit/codec.test.ts`
   - complete JSON round-trip;
   - unknown-version and unknown-field rejection;
+  - schema-v1-v3 migration onto the schema-v4 compatibility path;
+  - early rejection of structurally bounded snapshots above the aggregate byte budget;
   - malformed nested-record rejection.
 - `tests/unit/prose.test.ts`
   - Latin and CJK sentence splitting, with CJK requiring no trailing whitespace;
@@ -156,6 +162,14 @@ agent topology.
   - a Prose Layout change named as the cause of a byte mismatch;
   - the layout disabled storing exactly what was submitted;
   - a fenced code block in an Artifact left untouched.
+- `tests/integration/structure-studio.test.ts`
+  - materially different frames and theses plus rejection of punctuation/case duplicates and lexical near-copies;
+  - complete per-Candidate battle validation and compact rendering that omits internal tournament categories;
+  - collaborative user hybridization with selected external Claim, analysis Claim, Insight, counterargument-specific lineage, and evidence-gap links;
+  - selected architecture replay through durable state, a delimiter-safe bounded context digest, current-round status recovery, and exact selected status recall;
+  - bounded Draft Variant context constrained by the selected thesis, reasoning flow, sections, evidence needs, and counterarguments;
+  - post-reselection Checkpoint enforcement, aggregate replay and exact-selection headroom bounds, and bounded Structure Round history;
+  - delegated Raven selection, Steering invalidation with stale-round recovery, pre-selection draft/verify/refine refusal, and lightweight `skip` Completion.
 - `tests/integration/synthesis.test.ts`
   - multi-Claim Insight Candidate derivation with assumptions, rationale, confidence, and reversal evidence;
   - cross-round one-way competition projected as an undirected alternative after earlier-Candidate promotion;
@@ -185,7 +199,8 @@ agent topology.
   - Learning;
   - end-to-end Source testimony → multi-Claim Insight Candidates → promoted analysis lineage;
   - competing causal interpretations, Summary Debt detection, and unsupported external-fact promotion refusal;
-  - prompt policy that reserves synthesis for substantial interpretive work rather than summaries, trivial writing, or ordinary teaching;
+  - evidence-linked Structure Studio Candidates, private battle, user hybridization, delegated Raven selection, Steering invalidation, pre-writing gating, and lightweight skip;
+  - prompt policy that reserves synthesis and Structure Studio for work that benefits rather than summaries, trivial writing, or ordinary teaching;
   - one grounded Claim/Source/citation contract exercised across exactly web, local, llm-wiki, and MCP origins;
   - Original Markdown preservation and converted Markdown provenance;
   - unreadable or unsupported local material becoming unavailable, a deferred Claim, and a retained Limitation;

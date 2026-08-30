@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
@@ -39,7 +40,7 @@ describe('Raven Task snapshot codec', () => {
   it('round-trips a complete current state through JSON', async () => {
     const state = await validState()
     const roundTrip: unknown = JSON.parse(JSON.stringify(state))
-    expect(decodeRavenTaskState(roundTrip)).toEqual({ ...state, schemaVersion: 3, sourcePolicy: {
+    expect(decodeRavenTaskState(roundTrip)).toEqual({ ...state, schemaVersion: 4, sourcePolicy: {
       allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
       includedMcpSources: [], excludedMcpSources: [],
     } })
@@ -260,7 +261,7 @@ describe('Raven Task snapshot codec', () => {
     for (const state of emitted) {
       const replayed: unknown = JSON.parse(JSON.stringify(state))
       // Not just "defined": the codec must return the SAME Task, not a shell.
-      expect(decodeRavenTaskState(replayed)).toEqual({ ...state, schemaVersion: 3, sourcePolicy: {
+      expect(decodeRavenTaskState(replayed)).toEqual({ ...state, schemaVersion: 4, sourcePolicy: {
         allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
         includedMcpSources: [], excludedMcpSources: [],
       }, sources: state.sources.map(source => ({
@@ -409,8 +410,15 @@ describe('Raven Task snapshot codec', () => {
     const decoded = decodeRavenTaskState(legacyV1)
     if (decoded === undefined) throw new Error('Expected literal schema-v1 fixture to migrate')
 
-    expect(RAVEN_SCHEMA_VERSION).toBe(3)
-    expect(decoded).toMatchObject({ schemaVersion: 3, insightCandidates: [], syntheses: [] })
+    expect(RAVEN_SCHEMA_VERSION).toBe(4)
+    expect(decoded).toMatchObject({
+      schemaVersion: 4,
+      insightCandidates: [],
+      syntheses: [],
+      structureMode: 'skip',
+      structureRounds: [],
+      selectedSkeleton: null,
+    })
     expect(decoded.sourcePolicy).toEqual({
       allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
       includedMcpSources: [], excludedMcpSources: [],
@@ -482,10 +490,13 @@ describe('Raven Task snapshot codec', () => {
     if (decoded === undefined) throw new Error('Expected literal schema-v2 fixture to migrate')
 
     expect(decoded).toMatchObject({
-      schemaVersion: 3,
+      schemaVersion: 4,
       claims: [{ sourceIds: [], legacySourceIds: ['S2'] }],
       insightCandidates: [],
       syntheses: [],
+      structureMode: 'skip',
+      structureRounds: [],
+      selectedSkeleton: null,
     })
     expect(decodeRavenTaskState(JSON.parse(JSON.stringify(decoded)) as unknown)).toEqual(decoded)
 
@@ -515,6 +526,81 @@ describe('Raven Task snapshot codec', () => {
       ...decoded,
       claims: [{ ...decoded.claims[0], legacySourceIds: ['S2', 'S2'] }],
     })).toBeUndefined()
+  })
+
+  it('migrates a schema-v3 Task onto the lightweight Structure Studio compatibility path', async () => {
+    const state = await validState()
+    const legacy = JSON.parse(JSON.stringify(state)) as Record<string, unknown>
+    legacy.schemaVersion = 3
+    delete legacy.structureMode
+    delete legacy.structureRounds
+    delete legacy.selectedSkeleton
+
+    const decoded = decodeRavenTaskState(legacy)
+    expect(decoded).toEqual({
+      ...state,
+      structureMode: 'skip',
+      structureRounds: [],
+      selectedSkeleton: null,
+    })
+  })
+
+  it('rejects a structurally bounded Structure Studio snapshot above the aggregate byte budget', async () => {
+    const state = await validState()
+    const largeSkeleton = (prefix: string) => ({
+      frame: `${prefix} frame explains a distinct operating mechanism.`,
+      thesis: `${prefix} thesis makes a distinct causal claim.`,
+      centralQuestion: `Which ${prefix} mechanism explains the observed outcome?`,
+      reasoningFlow: [`Establish ${prefix}.`, `Explain ${prefix}.`, `Test ${prefix}.`],
+      sections: Array.from({ length: 10 }, (_, sectionIndex) => ({
+        sectionId: `${prefix}-${sectionIndex}`,
+        title: `${prefix} section ${sectionIndex}`,
+        purpose: `Establish ${prefix} purpose ${sectionIndex}.`,
+        claimIds: ['C1'],
+        insightIds: [],
+        evidenceNeeds: Array.from(
+          { length: RAVEN_LIMITS.skeletonItems },
+          (_, itemIndex) => `${prefix}-${sectionIndex}-${itemIndex}-` + 'x'.repeat(3_500),
+        ),
+        counterarguments: [],
+      })),
+      unresolvedWeaknesses: [],
+      readerTakeaway: `${prefix} takeaway.`,
+    })
+    const candidates = ['alpha', 'omega'].map((prefix, index) => ({
+      candidateId: `SK${index + 1}`,
+      label: `${prefix} architecture`,
+      skeleton: largeSkeleton(prefix),
+    }))
+    const battle = candidates.map(candidate => ({
+      candidateId: candidate.candidateId,
+      explainsBetter: ['One advantage.'],
+      failsToExplain: ['One gap.'],
+      conventionalWisdom: ['One conventional element.'],
+      evidenceRequired: ['One evidence requirement.'],
+      assumptions: ['One assumption.'],
+      nonObviousInsights: ['One non-obvious insight.'],
+      mergeableElements: ['One mergeable element.'],
+    }))
+    const oversized = {
+      ...state,
+      revision: state.revision + 1,
+      structureMode: 'collaborative',
+      claims: [{
+        claimId: 'C1', text: 'A context premise.', kind: 'analysis', importance: 'context',
+        disposition: 'supported', sourceIds: [],
+      }],
+      structureRounds: [{
+        ordinal: 1,
+        steeringRevision: 0,
+        candidates,
+        battle,
+        recommendation: { kind: 'candidate', candidateIds: ['SK1'], rationale: 'Choose alpha.' },
+        createdAt: now(),
+      }],
+    }
+    expect(Buffer.byteLength(JSON.stringify(oversized), 'utf8')).toBeGreaterThan(RAVEN_LIMITS.stateBytes)
+    expect(decodeRavenTaskState(oversized)).toBeUndefined()
   })
 
   it('accepts local original Markdown and a non-web unavailable source with no representation', async () => {
@@ -566,7 +652,7 @@ describe('Raven Task snapshot codec', () => {
   it('keeps migration bounded to known older schemas', async () => {
     const state = await validState()
     expect(decodeRavenTaskState({ ...state, schemaVersion: 0 })).toBeUndefined()
-    expect(decodeRavenTaskState({ ...state, schemaVersion: 4 })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 5 })).toBeUndefined()
     expect(decodeRavenTaskState({ ...state, schemaVersion: 'one' })).toBeUndefined()
   })
   // rather than one unreadable snapshot.

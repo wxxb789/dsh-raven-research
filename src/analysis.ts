@@ -1,4 +1,5 @@
 import {
+  type RavenArgumentSkeleton,
   type RavenClaimRecord,
   type RavenInsightCandidate,
   type RavenInsightRecall,
@@ -9,6 +10,36 @@ import {
 
 export function acceptedAnalysisPremise(claim: RavenClaimRecord): boolean {
   return claim.disposition === 'supported' || claim.disposition === 'qualified'
+}
+
+/** Normalize prose for semantic-identity checks without changing punctuation. */
+export function semanticTextFold(value: string): string {
+  return value
+    .toLowerCase()
+    .replaceAll(/[^\p{L}\p{N}]+/gu, ' ')
+    .replaceAll(/\s+/g, ' ')
+    .trim()
+}
+
+/** Conservative lexical overlap guard for cosmetic rewrites of the same argument. */
+export function semanticTextSimilarity(left: string, right: string): number {
+  const leftTokens = new Set(semanticTextFold(left).split(' ').filter(Boolean))
+  const rightTokens = new Set(semanticTextFold(right).split(' ').filter(Boolean))
+  if (leftTokens.size < 4 || rightTokens.size < 4) return 0
+  let shared = 0
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) shared += 1
+  }
+  return shared / Math.min(leftTokens.size, rightTokens.size)
+}
+
+export function skeletonSemanticText(skeleton: RavenArgumentSkeleton): string {
+  return [
+    skeleton.frame,
+    skeleton.thesis,
+    skeleton.centralQuestion,
+    ...skeleton.reasoningFlow,
+  ].join(' ')
 }
 
 /** Build the symmetric competition relation while preserving durable Candidate order. */

@@ -1,6 +1,13 @@
+import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 
-import { analysisLineageCycle, propagateAnalysisPremiseDispositions } from './analysis.js'
+import {
+  analysisLineageCycle,
+  propagateAnalysisPremiseDispositions,
+  semanticTextFold,
+  semanticTextSimilarity,
+  skeletonSemanticText,
+} from './analysis.js'
 import { canonicalSourceUrl, sameSourceIdentity } from './url.js'
 import { PROSE_LAYOUTS } from './prose.js'
 import { sourceInspectionSha256 } from './source.js'
@@ -20,10 +27,14 @@ import {
   RAVEN_LIMITS,
   RAVEN_SCHEMA_VERSION,
   RAVEN_STAGES,
+  SKELETON_RECOMMENDATION_KINDS,
+  SKELETON_SELECTION_ACTORS,
   SOURCE_ORIGINS,
   SOURCE_ROLES,
+  STRUCTURE_MODES,
   SUMMARY_DEBT_LEVELS,
   SYNTHESIS_PURPOSES,
+  type RavenArgumentSkeleton,
   type RavenClaimRecord,
   type RavenInsightCandidate,
   type RavenSourceCheck,
@@ -85,6 +96,122 @@ function sameStrings(value: unknown, expected: readonly string[]): boolean {
   return Array.isArray(value)
     && value.length === expected.length
     && value.every((item, index) => item === expected[index])
+}
+
+function jsonWithinBudget(value: unknown, maximum: number): boolean {
+  const stack: unknown[] = [value]
+  let bytes = 0
+  const add = (count: number) => {
+    bytes += count
+    return bytes <= maximum
+  }
+  while (stack.length > 0) {
+    const item = stack.pop()
+    if (item === null || item === undefined || typeof item === 'function' || typeof item === 'symbol') {
+      if (!add(4)) return false
+      continue
+    }
+    if (typeof item === 'string') {
+      if (!add(Buffer.byteLength(JSON.stringify(item), 'utf8'))) return false
+      continue
+    }
+    if (typeof item === 'number' || typeof item === 'boolean' || typeof item === 'bigint') {
+      let encoded: string
+      try {
+        encoded = JSON.stringify(item) ?? 'null'
+      } catch {
+        return false
+      }
+      if (!add(Buffer.byteLength(encoded, 'utf8'))) return false
+      continue
+    }
+    if (typeof item !== 'object') return false
+    if (Array.isArray(item)) {
+      if (!add(2 + Math.max(0, item.length - 1))) return false
+      for (const child of item) stack.push(child)
+      continue
+    }
+    const entries = Object.entries(item)
+    if (!add(2 + Math.max(0, entries.length - 1))) return false
+    for (const [key, child] of entries) {
+      if (!add(Buffer.byteLength(JSON.stringify(key), 'utf8') + 1)) return false
+      stack.push(child)
+    }
+  }
+  return true
+}
+
+function validStructureTextList(value: unknown, allowEmpty = false): value is string[] {
+  return Array.isArray(value)
+    && value.length <= RAVEN_LIMITS.skeletonItems
+    && (allowEmpty || value.length > 0)
+    && uniqueStrings(value, item => item.length <= RAVEN_LIMITS.skeletonTextChars)
+}
+
+function validStructureIds(value: unknown, known: Pick<ReadonlySet<string>, 'has'>): value is string[] {
+  return Array.isArray(value)
+    && value.length <= RAVEN_LIMITS.skeletonItems
+    && uniqueStrings(value, id => STABLE_ID.test(id) && known.has(id))
+}
+
+function validArgumentSkeleton(
+  value: unknown,
+  claimIds: Pick<ReadonlySet<string>, 'has'>,
+  insightIds: Pick<ReadonlySet<string>, 'has'>,
+): boolean {
+  const skeleton = record(value)
+  if (skeleton === undefined
+    || !exactKeys(skeleton, [
+      'frame', 'thesis', 'centralQuestion', 'reasoningFlow', 'sections',
+      'unresolvedWeaknesses', 'readerTakeaway',
+    ])
+    || !string(skeleton.frame)
+    || skeleton.frame.length > RAVEN_LIMITS.skeletonTextChars
+    || !string(skeleton.thesis)
+    || skeleton.thesis.length > RAVEN_LIMITS.skeletonTextChars
+    || !string(skeleton.centralQuestion)
+    || skeleton.centralQuestion.length > RAVEN_LIMITS.skeletonTextChars
+    || !validStructureTextList(skeleton.reasoningFlow)
+    || !Array.isArray(skeleton.sections)
+    || skeleton.sections.length === 0
+    || skeleton.sections.length > RAVEN_LIMITS.skeletonSections
+    || !validStructureTextList(skeleton.unresolvedWeaknesses, true)
+    || !string(skeleton.readerTakeaway)
+    || skeleton.readerTakeaway.length > RAVEN_LIMITS.skeletonTextChars) return false
+  const sectionIds = new Set<string>()
+  let hasReasoningLink = false
+  for (const raw of skeleton.sections) {
+    const section = record(raw)
+    if (section === undefined
+      || !exactKeys(section, [
+        'sectionId', 'title', 'purpose', 'claimIds', 'insightIds', 'evidenceNeeds', 'counterarguments',
+      ])
+      || !string(section.sectionId)
+      || !STABLE_ID.test(section.sectionId)
+      || sectionIds.has(section.sectionId)
+      || !string(section.title)
+      || section.title.length > RAVEN_LIMITS.skeletonTextChars
+      || !string(section.purpose)
+      || section.purpose.length > RAVEN_LIMITS.skeletonTextChars
+      || !validStructureIds(section.claimIds, claimIds)
+      || !validStructureIds(section.insightIds, insightIds)
+      || !validStructureTextList(section.evidenceNeeds, true)
+      || !Array.isArray(section.counterarguments)
+      || section.counterarguments.length > RAVEN_LIMITS.skeletonItems) return false
+    sectionIds.add(section.sectionId)
+    hasReasoningLink ||= section.claimIds.length > 0 || section.insightIds.length > 0
+    for (const rawCounter of section.counterarguments) {
+      const counter = record(rawCounter)
+      if (counter === undefined
+        || !exactKeys(counter, ['text', 'claimIds', 'insightIds'])
+        || !string(counter.text)
+        || counter.text.length > RAVEN_LIMITS.skeletonTextChars
+        || !validStructureIds(counter.claimIds, claimIds)
+        || !validStructureIds(counter.insightIds, insightIds)) return false
+      hasReasoningLink ||= counter.claimIds.length > 0 || counter.insightIds.length > 0
+    }
+  }
+  return hasReasoningLink
 }
 
 function validUri(value: unknown, origin: string): value is string {
@@ -201,8 +328,9 @@ export { RAVEN_SCHEMA_VERSION } from './domain.js'
  * The decoder used to reject any `schemaVersion` but 1 outright, so the first
  * bump would have silently dropped every stored Task on replay — a data-loss
  * path with no code path to fix it in. The table carries the v1 web-to-v2 Source
- * fabric migration and isolates legacy v1/v2 analysis Source links during the
- * v2-to-v3 synthesis migration; future bumps add one entry per forward step.
+ * fabric migration, isolates legacy v1/v2 analysis Source links during the
+ * v2-to-v3 synthesis migration, and places v3 Tasks on the v4 lightweight
+ * Structure Studio compatibility path; future bumps add one entry per forward step.
  */
 const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<string, unknown> | undefined> = {
   1: state => {
@@ -237,6 +365,13 @@ const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<stri
     })
     return { ...state, schemaVersion: 3, claims, insightCandidates: [], syntheses: [] }
   },
+  3: state => ({
+    ...state,
+    schemaVersion: 4,
+    structureMode: 'skip',
+    structureRounds: [],
+    selectedSkeleton: null,
+  }),
 }
 
 function migrateToCurrent(state: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -264,10 +399,12 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   const raw = record(value)
   const state = raw === undefined ? undefined : migrateToCurrent(raw)
   if (state === undefined
+    || !jsonWithinBudget(state, RAVEN_LIMITS.stateBytes)
     || !exactKeys(state, [
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
       'revision', 'steeringRevision', 'steering', 'checkpoints', 'sources', 'claims',
-      'insightCandidates', 'syntheses', 'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
+      'insightCandidates', 'syntheses', 'structureMode', 'structureRounds', 'selectedSkeleton',
+      'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
       'sourcePolicy', 'startedAt', 'updatedAt',
     ])
     || state.schemaVersion !== RAVEN_SCHEMA_VERSION
@@ -278,6 +415,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     || state.request.length > RAVEN_LIMITS.requestChars
     || !member(state.grounding, GROUNDING_POLICIES)
     || !validPolicy(state.sourcePolicy)
+    || !member(state.structureMode, STRUCTURE_MODES)
     || !member(state.phase, PHASES)
     || !integer(state.revision, 1)
     || !integer(state.steeringRevision)
@@ -287,6 +425,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     || !Array.isArray(state.claims)
     || !Array.isArray(state.insightCandidates)
     || !Array.isArray(state.syntheses)
+    || !Array.isArray(state.structureRounds)
     || !Array.isArray(state.limitations)
     || state.steering.length > RAVEN_LIMITS.steeringRevisions
     || state.checkpoints.length > RAVEN_LIMITS.checkpoints
@@ -294,6 +433,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     || state.claims.length > RAVEN_LIMITS.claims
     || state.insightCandidates.length > RAVEN_LIMITS.insightCandidates
     || state.syntheses.length > RAVEN_LIMITS.synthesisRounds
+    || state.structureRounds.length > RAVEN_LIMITS.structureRounds
     || state.limitations.length > RAVEN_LIMITS.limitations
     || !(state.latestArtifact === null || (string(state.latestArtifact, false)
       && state.latestArtifact.length <= RAVEN_LIMITS.artifactChars))
@@ -305,12 +445,13 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   for (const [index, raw] of state.steering.entries()) {
     const item = record(raw)
     if (item === undefined
-      || !exactKeys(item, ['revision', 'correction', 'createdAt', 'sourcePolicy'])
+      || !exactKeys(item, ['revision', 'correction', 'createdAt', 'sourcePolicy', 'structureMode'])
       || item.revision !== index + 1
       || !string(item.correction)
       || item.correction.length > RAVEN_LIMITS.correctionChars
       || !timestamp(item.createdAt)
-      || (item.sourcePolicy !== undefined && !validPolicy(item.sourcePolicy))) return undefined
+      || (item.sourcePolicy !== undefined && !validPolicy(item.sourcePolicy))
+      || (item.structureMode !== undefined && !member(item.structureMode, STRUCTURE_MODES))) return undefined
   }
 
   // Checkpoint identity is NOT positional any more. Ordinals used to be
@@ -326,7 +467,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     if (item === undefined
       || !exactKeys(item, [
         'checkpointId', 'ordinal', 'stage', 'summary', 'artifactSha256', 'artifactChars',
-        'steeringRevision', 'createdAt', 'proseLayout',
+        'steeringRevision', 'selectedStructureRevision', 'createdAt', 'proseLayout',
       ])
       || !string(item.checkpointId)
       || !item.checkpointId.startsWith(`${state.taskId}-cp-`)
@@ -340,6 +481,8 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || !integer(item.artifactChars)
       || !integer(item.steeringRevision)
       || item.steeringRevision > state.steeringRevision
+      || (item.selectedStructureRevision !== undefined
+        && (!integer(item.selectedStructureRevision, 1) || item.selectedStructureRevision > state.revision))
       // Absent means the record predates Prose Layouts, which is `as-written`.
       || (item.proseLayout !== undefined && !member(item.proseLayout, PROSE_LAYOUTS))
       || !timestamp(item.createdAt)) return undefined
@@ -602,6 +745,123 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     previousSynthesisOrdinal = item.ordinal as number
   }
 
+  let previousStructureOrdinal = 0
+  let latestStructureCandidates = new Map<string, Record<string, unknown>>()
+  let latestStructureSteeringRevision: number | undefined
+  for (const raw of state.structureRounds) {
+    const item = record(raw)
+    if (item === undefined
+      || !exactKeys(item, [
+        'ordinal', 'steeringRevision', 'candidates', 'battle', 'recommendation', 'createdAt',
+      ])
+      || !integer(item.ordinal, previousStructureOrdinal + 1)
+      || !integer(item.steeringRevision)
+      || item.steeringRevision > state.steeringRevision
+      || !Array.isArray(item.candidates)
+      || item.candidates.length < 2
+      || item.candidates.length > RAVEN_LIMITS.skeletonCandidates
+      || !Array.isArray(item.battle)
+      || item.battle.length !== item.candidates.length
+      || !timestamp(item.createdAt)) return undefined
+    const candidates = new Map<string, Record<string, unknown>>()
+    const frames = new Set<string>()
+    const theses = new Set<string>()
+    for (const rawCandidate of item.candidates) {
+      const candidate = record(rawCandidate)
+      const skeleton = record(candidate?.skeleton)
+      if (candidate === undefined
+        || skeleton === undefined
+        || !exactKeys(candidate, ['candidateId', 'label', 'skeleton'])
+        || !string(candidate.candidateId)
+        || !STABLE_ID.test(candidate.candidateId)
+        || candidates.has(candidate.candidateId)
+        || !string(candidate.label)
+        || candidate.label.length > RAVEN_LIMITS.skeletonTextChars
+        || !validArgumentSkeleton(candidate.skeleton, claimIds, insightById)) return undefined
+      const frame = semanticTextFold(skeleton.frame as string)
+      const thesis = semanticTextFold(skeleton.thesis as string)
+      if (frames.has(frame) || theses.has(thesis)) return undefined
+      frames.add(frame)
+      theses.add(thesis)
+      candidates.set(candidate.candidateId, candidate)
+    }
+    const candidateList = [...candidates.values()]
+    for (const [index, candidate] of candidateList.entries()) {
+      for (const other of candidateList.slice(index + 1)) {
+        if (semanticTextSimilarity(
+          skeletonSemanticText(candidate.skeleton as unknown as RavenArgumentSkeleton),
+          skeletonSemanticText(other.skeleton as unknown as RavenArgumentSkeleton),
+        ) >= 0.85) return undefined
+      }
+    }
+    const battled = new Set<string>()
+    for (const rawBattle of item.battle) {
+      const entry = record(rawBattle)
+      if (entry === undefined
+        || !exactKeys(entry, [
+          'candidateId', 'explainsBetter', 'failsToExplain', 'conventionalWisdom', 'evidenceRequired',
+          'assumptions', 'nonObviousInsights', 'mergeableElements',
+        ])
+        || !string(entry.candidateId)
+        || !candidates.has(entry.candidateId)
+        || battled.has(entry.candidateId)
+        || !validStructureTextList(entry.explainsBetter)
+        || !validStructureTextList(entry.failsToExplain)
+        || !validStructureTextList(entry.conventionalWisdom)
+        || !validStructureTextList(entry.evidenceRequired)
+        || !validStructureTextList(entry.assumptions)
+        || !validStructureTextList(entry.nonObviousInsights)
+        || !validStructureTextList(entry.mergeableElements)) return undefined
+      battled.add(entry.candidateId)
+    }
+    const recommendation = record(item.recommendation)
+    if (recommendation === undefined
+      || !exactKeys(recommendation, ['kind', 'candidateIds', 'rationale'])
+      || !member(recommendation.kind, SKELETON_RECOMMENDATION_KINDS)
+      || !Array.isArray(recommendation.candidateIds)
+      || recommendation.candidateIds.length === 0
+      || recommendation.candidateIds.length > RAVEN_LIMITS.skeletonCandidates
+      || !uniqueStrings(recommendation.candidateIds, id => STABLE_ID.test(id) && candidates.has(id))
+      || (recommendation.kind === 'candidate' && recommendation.candidateIds.length !== 1)
+      || !string(recommendation.rationale)
+      || recommendation.rationale.length > RAVEN_LIMITS.skeletonTextChars) return undefined
+    previousStructureOrdinal = item.ordinal as number
+    latestStructureCandidates = candidates
+    latestStructureSteeringRevision = item.steeringRevision as number
+  }
+
+  if (state.selectedSkeleton !== null) {
+    const selected = record(state.selectedSkeleton)
+    if (selected === undefined
+      || state.structureMode === 'skip'
+      || latestStructureCandidates.size === 0
+      || latestStructureSteeringRevision !== state.steeringRevision
+      || !exactKeys(selected, [
+        'kind', 'chosenBy', 'candidateIds', 'skeleton', 'rationale', 'selectedAtRevision',
+        'steeringRevision', 'selectedAt',
+      ])
+      || !member(selected.kind, SKELETON_RECOMMENDATION_KINDS)
+      || !member(selected.chosenBy, SKELETON_SELECTION_ACTORS)
+      || (state.structureMode === 'collaborative' && selected.chosenBy !== 'user')
+      || (state.structureMode === 'autonomous' && selected.chosenBy !== 'raven')
+      || !Array.isArray(selected.candidateIds)
+      || selected.candidateIds.length === 0
+      || selected.candidateIds.length > RAVEN_LIMITS.skeletonCandidates
+      || !uniqueStrings(selected.candidateIds, id => STABLE_ID.test(id) && latestStructureCandidates.has(id))
+      || (selected.kind === 'candidate' && selected.candidateIds.length !== 1)
+      || !validArgumentSkeleton(selected.skeleton, claimIds, insightById)
+      || !string(selected.rationale)
+      || selected.rationale.length > RAVEN_LIMITS.skeletonTextChars
+      || !integer(selected.selectedAtRevision, 1)
+      || selected.selectedAtRevision > state.revision
+      || selected.steeringRevision !== state.steeringRevision
+      || !timestamp(selected.selectedAt)) return undefined
+    if (selected.kind === 'candidate') {
+      const candidate = latestStructureCandidates.get((selected.candidateIds as string[])[0] as string)
+      if (candidate === undefined || JSON.stringify(candidate.skeleton) !== JSON.stringify(selected.skeleton)) return undefined
+    }
+  }
+
   // Limitation identity is NOT positional either. Requiring
   // `${kind}-${index + 1}` made a legally constructed ordering undecodable the
   // moment two kinds interleaved, which dropped the whole Task on replay. Unique
@@ -656,6 +916,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   const completed = state.phase === 'completed' || state.phase === 'completed-with-limits'
   if (completed && repairedAnyClaim) return undefined
   if (completed) {
+    if (state.structureMode !== 'skip' && state.selectedSkeleton === null) return undefined
     const verification = record(state.verification)
     if (state.finalArtifactSha256 === null
       || verification === undefined
@@ -664,6 +925,8 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       || verification.artifactSha256 !== state.finalArtifactSha256) return undefined
     const latest = record(state.checkpoints.at(-1))
     if (latest?.steeringRevision !== state.steeringRevision) return undefined
+    const selected = record(state.selectedSkeleton)
+    if (selected !== undefined && latest?.selectedStructureRevision !== selected.selectedAtRevision) return undefined
   } else if (state.finalArtifactSha256 !== null) return undefined
 
   return (repairedAnyClaim
