@@ -34,12 +34,13 @@ const comparisonJson = (recommendation: 'proceed' | 'research' | 'synthesis' | '
 })
 
 const synthesisJson = JSON.stringify({
-  text: 'The mechanism holds, while the counterargument defines its boundary.',
+  text: 'Alpha explains the mechanism, while Beta handles the counterargument.',
   contributions: [{
-    route: 'alpha/writer', strength: 'causal mechanism', candidateExcerpt: 'mechanism', synthesisExcerpt: 'mechanism',
+    route: 'alpha/writer', strength: 'causal mechanism',
+    candidateExcerpt: 'explains the mechanism', synthesisExcerpt: 'explains the mechanism',
   }, {
     route: 'beta/critic', strength: 'counterargument boundary',
-    candidateExcerpt: 'counterargument', synthesisExcerpt: 'counterargument',
+    candidateExcerpt: 'handles the counterargument', synthesisExcerpt: 'handles the counterargument',
   }],
 })
 
@@ -66,13 +67,14 @@ describe('multi-model draft generator', () => {
     expect(result.comparison?.criteria.map(item => item.criterion)).toEqual(DRAFT_CRITERIA)
     expect(result.comparison?.recommendation).toBe('proceed')
     expect(result.synthesis).toMatchObject({
-      text: 'The mechanism holds, while the counterargument defines its boundary.',
+      text: 'Alpha explains the mechanism, while Beta handles the counterargument.',
       variantRoutes: [alpha, beta],
       contributions: [{
-        route: alpha, strength: 'causal mechanism', candidateExcerpt: 'mechanism', synthesisExcerpt: 'mechanism',
+        route: alpha, strength: 'causal mechanism',
+        candidateExcerpt: 'explains the mechanism', synthesisExcerpt: 'explains the mechanism',
       }, {
         route: beta, strength: 'counterargument boundary',
-        candidateExcerpt: 'counterargument', synthesisExcerpt: 'counterargument',
+        candidateExcerpt: 'handles the counterargument', synthesisExcerpt: 'handles the counterargument',
       }],
     })
 
@@ -115,7 +117,9 @@ describe('multi-model draft generator', () => {
     const calls: DraftModelCall[] = []
     const caller: DraftModelCaller = async (call) => {
       calls.push(call)
-      if (call.stage === 'candidate') return { text: `${call.route.provider} candidate with ${call.route.provider === 'alpha' ? 'mechanism' : 'boundary'}.` }
+      if (call.stage === 'candidate') {
+        return { text: call.route.provider === 'alpha' ? 'The mechanism explains timing.' : 'The boundary limits scope.' }
+      }
       if (call.stage === 'critique') {
         if (call.route.provider === 'beta') throw new Error('critique timeout')
         return { text: comparisonJson() }
@@ -123,11 +127,13 @@ describe('multi-model draft generator', () => {
       if (call.route.provider === 'beta') throw new Error('synthesis timeout')
       return {
         text: JSON.stringify({
-          text: 'The mechanism defines the boundary.',
+          text: 'The mechanism explains timing, while the boundary limits scope.',
           contributions: [{
-            route: 'alpha/writer', strength: 'mechanism', candidateExcerpt: 'mechanism', synthesisExcerpt: 'mechanism',
+            route: 'alpha/writer', strength: 'mechanism',
+            candidateExcerpt: 'mechanism explains timing', synthesisExcerpt: 'mechanism explains timing',
           }, {
-            route: 'beta/critic', strength: 'boundary', candidateExcerpt: 'boundary', synthesisExcerpt: 'boundary',
+            route: 'beta/critic', strength: 'boundary',
+            candidateExcerpt: 'boundary limits scope', synthesisExcerpt: 'boundary limits scope',
           }],
         }),
       }

@@ -476,7 +476,7 @@ export interface RavenDraftComparison {
 export interface RavenDraftContribution {
   readonly route: RavenDraftRoute
   readonly strength: string
-  /** Exact fragment retained from this route's candidate. */
+  /** Route-specific fragment of at least two substantive words retained from this candidate. */
   readonly candidateExcerpt: string
   /** Exact fragment in the synthesized prose where that strength appears. */
   readonly synthesisExcerpt: string
@@ -535,6 +535,14 @@ export interface RavenDraftRound {
   readonly synthesizedFromRoutes?: readonly RavenDraftRoute[]
 }
 
+export interface RavenDraftRecovery {
+  readonly draftOrdinal: number
+  readonly recommendation: Exclude<RavenDraftRecommendation, 'proceed'>
+  readonly sectionId?: string
+  readonly requiredAtRevision: number
+  readonly recoveredAtRevision?: number
+}
+
 export interface RavenDraftRouteOutcome {
   readonly provider: string
   readonly model: string
@@ -578,6 +586,7 @@ export interface RavenTaskState {
   readonly latestArtifact: string | null
   /** Draft comparison rounds, oldest first. Absent on a record written before Draft Variants existed. */
   readonly drafts?: readonly RavenDraftRound[]
+  readonly draftRecovery: RavenDraftRecovery | null
   readonly verification: RavenVerificationReceipt | null
   readonly finalArtifactSha256: string | null
   readonly startedAt: string

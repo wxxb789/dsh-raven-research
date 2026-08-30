@@ -607,12 +607,13 @@ describe('Raven Structure Studio', () => {
               route,
               variantRoutes: routes,
               contributions: [{
-                route, strength: 'causal mechanism', candidateExcerpt: 'mechanism', synthesisExcerpt: 'mechanism',
+                route, strength: 'causal mechanism',
+                candidateExcerpt: 'causal mechanism', synthesisExcerpt: 'causal mechanism',
               }, {
                 route: criticRoute, strength: 'counterargument boundary',
-                candidateExcerpt: 'counterargument', synthesisExcerpt: 'counterargument',
+                candidateExcerpt: 'against the counterargument', synthesisExcerpt: 'against the counterargument',
               }],
-              text: 'Visible incentives explain the mechanism. The counterargument defines its boundary.',
+              text: 'Visible incentives expose the causal mechanism. The test against the counterargument defines its boundary.',
             },
           }
         },
@@ -645,7 +646,7 @@ describe('Raven Structure Studio', () => {
     expect(requests[0]?.context).toContain('Observed incentives reward visible short-term activity.')
     expect(requests[0]?.context).toContain(insightText)
     expect(requests[0]?.context).toContain('Structure evidence')
-    expect(drafted.variants?.synthesis?.text).toBe('Visible incentives explain the mechanism.\nThe counterargument defines its boundary.')
+    expect(drafted.variants?.synthesis?.text).toBe('Visible incentives expose the causal mechanism.\nThe test against the counterargument defines its boundary.')
     expect(renderTaskValue(drafted)).toContain('Synthesized Draft (candidate wording, not evidence)')
     expect(drafted.state.sources).toEqual(selected.state.sources)
     expect(drafted.state.claims).toEqual(selected.state.claims)
@@ -661,7 +662,7 @@ describe('Raven Structure Studio', () => {
       synthesisRoute: route,
       synthesizedFromRoutes: routes,
     })
-    expect(JSON.stringify(drafted.state.drafts)).not.toContain('Visible incentives explain')
+    expect(JSON.stringify(drafted.state.drafts)).not.toContain('Visible incentives expose')
     expect(decodeRavenTaskState(JSON.parse(JSON.stringify(drafted.state)))).toEqual(drafted.state)
 
     const checkpoint = await raven.dispatch(drafted.state, {
@@ -742,7 +743,10 @@ describe('Raven Structure Studio', () => {
       action: 'status', taskId: state.taskId,
     }, { sessionId: 'structure-draft-recovery', signal })
     expect(recalled.issues.join(' ')).toContain('run Structure Studio again')
-    expect(await activeContext(replayed)).toContain('then run action=draft again before publishing prose')
+    expect(await activeContext(replayed)).toContain('run Structure Studio again')
+    await expect(raven.dispatch(rejected.state, {
+      action: 'draft', taskId: state.taskId, sectionId: 'mechanism', instruction: 'Retry without recovery.',
+    }, { sessionId: 'structure-draft-recovery', signal })).rejects.toThrow(/run Structure Studio again/)
     await expect(raven.dispatch(rejected.state, {
       action: 'checkpoint', taskId: state.taskId, stage: 'draft', summary: 'Ignored the gap.', artifact: state.latestArtifact,
     }, { sessionId: 'structure-draft-recovery', signal })).rejects.toThrow(/Draft round .* architecture defect/)
@@ -759,6 +763,9 @@ describe('Raven Structure Studio', () => {
       action: 'select-structure', taskId: state.taskId, chosenBy: 'raven',
       candidateIds: ['SK1'], rationale: 'Select the revised architecture.',
     }, { sessionId: 'structure-draft-recovery', signal })
+    expect((await raven.dispatch(reselected.state, {
+      action: 'status', taskId: state.taskId,
+    }, { sessionId: 'structure-draft-recovery', signal })).issues.join(' ')).toContain('recovery for section mechanism succeeded')
     const redrafted = await raven.dispatch(reselected.state, {
       action: 'draft', taskId: state.taskId, sectionId: 'mechanism', instruction: 'Draft the revised mechanism.',
     }, { sessionId: 'structure-draft-recovery', signal })

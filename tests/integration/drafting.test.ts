@@ -69,11 +69,13 @@ function comparisonJsonForAdapter(): string {
 
 function synthesisJsonForAdapter(): string {
   return JSON.stringify({
-    text: 'The synthesized section combines mechanism and boundary.',
+    text: 'Alpha supplies the mechanism, while Beta supplies the boundary.',
     contributions: [{
-      route: 'alpha/writer', strength: 'mechanism', candidateExcerpt: 'mechanism', synthesisExcerpt: 'mechanism',
+      route: 'alpha/writer', strength: 'mechanism',
+      candidateExcerpt: 'supplies the mechanism', synthesisExcerpt: 'supplies the mechanism',
     }, {
-      route: 'beta/critic', strength: 'boundary', candidateExcerpt: 'boundary', synthesisExcerpt: 'boundary',
+      route: 'beta/critic', strength: 'boundary',
+      candidateExcerpt: 'supplies the boundary', synthesisExcerpt: 'supplies the boundary',
     }],
   })
 }
@@ -177,7 +179,7 @@ describe('Draft Variants', () => {
     expect(modelRequests.map(request => `${request.provider}/${request.model}`)).toEqual([
       'alpha/writer', 'beta/critic', 'beta/critic', 'alpha/writer',
     ])
-    expect(drafted.variants?.synthesis?.text).toBe('The synthesized section combines mechanism and boundary.')
+    expect(drafted.variants?.synthesis?.text).toBe('Alpha supplies the mechanism, while Beta supplies the boundary.')
   })
 
   it('times out a stalled llm stream even when the iterator never yields', async () => {
@@ -416,7 +418,7 @@ describe('Draft Variants', () => {
     await expect(engine.dispatch(rejected.state, {
       action: 'checkpoint', taskId: started.state.taskId, stage: 'draft',
       summary: 'Premature prose.', artifact: 'The unresolved draft.',
-    }, { sessionId: `session-draft-${recommendation}`, signal })).rejects.toThrow(/then run action=draft again/)
+    }, { sessionId: `session-draft-${recommendation}`, signal })).rejects.toThrow(/before drafting again/)
   })
 
   it('records bounded route provenance without retaining the variant text, and survives replay', async () => {

@@ -601,13 +601,14 @@ Raven sends all successful candidates through an adversarial comparison of argum
 originality, logical progression, clarity and compression, counterargument handling, reader value and surprise, and
 whether the prose performs reasoning rather than merely restating material. Only a `proceed` comparison triggers prose
 synthesis. The synthesizer must return structured contributions from at least two distinct candidates, each carrying
-a distinct exact fragment retained in the final prose; a winner-copy or malformed result is rejected and another successful route is tried. Required Skeleton/section lineage
+a route-specific exact fragment of at least two substantive words into the final prose. A winner-copy or malformed
+result is rejected and another successful route is tried. Required Skeleton/section lineage
 is retained intact through both refinement stages, while candidate material is fairly bounded around it. Candidates and
 synthesized prose use the Task's Prose Layout, and truncation stays visible to later stages and the main agent.
 
 A comparison can instead recommend `research`, `synthesis`, or `structure`. Raven returns `needs-revision`, persists the
-obligation through replay/status/context, and blocks prose Checkpoints and Completion until the matching recovery is
-followed by another draft round. These are autonomous recovery paths, not per-section approval gates. The structural
+obligation through replay/status/context, rejects another draft before the matching recovery succeeds, and blocks prose
+Checkpoints and Completion until that recovery is followed by another draft round. These are autonomous recovery paths, not per-section approval gates. The structural
 path still preserves the user's one high-leverage architecture collaboration when it materially changes the argument.
 
 Every Draft Variant, criterion assessment, and synthesized sentence is a **candidate**, exactly as a Lead is. None

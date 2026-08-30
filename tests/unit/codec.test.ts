@@ -555,6 +555,7 @@ describe('Raven Task snapshot codec', () => {
       routes: [{ provider: 'alpha', model: 'writer', status: 'drafted', chars: 21 }],
     }
     legacy.schemaVersion = 4
+    delete legacy.draftRecovery
     legacy.drafts = [legacyDraft]
 
     const decoded = decodeRavenTaskState(legacy)

@@ -59,6 +59,7 @@ import {
   RavenTypeError,
   type RavenDispatchResult,
   type RavenDraftPath,
+  type RavenDraftRecovery,
   type RavenDraftRoute,
   type RavenDraftRound,
   type RavenExecution,
@@ -1079,22 +1080,34 @@ function structureRecoveryIssues(state: RavenTaskState): string[] {
     : ['The latest Structure Studio round predates the current Steering Revision; generate and battle new Skeleton Candidates.']
 }
 
-export function outstandingDraftRecovery(state: RavenTaskState): RavenDraftRound | undefined {
-  const latest = state.drafts?.at(-1)
-  return latest?.recommendation !== undefined && latest.recommendation !== 'proceed' ? latest : undefined
+export function outstandingDraftRecovery(state: RavenTaskState): RavenDraftRecovery | undefined {
+  return state.draftRecovery ?? undefined
+}
+
+function markDraftRecovery(
+  state: RavenTaskState,
+  recommendation: RavenDraftRecovery['recommendation'],
+  recoveredAtRevision: number,
+): RavenDraftRecovery | null {
+  return state.draftRecovery?.recommendation === recommendation
+    ? { ...state.draftRecovery, recoveredAtRevision }
+    : state.draftRecovery
 }
 
 export function draftRecoveryIssues(state: RavenTaskState): string[] {
   const recovery = outstandingDraftRecovery(state)
   if (recovery === undefined) return []
   const section = recovery.sectionId === undefined ? 'the current bounded unit' : `section ${recovery.sectionId}`
+  if (recovery.recoveredAtRevision !== undefined) {
+    return [`Draft round ${recovery.draftOrdinal} recovery for ${section} succeeded at Task revision ${recovery.recoveredAtRevision}; run action=draft again before publishing prose.`]
+  }
   if (recovery.recommendation === 'research') {
-    return [`Draft round ${recovery.ordinal} found a material evidence gap in ${section}; return to inspection or discovery, record verified Sources and Claims, then run action=draft again before publishing prose.`]
+    return [`Draft round ${recovery.draftOrdinal} found a material evidence gap in ${section}; return to inspection or discovery and record a successful read/analyze Checkpoint with new Source or Claim contributions before drafting again.`]
   }
   if (recovery.recommendation === 'synthesis') {
-    return [`Draft round ${recovery.ordinal} found unresolved reasoning or contradiction in ${section}; run action=synthesize on the relevant Claims, then run action=draft again before publishing prose.`]
+    return [`Draft round ${recovery.draftOrdinal} found unresolved reasoning or contradiction in ${section}; run action=synthesize on the relevant Claims before drafting again.`]
   }
-  return [`Draft round ${recovery.ordinal} found a thesis or architecture defect in ${section}; run Structure Studio again, select a current architecture, then run action=draft again before publishing prose.`]
+  return [`Draft round ${recovery.draftOrdinal} found a thesis or architecture defect in ${section}; run Structure Studio again and select a current architecture before drafting again.`]
 }
 
 function summaryDebtIssues(state: RavenTaskState): string[] {
@@ -2324,6 +2337,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           selectedSkeleton: null,
           limitations: [],
           latestArtifact: null,
+          draftRecovery: null,
           verification: null,
           finalArtifactSha256: null,
           startedAt: at,
@@ -2529,10 +2543,12 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
             `Raven Task may retain at most ${RAVEN_LIMITS.synthesisRounds} synthesis rounds without discarding outstanding per-scope summary debt`,
           )
         }
+        const revision = state.revision + 1
         const next: RavenTaskState = {
           ...state,
-          revision: state.revision + 1,
+          revision,
           insightCandidates: parsed.all,
+          draftRecovery: markDraftRecovery(state, 'synthesis', revision),
           syntheses,
           verification: null,
           finalArtifactSha256: null,
@@ -2658,6 +2674,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           ...state,
           revision: selectedAtRevision,
           selectedSkeleton: selection,
+          draftRecovery: markDraftRecovery(state, 'structure', selectedAtRevision),
           verification: null,
           finalArtifactSha256: null,
           updatedAt: at,
@@ -2677,6 +2694,10 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const state = requireActiveTask(previous, args.taskId)
         const structureIssue = selectedStructureIssue(state)
         if (structureIssue !== undefined) throw new RavenError('task-phase', structureIssue)
+        const pendingRecovery = outstandingDraftRecovery(state)
+        if (pendingRecovery !== undefined && pendingRecovery.recoveredAtRevision === undefined) {
+          throw new RavenError('task-phase', draftRecoveryIssues(state)[0] as string)
+        }
         const layout = options.proseLayout?.() ?? DEFAULT_PROSE_LAYOUT
         const limits = options.draftLimits?.() ?? DEFAULT_DRAFT_LIMITS
         const instruction = boundedText(args.instruction, 'instruction', RAVEN_LIMITS.draftInstructionChars)
@@ -2796,7 +2817,23 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         })
         // A comparison round changes the Task's provenance but publishes nothing;
         // the Artifact, the evidence, and the Checkpoint list are all untouched.
-        const next: RavenTaskState = { ...state, drafts: rounds, revision: state.revision + 1, updatedAt: at }
+        const round = rounds.at(-1) as RavenDraftRound
+        const draftRecovery: RavenDraftRecovery | null = laid.comparison?.recommendation !== undefined
+          && laid.comparison.recommendation !== 'proceed'
+          ? {
+              draftOrdinal: round.ordinal,
+              recommendation: laid.comparison.recommendation,
+              ...(section === undefined ? {} : { sectionId: section.sectionId }),
+              requiredAtRevision: state.revision + 1,
+            }
+          : null
+        const next: RavenTaskState = {
+          ...state,
+          drafts: rounds,
+          draftRecovery,
+          revision: state.revision + 1,
+          updatedAt: at,
+        }
         const drafted = laid.variants.filter(variant => variant.status === 'drafted').length
         // A round where EVERY route failed is a failed round, not a comparison of
         // nothing. Reporting it as an empty success would hide the fallback path.
@@ -2991,6 +3028,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           sourcePolicy,
           structureMode,
           selectedSkeleton: null,
+          draftRecovery: null,
           sources,
           claims: propagated.claims,
           limitations: propagated.limitations,
@@ -3079,6 +3117,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         const sources = verified.sources
         const propagated = propagateSourceChecks(claims, limitations, sources, at)
         const revision = state.revision + 1
+        const recordsResearchRecovery = (stage === 'read' || stage === 'analyze')
+          && ((Array.isArray(args.sources) && args.sources.length > 0)
+            || (Array.isArray(args.claims) && args.claims.length > 0))
         const admitted = admitCheckpoint(state, {
           checkpointId: checkpointId(state.taskId, revision),
           ordinal: nextCheckpointOrdinal(state.checkpoints),
@@ -3103,6 +3144,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           claims: propagated.claims,
           limitations: propagated.limitations,
           latestArtifact: artifact,
+          draftRecovery: recordsResearchRecovery
+            ? markDraftRecovery(state, 'research', revision)
+            : state.draftRecovery,
           verification: null,
           finalArtifactSha256: null,
           updatedAt: at,

@@ -172,9 +172,9 @@ registry.
   With at least two successes, a second stage adversarially compares reasoning and expression
   across eight fixed criteria; only `proceed` permits a third-stage synthesis whose structured
   response must identify strengths from at least two distinct successful routes and retain a
-  distinct exact fragment from each candidate in the final prose. `research |
-  synthesis | structure` returns `needs-revision`, survives replay/status/context, and blocks
-  prose publication until recovery plus a later draft. Fewer successes degrade explicitly to
+  route-specific exact fragment of at least two substantive words from each candidate in the final
+  prose. `research | synthesis | structure` returns `needs-revision`, survives replay/status/context,
+  rejects premature re-drafting, and blocks prose publication until matching recovery plus a later draft. Fewer successes degrade explicitly to
   single-model or main-agent drafting. Variants, comparison, and
   synthesis are all candidate material: they never reach a Claim, citation, or evidence
   floor. The deployment owns the complete route universe because every stage names spend

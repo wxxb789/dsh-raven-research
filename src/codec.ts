@@ -396,7 +396,7 @@ const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<stri
     schemaVersion: 4,
     ...v3ToV4CompatibilityFields(),
   }),
-  4: state => ({ ...state, schemaVersion: 5 }),
+  4: state => ({ ...state, schemaVersion: 5, draftRecovery: null }),
 }
 
 function migrateToCurrent(state: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -435,7 +435,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
       'revision', 'steeringRevision', 'steering', 'checkpoints', 'sources', 'claims',
       'insightCandidates', 'syntheses', 'structureMode', 'structureRounds', 'selectedSkeleton',
-      'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
+      'limitations', 'latestArtifact', 'drafts', 'draftRecovery', 'verification', 'finalArtifactSha256',
       'sourcePolicy', 'startedAt', 'updatedAt',
     ])
     || state.schemaVersion !== RAVEN_SCHEMA_VERSION
@@ -604,6 +604,29 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
         if (!draftedRouteKeys.has(`${synthesisRoute.provider}\n${synthesisRoute.model}`)) return undefined
       }
     }
+  }
+
+  if (state.draftRecovery !== null) {
+    const recovery = record(state.draftRecovery)
+    if (recovery === undefined
+      || !exactKeys(recovery, [
+        'draftOrdinal', 'recommendation', 'sectionId', 'requiredAtRevision', 'recoveredAtRevision',
+      ])
+      || !integer(recovery.draftOrdinal, 1)
+      || !member(recovery.recommendation, DRAFT_RECOMMENDATIONS)
+      || recovery.recommendation === 'proceed'
+      || (recovery.sectionId !== undefined && (!string(recovery.sectionId) || !STABLE_ID.test(recovery.sectionId)))
+      || !integer(recovery.requiredAtRevision, 1)
+      || recovery.requiredAtRevision > state.revision
+      || (recovery.recoveredAtRevision !== undefined
+        && (!integer(recovery.recoveredAtRevision, recovery.requiredAtRevision)
+          || recovery.recoveredAtRevision > state.revision))) return undefined
+    const sourceRound = Array.isArray(state.drafts)
+      ? state.drafts.map(record).find(round => round?.ordinal === recovery.draftOrdinal)
+      : undefined
+    if (sourceRound === undefined
+      || sourceRound.recommendation !== recovery.recommendation
+      || sourceRound.sectionId !== recovery.sectionId) return undefined
   }
 
   const sourceIds = new Set<string>()
