@@ -394,6 +394,9 @@ describe('Raven end-to-end acceptance', () => {
     expect(prompt).toContain('conditional <raven_structure_studio> instructions')
     expect(prompt).not.toContain('Battle the Candidates before involving the user')
     expect(prompt).toContain('Do not force action=synthesize onto trivial writing')
+    expect(prompt).toContain('one selected section at a time')
+    expect(prompt).toContain('conditional <raven_drafting> instructions')
+    expect(prompt).toContain('candidate material, never evidence or corroboration')
   })
 
   it('selects or hybridizes evidence-linked argument architectures before prose while preserving autonomous and skip paths', async () => {

@@ -8,7 +8,8 @@ import {
   type RavenDraftLimits,
   renderVariants,
 } from '../../src/engine.js'
-import { RAVEN_LIMITS } from '../../src/domain.js'
+import { DRAFT_CRITERIA, RAVEN_LIMITS } from '../../src/domain.js'
+import { apply } from '../../src/plugin.js'
 import type {
   DraftGenerator,
   DraftRequest,
@@ -47,10 +48,34 @@ function recordingDrafter(
     generator: {
       generate: async (request) => {
         requests.push(request)
-        return { variants: request.routes.map(route => ({ route, ...reply(route) })) }
+        const variants = request.routes.map(route => ({ route, ...reply(route) }))
+        const drafted = variants.filter(variant => variant.status === 'drafted').length
+        return {
+          path: drafted >= 2 ? 'multi-model' : drafted === 1 ? 'single-model' : 'main-agent',
+          variants,
+        }
       },
     },
   }
+}
+
+function comparisonJsonForAdapter(): string {
+  return JSON.stringify({
+    recommendation: 'proceed',
+    reason: 'The candidates contain complementary strengths.',
+    criteria: Object.fromEntries(DRAFT_CRITERIA.map(criterion => [criterion, `${criterion} compared.`])),
+  })
+}
+
+function synthesisJsonForAdapter(): string {
+  return JSON.stringify({
+    text: 'The synthesized section combines mechanism and boundary.',
+    contributions: [{
+      route: 'alpha/writer', strength: 'mechanism', candidateExcerpt: 'mechanism', synthesisExcerpt: 'mechanism',
+    }, {
+      route: 'beta/critic', strength: 'boundary', candidateExcerpt: 'boundary', synthesisExcerpt: 'boundary',
+    }],
+  })
 }
 
 function harness(options: {
@@ -91,6 +116,114 @@ describe('draft route parsing', () => {
 })
 
 describe('Draft Variants', () => {
+  it('runs the full candidate, critique, and synthesis chain through the Harness llm adapter', async () => {
+    interface ModelRequest {
+      readonly provider: string
+      readonly model: string
+      readonly system: string
+      readonly messages: readonly unknown[]
+    }
+    interface TaskTool {
+      readonly name: string
+      execute(args: unknown, exec: unknown): Promise<{
+        readonly state: { readonly taskId: string }
+        readonly variants?: { readonly synthesis?: { readonly text: string } }
+      }>
+    }
+    const modelRequests: ModelRequest[] = []
+    let taskTool: TaskTool | undefined
+    const llm = {
+      async *stream(request: ModelRequest) {
+        modelRequests.push(request)
+        const text = request.system.includes('adversarial editor')
+          ? comparisonJsonForAdapter()
+          : request.system.includes('Synthesize the strongest')
+            ? synthesisJsonForAdapter()
+            : request.provider === 'alpha'
+              ? 'Alpha supplies the mechanism.'
+              : 'Beta supplies the boundary.'
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+    apply({
+      tools: {
+        register(definition: TaskTool) {
+          if (definition.name === 'raven_task') taskTool = definition
+          return () => undefined
+        },
+      },
+      systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
+      get(name: string) { return name === 'llm' ? llm : undefined },
+      on() { return () => undefined },
+    } as never, {
+      role: 'agent',
+      draftRoutes: ['alpha/writer', 'beta/critic'],
+      draftMaxTokens: 1_000,
+      draftTimeoutMs: 0,
+    })
+    if (taskTool === undefined) throw new Error('expected raven_task tool')
+    const agent = { id: 'adapter-draft', session: { events: [] } }
+    const started = await taskTool.execute({
+      action: 'start', outcome: 'general-writing', grounding: 'none', request: 'Draft one bounded section.',
+    }, { agent, signal })
+    const drafted = await taskTool.execute({
+      action: 'draft', taskId: started.state.taskId, instruction: 'Draft the opening section.',
+    }, { agent, signal })
+
+    expect(modelRequests.map(request => `${request.provider}/${request.model}`)).toEqual([
+      'alpha/writer', 'beta/critic', 'beta/critic', 'alpha/writer',
+    ])
+    expect(drafted.variants?.synthesis?.text).toBe('The synthesized section combines mechanism and boundary.')
+  })
+
+  it('times out a stalled llm stream even when the iterator never yields', async () => {
+    interface TaskTool {
+      readonly name: string
+      execute(args: unknown, exec: unknown): Promise<{
+        readonly state: { readonly taskId: string }
+        readonly message: string
+        readonly variants?: { readonly path?: string; readonly variants: ReadonlyArray<{ readonly detail?: string }> }
+      }>
+    }
+    let taskTool: TaskTool | undefined
+    const llm = {
+      async *stream() {
+        await new Promise<never>(() => undefined)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+    apply({
+      tools: {
+        register(definition: TaskTool) {
+          if (definition.name === 'raven_task') taskTool = definition
+          return () => undefined
+        },
+      },
+      systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
+      get(name: string) { return name === 'llm' ? llm : undefined },
+      on() { return () => undefined },
+    } as never, {
+      role: 'agent', draftRoutes: ['alpha/writer'], draftMaxTokens: 100, draftTimeoutMs: 5,
+    })
+    if (taskTool === undefined) throw new Error('expected raven_task tool')
+    const agent = { id: 'adapter-timeout', session: { events: [] } }
+    const started = await taskTool.execute({
+      action: 'start', outcome: 'general-writing', grounding: 'none', request: 'Draft one bounded section.',
+    }, { agent, signal })
+    const drafted = await taskTool.execute({
+      action: 'draft', taskId: started.state.taskId, instruction: 'Draft the opening section.',
+    }, { agent, signal })
+
+    expect(drafted.message).toContain('no route produced a Draft Variant')
+    expect(drafted.variants?.path).toBe('main-agent')
+    expect(drafted.variants?.variants[0]?.detail).toContain('configured 5ms deadline')
+  })
+
   it('drafts from every configured route and lays each variant out one sentence per line', async () => {
     const drafter = recordingDrafter(route => ({
       status: 'drafted',
@@ -113,6 +246,24 @@ describe('Draft Variants', () => {
     expect(drafter.requests[0]?.system).toContain('one sentence on each line')
     expect(drafter.requests[0]?.context).toContain('Write the introduction of a short report.')
     expect(round.issues.join(' ')).toContain('candidates, not Checkpoints')
+  })
+
+  it('derives a compatibility path for pre-v5 DraftGenerator results', async () => {
+    const engine = harness({
+      draft: {
+        generate: async request => ({
+          variants: request.routes.map(route => ({ route, status: 'drafted', text: 'Legacy generator candidate.' })),
+        }),
+      },
+    })
+    const started = await startedTask(engine, 'session-draft-legacy-generator')
+    const round = await engine.dispatch(started.state, {
+      action: 'draft', taskId: started.state.taskId, instruction: 'Draft it.',
+    }, { sessionId: 'session-draft-legacy-generator', signal })
+
+    expect(round.variants?.path).toBe('multi-model')
+    expect(round.state.drafts?.at(-1)?.path).toBe('multi-model')
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(round.state)))).toEqual(round.state)
   })
 
   it('honours a requested subset and refuses a route the deployment never configured', async () => {
@@ -149,8 +300,20 @@ describe('Draft Variants', () => {
 
     expect(round.variants?.unavailable).toContain('no Draft Variant route is configured')
     expect(round.variants?.variants).toEqual([])
-    // Nothing was produced, so nothing about the Task changed.
-    expect(round.state).toBe(started.state)
+    // Nothing was generated or published, but the explicit main-agent fallback is durable provenance.
+    expect(round.state.latestArtifact).toBe(started.state.latestArtifact)
+    expect(round.state.checkpoints).toEqual(started.state.checkpoints)
+    expect(round.state.drafts?.at(-1)).toMatchObject({ path: 'main-agent', routes: [] })
+    expect(round.issues.join(' ')).toContain('continue drafting with the main agent')
+
+    const checkpoint = await engine.dispatch(round.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'draft',
+      summary: 'The main agent used the graceful fallback.', artifact: 'A useful main-agent draft.',
+    }, { sessionId: 'session-draft-none', signal })
+    const completed = await engine.dispatch(checkpoint.state, {
+      action: 'complete', taskId: started.state.taskId, artifact: checkpoint.state.latestArtifact,
+    }, { sessionId: 'session-draft-none', signal })
+    expect(completed.status).toBe('completed')
   })
 
   it('keeps the surviving variants when one route fails', async () => {
@@ -167,7 +330,7 @@ describe('Draft Variants', () => {
     }, { sessionId: 'session-draft-partial', signal })
 
     expect(round.variants?.variants.map(variant => variant.status)).toEqual(['failed', 'drafted'])
-    expect(round.issues.join(' ')).toContain('compare the ones that did')
+    expect(round.issues.join(' ')).toContain('Only one candidate survived')
   })
 
   it('reports an explicit unavailability when EVERY route fails, never an empty success', async () => {
@@ -212,7 +375,7 @@ describe('Draft Variants', () => {
 
     // The rendered round names every failed route and its reason, because that is
     // the only actionable content a fully failed round has.
-    const rendered = renderVariants(round.variants ?? { variants: [] })
+    const rendered = renderVariants(round.variants ?? { path: 'main-agent', variants: [] })
     expect(rendered).toContain('Routes that produced no variant')
     expect(rendered).toContain('alpha/fast')
     expect(rendered).toContain('alpha refused the request')
@@ -221,6 +384,39 @@ describe('Draft Variants', () => {
     // Nothing was published: a failed comparison round is not a Checkpoint.
     expect(round.state.latestArtifact).toBe(started.state.latestArtifact)
     expect(round.state.checkpoints).toEqual(started.state.checkpoints)
+  })
+
+  it.each([
+    { recommendation: 'research' as const, issue: 'return to inspection or discovery' },
+    { recommendation: 'synthesis' as const, issue: 'run action=synthesize' },
+  ])('persists $recommendation recovery until a later draft supersedes it', async ({ recommendation, issue }) => {
+    const draft: DraftGenerator = {
+      generate: async request => ({
+        path: 'multi-model',
+        variants: request.routes.map(route => ({ route, status: 'drafted', text: `${route.provider} candidate.` })),
+        comparison: {
+          route: deep,
+          recommendation,
+          reason: 'The current section contract exposes a material gap.',
+          criteria: DRAFT_CRITERIA.map(criterion => ({ criterion, assessment: `${criterion} exposes the gap.` })),
+        },
+      }),
+    }
+    const engine = harness({ draft })
+    const started = await startedTask(engine, `session-draft-${recommendation}`)
+    const rejected = await engine.dispatch(started.state, {
+      action: 'draft', taskId: started.state.taskId, instruction: 'Draft the section.',
+    }, { sessionId: `session-draft-${recommendation}`, signal })
+
+    expect(rejected.status).toBe('needs-revision')
+    const status = await engine.dispatch(rejected.state, {
+      action: 'status', taskId: started.state.taskId,
+    }, { sessionId: `session-draft-${recommendation}`, signal })
+    expect(status.issues.join(' ')).toContain(issue)
+    await expect(engine.dispatch(rejected.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'draft',
+      summary: 'Premature prose.', artifact: 'The unresolved draft.',
+    }, { sessionId: `session-draft-${recommendation}`, signal })).rejects.toThrow(/then run action=draft again/)
   })
 
   it('records bounded route provenance without retaining the variant text, and survives replay', async () => {
@@ -240,6 +436,8 @@ describe('Draft Variants', () => {
       ordinal: 1,
       instruction: 'Draft the opening paragraph.',
       requestedAt: now(),
+      steeringRevision: 0,
+      path: 'multi-model',
       routes: [
         { provider: 'alpha', model: 'fast', status: 'drafted', chars: 23 },
         { provider: 'beta', model: 'org/deep-v2', status: 'drafted', chars: 23 },
@@ -273,9 +471,37 @@ describe('Draft Variants', () => {
     expect(decodeRavenTaskState(JSON.parse(JSON.stringify(state)))).not.toBeUndefined()
   })
 
-  it('never lets a variant reach the evidence floor', async () => {
-    const drafter = recordingDrafter(() => ({ status: 'drafted', text: 'Nuclear output rose by 12 percent.' }))
-    const engine = harness({ draft: drafter.generator })
+  it('never lets variants, comparison, or synthesized prose reach the evidence floor', async () => {
+    const engine = harness({
+      draft: {
+        generate: async request => ({
+          path: 'multi-model',
+          variants: request.routes.map(route => ({
+            route,
+            status: 'drafted',
+            text: route.provider === 'alpha'
+              ? 'Nuclear output rose by 12 percent.'
+              : 'The reported increase was 12 percent.',
+          })),
+          comparison: {
+            route: deep,
+            recommendation: 'proceed',
+            reason: 'Both candidates are fluent but still require real evidence.',
+            criteria: DRAFT_CRITERIA.map(criterion => ({ criterion, assessment: `${criterion} remains candidate analysis.` })),
+          },
+          synthesis: {
+            route: fast,
+            variantRoutes: request.routes,
+            contributions: [{
+              route: fast, strength: 'compression', candidateExcerpt: 'Nuclear output', synthesisExcerpt: 'Nuclear output',
+            }, {
+              route: deep, strength: 'qualification', candidateExcerpt: 'reported increase', synthesisExcerpt: 'reported increase',
+            }],
+            text: 'Nuclear output and the reported increase were both described as 12 percent.',
+          },
+        }),
+      },
+    })
     const started = await engine.dispatch(null, {
       action: 'start',
       outcome: 'research',
@@ -290,6 +516,7 @@ describe('Draft Variants', () => {
 
     // The round produced prose, and the Task still owns no Source and no Claim.
     expect(round.variants?.variants[0]?.text).toContain('12 percent')
+    expect(round.variants?.synthesis?.text).toContain('12 percent')
     expect(round.state.sources).toEqual([])
     expect(round.state.claims).toEqual([])
 

@@ -165,16 +165,20 @@ registry.
 - `checkpoint` atomically commits an independently useful Artifact plus the evidence
   and failures that inform it. Stages are observations, never approval gates. Draft, verify,
   and refine Checkpoints require a current selected Skeleton on Studio-enabled Tasks.
-- `draft` requires a current selected Skeleton on Studio-enabled Tasks, includes the
-  complete architecture in a delimiter-safe data envelope, caps combined context at 64,000
-  characters, then asks every configured model route for the same bounded instruction and
-  returns the candidates side by side. It is a separate action for the same reason
-  `discover` is: producing candidate wording and committing evidence are different
-  authorities. A Draft Variant has been written, not verified, so it may never reach
-  a Claim, an Artifact citation, or the evidence floor. The deployment owns the route
-  list and the agent may only select a subset of it, because naming a model is naming
-  spend and a data path. A route that fails becomes one labelled variant rather than a
-  failed round, so the comparison survives one dead provider.
+- `draft` requires one exact section from the current selected Skeleton on Studio-enabled
+  Tasks. It combines the complete architecture and active section purpose/lineage with the
+  Task request, recent audience/constraint steering, and current Artifact in delimiter-safe
+  data capped at 64,000 characters. Configured routes independently draft that bounded unit.
+  With at least two successes, a second stage adversarially compares reasoning and expression
+  across eight fixed criteria; only `proceed` permits a third-stage synthesis whose structured
+  response must identify strengths from at least two distinct successful routes and retain a
+  distinct exact fragment from each candidate in the final prose. `research |
+  synthesis | structure` returns `needs-revision`, survives replay/status/context, and blocks
+  prose publication until recovery plus a later draft. Fewer successes degrade explicitly to
+  single-model or main-agent drafting. Variants, comparison, and
+  synthesis are all candidate material: they never reach a Claim, citation, or evidence
+  floor. The deployment owns the complete route universe because every stage names spend
+  and a data path; no fallback silently uses the session model.
 - `steer` appends a Steering Revision to the same Task, may move between Structure
   Studio modes as the user delegates or skips, and invalidates stale final verification
   plus any prior selected Skeleton.
@@ -205,6 +209,7 @@ One compact JSON state contains:
 - Sources with distinct Original Resources and Markdown Representations, plus origin-agnostic Claims;
 - durable Insight Candidates, their premise/assumption/alternative lineage, and bounded Synthesis Passes with Summary Debt;
 - bounded Structure Studio rounds containing materially distinct Skeleton Candidates, private Battle records, recommendations, and the current selected or hybrid evidence-linked Skeleton;
+- bounded draft-refinement provenance containing section/revision bindings, route outcomes, execution path, unresolved recovery, comparison recommendation, and validated multi-route synthesis contributions, but never generated text;
 - Source/tool/coverage Limitations;
 - the most recent verification receipt and exact Artifact SHA-256.
 
@@ -291,10 +296,11 @@ carries a delimiter-safe bounded frame/thesis/section-ID digest; `status` render
 compact alternatives or exact selected snapshot on demand after replay or context loss. A
 Steering Revision clears selection; changed framing must be battled and selected again.
 
-The main model can generate and battle all Candidates itself. Optional configured routes or
-subagents may increase private diversity or criticism, but they are not a dependency or a new
-public seam. Multi-model Draft Variants remain wording candidates and cannot run before selection
-on a Studio-enabled Task.
+The main model can generate and battle all Skeleton Candidates itself. Configured draft routes
+are optional and cannot run before selection on a Studio-enabled Task. When available, they draft
+one selected section independently, adversarially compare both reasoning and expression, and
+synthesize a candidate from multiple variants. When unavailable, Raven explicitly continues via
+a single-model or main-agent path. None of these generated materials is Source or Claim authority.
 
 ### Source
 
@@ -389,9 +395,9 @@ Artifact content remains in compact state; older full contents already live in
 prior durable tool results, avoiding quadratic snapshot growth. Request, Artifact,
 summary, correction, Source, Claim, Insight Candidate, Synthesis Pass, Structure Round,
 Skeleton, Limitation, Checkpoint, and Steering collections all have executable size ceilings
-shared by action validation and replay decoding. Schema v4 adds Structure Studio mode,
-rounds, and selected Skeleton; v1–v3 Tasks migrate forward with empty structure and the
-compatibility `skip` mode rather than being dropped.
+shared by action validation and replay decoding. Schema v4 added Structure Studio mode,
+rounds, and selected Skeleton; schema v5 adds bounded draft-refinement provenance. v1–v4
+Tasks migrate forward without inventing structure or historical comparison metadata.
 
 ## Progressive execution
 
@@ -411,7 +417,9 @@ start Raven Task
 → for Studio-enabled long-form work, privately generate and battle materially different Skeleton Candidates
 → present compact alternatives once, or select autonomously when delegated; skip for lightweight work
 → persist one selected or hybrid evidence-linked Skeleton
-→ draft substantive prose against that architecture
+→ draft one selected section independently across configured routes
+→ adversarially compare and synthesize, or return to research/synthesis/structure when a real gap appears
+→ continue through an explicit single-model/main-agent fallback when multi-model refinement is unavailable
 → continue research and evidence checks without asking permission
 → apply user correction as a Steering Revision on the same Task and re-resolve stale structure
 → emit a revised Checkpoint for every substantive final edit

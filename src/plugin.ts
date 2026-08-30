@@ -18,9 +18,11 @@ import { insightCandidateRecall, outstandingSummaryDebt } from './analysis.js'
 import { settleWithAbort } from './abort.js'
 import { decodeRavenTaskState } from './codec.js'
 import { Config, RAVEN_SETTINGS_NAMESPACE, type RavenConfig, type RavenRole } from './config.js'
+import { createDraftGenerator } from './drafting.js'
 import {
   ACTION_FIELDS,
   createRavenEngine,
+  draftRecoveryIssues,
   parseDraftRoute,
   renderArtifact,
   renderLeads,
@@ -30,7 +32,7 @@ import {
   type RavenSearchLimits,
 } from './engine.js'
 import { assertPublicDestination, SourceNetworkPolicyError } from './network-policy.js'
-import { RAVEN_PROMPT, RAVEN_STRUCTURE_STUDIO_PROMPT } from './prompt.js'
+import { RAVEN_DRAFTING_PROMPT, RAVEN_PROMPT, RAVEN_STRUCTURE_STUDIO_PROMPT } from './prompt.js'
 import { promptDataJson } from './prompt-data.js'
 import type { ProseLayoutOptions } from './prose.js'
 import { sourceInspectionSha256 } from './source.js'
@@ -61,7 +63,6 @@ import type {
   LeadSearchResult,
   RavenDispatchResult,
   RavenDraftRoute,
-  RavenDraftVariant,
   RavenExecution,
   RavenLead,
   RavenSelectedSkeleton,
@@ -752,63 +753,62 @@ function draftGenerator(ctx: Context, settings: () => RavenConfig): DraftGenerat
       const service: unknown = ctx.get('llm')
       const candidate = asRecord(service)
       if (typeof candidate?.stream !== 'function') {
-        return { variants: [], unavailable: 'DeepSeek Harness model capability is not composed' }
+        return {
+          path: 'main-agent',
+          variants: [],
+          unavailable: 'DeepSeek Harness model capability is not composed',
+        }
       }
       const llm = service as LlmRuntime
       const timeoutMs = settings().draftTimeoutMs ?? 0
-      signal.throwIfAborted()
-      const variants = await Promise.all(request.routes.map(async (route): Promise<RavenDraftVariant> => {
+      const generated = createDraftGenerator(async (call, callerSignal) => {
         const deadline = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
-        const attempt = deadline === undefined ? signal : AbortSignal.any([signal, deadline])
-        const failure = (detail: string): RavenDraftVariant => ({
-          route,
-          status: 'failed',
-          detail: deadline?.aborted === true
-            ? `the route exceeded the configured ${timeoutMs}ms deadline`
-            : detail,
-        })
+        const attempt = deadline === undefined ? callerSignal : AbortSignal.any([callerSignal, deadline])
         try {
-          const assembler = new BlockAssembler()
-          for await (const chunk of llm.stream({
-            provider: route.provider,
-            model: route.model,
-            system: request.system,
-            maxTokens: request.maxTokens,
-            signal: attempt,
-            messages: [createUserMessage({
-              content: [{ type: 'text', text: `${request.context}\n\nWrite this now:\n${request.instruction}` }],
-              source: { kind: 'plugin', plugin: name },
-            })],
-          })) {
-            attempt.throwIfAborted()
-            assembler.push(chunk)
-          }
-          const finish = assembler.finish
-          if (finish.kind === 'error' || finish.kind === 'aborted') {
-            signal.throwIfAborted()
-            return failure(compactError(finish.failure.message))
-          }
-          const text = assembler.blocks()
-            .filter(block => block.type === 'text')
-            .map(block => (block as { readonly text: string }).text)
-            .join('')
-            .trim()
-          if (text.length === 0) return failure('the route returned no prose')
-          return {
-            route,
-            status: 'drafted',
-            text,
-            // A cut-off draft is still a usable candidate, but the agent must not
-            // read its ending as the author's ending.
-            ...(finish.kind === 'max-tokens' ? { detail: 'truncated at the configured token bound' } : {}),
-          }
+          const operation = (async (): Promise<{ readonly text: string; readonly detail?: string }> => {
+            const assembler = new BlockAssembler()
+            for await (const chunk of llm.stream({
+              provider: call.route.provider,
+              model: call.route.model,
+              system: call.system,
+              maxTokens: call.maxTokens,
+              signal: attempt,
+              messages: [createUserMessage({
+                content: [{ type: 'text', text: call.prompt }],
+                source: { kind: 'plugin', plugin: name },
+              })],
+            })) {
+              attempt.throwIfAborted()
+              assembler.push(chunk)
+            }
+            const finish = assembler.finish
+            if (finish.kind === 'error' || finish.kind === 'aborted') {
+              callerSignal.throwIfAborted()
+              throw new Error(compactError(finish.failure.message))
+            }
+            const text = assembler.blocks()
+              .filter(block => block.type === 'text')
+              .map(block => (block as { readonly text: string }).text)
+              .join('')
+              .trim()
+            if (text.length === 0) throw new Error('the route returned no prose')
+            return {
+              text,
+              // A cut-off response remains usable, but the next stage must not read
+              // its ending as intentional closure.
+              ...(finish.kind === 'max-tokens' ? { detail: 'truncated at the configured token bound' } : {}),
+            }
+          })()
+          return await settleWithAbort(operation, attempt)
         } catch (error) {
-          signal.throwIfAborted()
-          return failure(compactError(error))
+          callerSignal.throwIfAborted()
+          if (deadline?.aborted === true) {
+            throw new Error(`the route exceeded the configured ${timeoutMs}ms deadline`)
+          }
+          throw error
         }
-      }))
-      signal.throwIfAborted()
-      return { variants }
+      })
+      return generated.generate(request, signal)
     },
   }
 }
@@ -2394,14 +2394,18 @@ function toolDefinition(
           type: 'string',
           description: 'Why this architecture was selected or combined. Only with action=select-structure.',
         },
+        sectionId: {
+          type: 'string',
+          description: 'Exact sectionId from the current selected Skeleton. Required with action=draft on Structure Studio Tasks and rejected on the lightweight skip path; Raven drafts one selected section at a time.',
+        },
         instruction: {
           type: 'string',
-          description: `What each model should write, at most ${RAVEN_LIMITS.draftInstructionChars} characters. Only with action=draft. Name one bounded piece — a section, a paragraph, an abstract — because variants are for comparing wording, not for outsourcing the whole Artifact.`,
+          description: `Narrow emphasis within the selected section contract, at most ${RAVEN_LIMITS.draftInstructionChars} characters. Only with action=draft. On the skip path, name one bounded section, paragraph, or abstract; never outsource the whole Artifact.`,
         },
         routes: {
           type: 'array',
           items: { type: 'string' },
-          description: `Which configured "provider/model" routes to draft from, at most ${RAVEN_LIMITS.draftRoutes}. Only with action=draft; omit to use every route the deployment configured. A route the deployment did not configure is refused, and the configured set is named in the refusal.`,
+          description: `Which configured "provider/model" routes may generate independent candidates and later critique/synthesize them, at most ${RAVEN_LIMITS.draftRoutes}. Only with action=draft; omit to use every authorized route. Two successful routes enable multi-model refinement. An unconfigured route is refused and the configured set is named.`,
         },
         grounding: {
           type: 'string',
@@ -2654,6 +2658,10 @@ function activeTaskContext(state: RavenTaskState, membership: TeamMembershipLike
     ...(state.structureMode === 'skip' || state.selectedSkeleton !== null
       ? []
       : ['<raven_structure_studio>', RAVEN_STRUCTURE_STUDIO_PROMPT, '</raven_structure_studio>']),
+    ...(state.phase === 'active' && (state.structureMode === 'skip' || state.selectedSkeleton !== null)
+      ? ['<raven_drafting>', RAVEN_DRAFTING_PROMPT, '</raven_drafting>']
+      : []),
+    ...draftRecoveryIssues(state),
     ...(state.insightCandidates.length === 0 ? [] : [renderInsightRecall(recall, state.taskId)]),
     ...(state.selectedSkeleton === null ? [] : [renderSelectedSkeletonDigest(state.selectedSkeleton)]),
     ...(state.selectedSkeleton !== null || state.structureMode === 'skip'
@@ -2838,8 +2846,8 @@ export function apply(ctx: Context, config: RavenConfig = {}): void {
           ? beyondBound.join(', ') + ' — beyond the ' + RAVEN_LIMITS.draftRoutes + '-route ceiling. '
           : '')
         + (routes.length === 0
-          ? 'No usable route remains, so Draft Variants are OFF and raven_task action=draft will'
-            + ' report that none is configured.'
+          ? 'No usable route remains, so multi-model refinement is OFF and raven_task action=draft will'
+            + ' report the main-agent fallback.'
           : routes.length + ' usable route(s) remain.'),
       )
     }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { decodeRavenTaskState } from '../../src/codec.js'
+import { DRAFT_CRITERIA } from '../../src/domain.js'
 import { createRavenEngine, type RavenDraftLimits } from '../../src/engine.js'
 import { apply } from '../../src/plugin.js'
 import type {
@@ -14,6 +15,7 @@ import type {
 const now = () => '2026-09-01T12:00:00.000Z'
 const signal = new AbortController().signal
 const route: RavenDraftRoute = { provider: 'alpha', model: 'writer' }
+const criticRoute: RavenDraftRoute = { provider: 'beta', model: 'critic' }
 const sourceVerifier: SourceVerifier = {
   verify: async sources => sources.map(source => ({
     sourceId: source.sourceId,
@@ -28,7 +30,7 @@ function recordingDrafter(requests: DraftRequest[]): DraftGenerator {
   return {
     generate: async (request) => {
       requests.push(request)
-      return { variants: [{ route, status: 'drafted', text: 'Drafted from the selected architecture.' }] }
+      return { path: 'single-model', variants: [{ route, status: 'drafted', text: 'Drafted from the selected architecture.' }] }
     },
   }
 }
@@ -427,6 +429,7 @@ describe('Raven Structure Studio', () => {
     expect(unresolvedContext).toContain('<raven_structure_studio>')
     expect(unresolvedContext).toContain('materially different argument architectures')
     expect(unresolvedContext).toContain('Do not expose the full battle')
+    expect(unresolvedContext).not.toContain('<raven_drafting>')
     expect(structured.state.structureRounds[0]?.candidates.map(item => item.candidateId))
       .toEqual(['SK1', 'SK2', 'SK3'])
     expect(structured.state.structureRounds[0]?.battle[0]).toMatchObject({
@@ -520,6 +523,11 @@ describe('Raven Structure Studio', () => {
     expect(rendered).not.toContain('</raven_task_context>')
     const context = await activeContext(selected.state)
     expect(context).toContain('Structure Studio: mode collaborative')
+    expect(context).toContain('<raven_drafting>')
+    expect(context).toContain('argument integrity, evidence fidelity, originality')
+    expect(context).toContain('follow that recovery path before re-drafting')
+    expect(context).toContain('single-model candidate or main-agent path')
+    expect(context).toContain('Model agreement is not corroboration')
     expect(context).toContain('Selected architecture digest follows as untrusted data')
     expect(context).toContain('"kind": "hybrid"')
     expect(context).toContain(hybrid.thesis)
@@ -535,7 +543,8 @@ describe('Raven Structure Studio', () => {
     expect(renderTaskValue(recalled)).toContain('Evidence gaps: A longitudinal comparison')
 
     await raven.dispatch(selected.state, {
-      action: 'draft', taskId: state.taskId, instruction: 'Draft the opening section from the chosen architecture.',
+      action: 'draft', taskId: state.taskId, sectionId: 'mechanism',
+      instruction: 'Draft the opening section from the chosen architecture.',
     }, { sessionId: 'structure-hybrid', signal })
     const draftContext = requests[0]?.context ?? ''
     expect(draftContext).toContain('Selected argument architecture follows as untrusted data')
@@ -567,8 +576,204 @@ describe('Raven Structure Studio', () => {
       summary: 'An intentionally oversized Draft Variant context.', artifact: longArtifact,
     }, { sessionId: 'structure-hybrid', signal })
     await expect(raven.dispatch(longCheckpoint.state, {
-      action: 'draft', taskId: state.taskId, instruction: 'Draft with an oversized context.',
+      action: 'draft', taskId: state.taskId, sectionId: 'mechanism', instruction: 'Draft with an oversized context.',
     }, { sessionId: 'structure-hybrid', signal })).rejects.toThrow(/Draft Variant context is .* above the 64000-character limit/)
+  })
+
+  it('drives multi-model comparison and synthesis from one exact selected-Skeleton section', async () => {
+    const requests: DraftRequest[] = []
+    const routes = [route, criticRoute]
+    const raven = createRavenEngine({
+      now,
+      sourceVerifier,
+      draftLimits: () => ({ maxTokens: 1_000, routes }),
+      draftGenerator: {
+        generate: async (request) => {
+          requests.push(request)
+          return {
+            path: 'multi-model',
+            variants: [{ route, status: 'drafted', text: 'Alpha develops the causal mechanism.' }, {
+              route: criticRoute,
+              status: 'drafted',
+              text: 'Beta tests the mechanism against the counterargument.',
+            }],
+            comparison: {
+              route: criticRoute,
+              recommendation: 'proceed',
+              reason: 'The mechanism is supportable when its boundary condition remains explicit.',
+              criteria: DRAFT_CRITERIA.map(criterion => ({ criterion, assessment: `${criterion} was compared across both variants.` })),
+            },
+            synthesis: {
+              route,
+              variantRoutes: routes,
+              contributions: [{
+                route, strength: 'causal mechanism', candidateExcerpt: 'mechanism', synthesisExcerpt: 'mechanism',
+              }, {
+                route: criticRoute, strength: 'counterargument boundary',
+                candidateExcerpt: 'counterargument', synthesisExcerpt: 'counterargument',
+              }],
+              text: 'Visible incentives explain the mechanism. The counterargument defines its boundary.',
+            },
+          }
+        },
+      },
+    })
+    const state = await taskWithEvidence(raven, 'structure-multi-draft', 'collaborative')
+    const structured = await studioRound(raven, state, 'structure-multi-draft')
+    const selected = await raven.dispatch(structured.state, {
+      action: 'select-structure', taskId: state.taskId, chosenBy: 'user',
+      candidateIds: ['SK1'], rationale: 'Use the incentive mechanism.',
+    }, { sessionId: 'structure-multi-draft', signal })
+
+    await expect(raven.dispatch(selected.state, {
+      action: 'draft', taskId: state.taskId, instruction: 'Draft the mechanism.',
+    }, { sessionId: 'structure-multi-draft', signal })).rejects.toThrow(/sectionId/)
+    await expect(raven.dispatch(selected.state, {
+      action: 'draft', taskId: state.taskId, sectionId: 'unknown', instruction: 'Draft the mechanism.',
+    }, { sessionId: 'structure-multi-draft', signal })).rejects.toThrow(/not part of the selected Skeleton/)
+
+    const drafted = await raven.dispatch(selected.state, {
+      action: 'draft', taskId: state.taskId, sectionId: 'mechanism', instruction: 'Write for a skeptical board audience.',
+    }, { sessionId: 'structure-multi-draft', signal })
+
+    expect(drafted.status).toBe('active')
+    expect(requests[0]?.section).toEqual(selected.state.selectedSkeleton?.skeleton.sections[0])
+    expect(requests[0]?.context).toContain('<raven_draft_section_data>')
+    expect(requests[0]?.refinementContext).toContain(selected.state.selectedSkeleton?.skeleton.thesis)
+    expect(requests[0]?.refinementContext).toContain('Write a long-form argument')
+    expect(requests[0]?.context).toContain('Connect evaluation windows to the behavior they reward.')
+    expect(requests[0]?.context).toContain('Observed incentives reward visible short-term activity.')
+    expect(requests[0]?.context).toContain(insightText)
+    expect(requests[0]?.context).toContain('Structure evidence')
+    expect(drafted.variants?.synthesis?.text).toBe('Visible incentives explain the mechanism.\nThe counterargument defines its boundary.')
+    expect(renderTaskValue(drafted)).toContain('Synthesized Draft (candidate wording, not evidence)')
+    expect(drafted.state.sources).toEqual(selected.state.sources)
+    expect(drafted.state.claims).toEqual(selected.state.claims)
+    expect(drafted.state.checkpoints).toEqual(selected.state.checkpoints)
+    expect(drafted.state.latestArtifact).toBe(selected.state.latestArtifact)
+    expect(drafted.state.drafts?.at(-1)).toMatchObject({
+      sectionId: 'mechanism',
+      steeringRevision: selected.state.steeringRevision,
+      selectedStructureRevision: selected.state.selectedSkeleton?.selectedAtRevision,
+      path: 'multi-model',
+      recommendation: 'proceed',
+      comparisonRoute: criticRoute,
+      synthesisRoute: route,
+      synthesizedFromRoutes: routes,
+    })
+    expect(JSON.stringify(drafted.state.drafts)).not.toContain('Visible incentives explain')
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(drafted.state)))).toEqual(drafted.state)
+
+    const checkpoint = await raven.dispatch(drafted.state, {
+      action: 'checkpoint', taskId: state.taskId, stage: 'draft',
+      summary: 'Adopted the synthesized section after checking its recorded lineage.',
+      artifact: `${drafted.state.latestArtifact}\n\n${drafted.variants?.synthesis?.text ?? ''}`,
+    }, { sessionId: 'structure-multi-draft', signal })
+    const completed = await raven.dispatch(checkpoint.state, {
+      action: 'complete', taskId: state.taskId, artifact: checkpoint.state.latestArtifact,
+    }, { sessionId: 'structure-multi-draft', signal })
+    expect(completed.status).toBe('completed')
+  })
+
+  it('returns to Structure Studio when adversarial drafting exposes an architecture defect', async () => {
+    const routes = [route, criticRoute]
+    let draftCalls = 0
+    const raven = createRavenEngine({
+      now,
+      sourceVerifier,
+      draftLimits: () => ({ maxTokens: 1_000, routes }),
+      draftGenerator: {
+        generate: async () => {
+          draftCalls += 1
+          const variants = routes.map(item => ({ route: item, status: 'drafted' as const, text: `${item.provider} candidate.` }))
+          if (draftCalls === 1) {
+            return {
+              path: 'multi-model',
+              variants,
+              comparison: {
+                route: criticRoute,
+                recommendation: 'structure',
+                reason: 'The section purpose cannot support the selected thesis.',
+                criteria: DRAFT_CRITERIA.map(criterion => ({ criterion, assessment: `${criterion} exposes the structural mismatch.` })),
+              },
+            }
+          }
+          return {
+            path: 'multi-model',
+            variants,
+            comparison: {
+              route: criticRoute,
+              recommendation: 'proceed',
+              reason: 'The revised architecture resolves the mismatch.',
+              criteria: DRAFT_CRITERIA.map(criterion => ({ criterion, assessment: `${criterion} now supports the revised section.` })),
+            },
+            synthesis: {
+              route,
+              variantRoutes: routes,
+              contributions: [{
+                route, strength: 'revised mechanism', candidateExcerpt: 'alpha candidate.', synthesisExcerpt: 'alpha candidate.',
+              }, {
+                route: criticRoute, strength: 'clear boundary', candidateExcerpt: 'beta candidate.', synthesisExcerpt: 'beta candidate.',
+              }],
+              text: 'alpha candidate. beta candidate. The revised mechanism now supports the thesis.',
+            },
+          }
+        },
+      },
+    })
+    const state = await taskWithEvidence(raven, 'structure-draft-recovery', 'autonomous')
+    const structured = await studioRound(raven, state, 'structure-draft-recovery')
+    const selected = await raven.dispatch(structured.state, {
+      action: 'select-structure', taskId: state.taskId, chosenBy: 'raven',
+      candidateIds: ['SK1'], rationale: 'Use the first architecture.',
+    }, { sessionId: 'structure-draft-recovery', signal })
+
+    const rejected = await raven.dispatch(selected.state, {
+      action: 'draft', taskId: state.taskId, sectionId: 'mechanism', instruction: 'Draft the mechanism.',
+    }, { sessionId: 'structure-draft-recovery', signal })
+
+    expect(rejected.status).toBe('needs-revision')
+    expect(rejected.variants?.synthesis).toBeUndefined()
+    expect(rejected.issues.join(' ')).toContain('return to Structure Studio')
+    expect(rejected.state.selectedSkeleton).not.toBeNull()
+    const replayed = decodeRavenTaskState(JSON.parse(JSON.stringify(rejected.state)))
+    if (replayed === undefined) throw new Error('expected draft recovery to survive replay')
+    const recalled = await raven.dispatch(replayed, {
+      action: 'status', taskId: state.taskId,
+    }, { sessionId: 'structure-draft-recovery', signal })
+    expect(recalled.issues.join(' ')).toContain('run Structure Studio again')
+    expect(await activeContext(replayed)).toContain('then run action=draft again before publishing prose')
+    await expect(raven.dispatch(rejected.state, {
+      action: 'checkpoint', taskId: state.taskId, stage: 'draft', summary: 'Ignored the gap.', artifact: state.latestArtifact,
+    }, { sessionId: 'structure-draft-recovery', signal })).rejects.toThrow(/Draft round .* architecture defect/)
+    const premature = await raven.dispatch(rejected.state, {
+      action: 'complete', taskId: state.taskId, artifact: state.latestArtifact,
+    }, { sessionId: 'structure-draft-recovery', signal })
+    expect(premature.status).toBe('needs-revision')
+    expect(premature.issues.join(' ')).toContain('run Structure Studio again')
+
+    const restructured = await studioRound(raven, rejected.state, 'structure-draft-recovery')
+    expect(restructured.state.selectedSkeleton).toBeNull()
+    expect(restructured.studio?.steeringRevision).toBe(rejected.state.steeringRevision)
+    const reselected = await raven.dispatch(restructured.state, {
+      action: 'select-structure', taskId: state.taskId, chosenBy: 'raven',
+      candidateIds: ['SK1'], rationale: 'Select the revised architecture.',
+    }, { sessionId: 'structure-draft-recovery', signal })
+    const redrafted = await raven.dispatch(reselected.state, {
+      action: 'draft', taskId: state.taskId, sectionId: 'mechanism', instruction: 'Draft the revised mechanism.',
+    }, { sessionId: 'structure-draft-recovery', signal })
+    expect(redrafted.status).toBe('active')
+    expect((await raven.dispatch(redrafted.state, {
+      action: 'status', taskId: state.taskId,
+    }, { sessionId: 'structure-draft-recovery', signal })).issues.join(' ')).not.toContain('architecture defect')
+    const checkpoint = await raven.dispatch(redrafted.state, {
+      action: 'checkpoint', taskId: state.taskId, stage: 'draft',
+      summary: 'Drafted after structural recovery.', artifact: `${state.latestArtifact}\n\n${redrafted.variants?.synthesis?.text ?? ''}`,
+    }, { sessionId: 'structure-draft-recovery', signal })
+    const completed = await raven.dispatch(checkpoint.state, {
+      action: 'complete', taskId: state.taskId, artifact: checkpoint.state.latestArtifact,
+    }, { sessionId: 'structure-draft-recovery', signal })
+    expect(completed.status).toBe('completed')
   })
 
   it('requires a new prose Checkpoint after reselection before Completion', async () => {
@@ -681,6 +886,7 @@ describe('Raven Structure Studio', () => {
     expect(completed.status).toBe('completed')
     const skipContext = await activeContext(draft.state)
     expect(skipContext).not.toContain('<raven_structure_studio>')
+    expect(skipContext).toContain('<raven_drafting>')
     expect(skipContext).not.toContain('Battle the Candidates before involving the user')
   })
 })

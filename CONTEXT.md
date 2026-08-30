@@ -30,7 +30,7 @@ A candidate Raven has located but not inspected. A Lead records where something 
 
 ## Draft Variant
 
-One candidate rendering of the same writing instruction, produced by one model route. A Draft Variant is a candidate in exactly the sense a Lead is: it carries no evidence of its own, can never be cited, and joins the Raven Task only when its wording is adopted into a Checkpoint that Raven verifies against real Sources. Comparing variants chooses phrasing; it never establishes a fact, and a sentence every variant agrees on is still unsupported until a Source excerpt supports it.
+One independent candidate rendering of a bounded selected-Skeleton section, produced by one model route. The section purpose, Claim/Insight lineage, evidence needs, counterarguments, Task audience and constraints, and wider Skeleton govern the candidate; the wording instruction only narrows that contract. When at least two routes succeed, Raven adversarially compares their reasoning and expression and accepts synthesis only when it identifies concrete strengths from at least two distinct variants. A research, synthesis, or structure verdict remains an unresolved drafting obligation until recovery and a later draft. Variants, comparison, and synthesized prose are candidates in exactly the sense a Lead is: they carry no evidence, can never be cited, and join the Artifact only when wording is adopted into a Checkpoint that Raven verifies through its Source/Claim/Insight model. Model agreement is never corroboration.
 
 ## Insight Candidate
 

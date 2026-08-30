@@ -135,6 +135,9 @@ describe('raven_task action field contract', () => {
     expect(ACTION_FIELDS['select-structure']).toEqual([
       'action', 'taskId', 'chosenBy', 'candidateIds', 'hybrid', 'rationale',
     ])
+    expect(ACTION_FIELDS.draft).toEqual(['action', 'taskId', 'sectionId', 'instruction', 'routes'])
+    expect(properties.sectionId?.description).toContain('action=draft')
+    expect(properties.sectionId?.description).toContain('selected Skeleton')
     expect(properties.structureMode?.enum).toEqual(['collaborative', 'autonomous', 'skip'])
     expect(properties.structureMode?.description).toContain('action=start or action=steer')
     expect(candidate.required).toEqual(['candidateId', 'label', 'skeleton'])

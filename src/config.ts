@@ -222,25 +222,26 @@ export const Config: z<RavenConfig> = z.object({
     .max(RAVEN_SETTINGS_CEILINGS.draftRoutes)
     .default([])
     .description(
-      'Model routes a Draft Variant may be requested from, each "provider/model" and split on the FIRST '
-      + 'slash so a namespaced model id survives. This list is the whole universe: the agent may select a '
-      + 'subset of it and nothing else, because naming a model is naming spend and a data path. Empty '
-      + 'disables Draft Variants and reports that instead of quietly drafting from the session model.',
+      'Authorized model routes for independent section candidates, adversarial critique, and synthesis, each '
+      + '"provider/model" and split on the FIRST slash so a namespaced model id survives. This list is the whole '
+      + 'universe because naming a model names spend and a data path. Routes receive the selected Skeleton, linked '
+      + 'Claim/Insight text and evidence excerpts, audience/constraints, and current Artifact. Two successful routes '
+      + 'enable multi-model refinement; fewer use an explicit fallback. Empty never selects the session model.',
     ),
   draftMaxTokens: z
     .natural()
     .max(RAVEN_SETTINGS_CEILINGS.draftMaxTokens)
     .default(4_000)
     .description(
-      'Upper bound on the length of one Draft Variant, in model output tokens. 0 means the built-in bound. '
-      + 'Every route in a round shares it so the variants stay comparable.',
+      'Upper bound on each candidate, adversarial critique, or synthesis model call, in output tokens. '
+      + '0 means the built-in bound. Every route and refinement stage in a round shares it.',
     ),
   draftTimeoutMs: z
     .natural()
     .max(RAVEN_SETTINGS_CEILINGS.timeoutMs)
     .default(120_000)
     .description(
-      'Deadline for one Draft Variant, in milliseconds. 0 means no deadline. A route that exceeds it '
-      + 'produces no variant and says so; its siblings still return theirs.',
+      'Deadline for each candidate, critique, or synthesis model call, in milliseconds. 0 means no deadline. '
+      + 'A route that exceeds it loses only that attempt; successful candidates and fallback paths remain usable.',
     ),
 })

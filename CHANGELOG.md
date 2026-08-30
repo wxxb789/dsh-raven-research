@@ -10,6 +10,25 @@ tested compatibility family.
 
 ## [Unreleased]
 
+### Multi-model drafting and adversarial refinement
+
+#### Added
+
+- Added exact selected-Skeleton section drafting with the full section purpose, Claim/Insight lineage, evidence needs,
+  counterarguments, audience/constraint steering, and wider argument architecture as the model contract.
+- Added independent candidate generation, structured adversarial comparison across eight reasoning and writing criteria,
+  and synthesis accepted only when it identifies concrete strengths from at least two successful model routes.
+- Added replay-safe `research | synthesis | structure` recovery that blocks prose publication until a later draft, plus
+  explicit single-model and main-agent fallback when multi-model refinement is unavailable.
+
+#### Changed
+
+- Draft Variants, critique, and synthesized prose remain transient, delimiter-safe candidate material and never count
+  as evidence; durable schema v5 stores only bounded section/revision, route, path, recovery, comparison, and validated
+  contribution provenance.
+- `draftMaxTokens` and `draftTimeoutMs` now bound each candidate, critique, and synthesis call; whole-stream timeout
+  racing prevents a non-yielding model adapter from hanging the Task.
+
 ### Pre-writing Structure Studio
 
 #### Added
@@ -30,8 +49,8 @@ tested compatibility family.
 - Added punctuation/case and lexical near-duplicate rejection, mandatory Claim/Insight linkage, exact-selection
   headroom, aggregate replay-state and Draft Variant context budgets, and delimiter-safe prompt data envelopes.
 - Detailed Studio procedure is injected only while a collaborative or autonomous decision is unresolved; lightweight
-  `skip` Tasks retain the compact base prompt. Durable Task snapshots migrate to schema v4 with old Tasks on that
-  compatibility path.
+  `skip` Tasks retain the compact base prompt. Durable Task snapshots migrate through schema v4 Structure Studio
+  compatibility into schema v5 draft-refinement provenance without inventing historical data.
 
 ### Inspectable synthesis and critical thinking
 
