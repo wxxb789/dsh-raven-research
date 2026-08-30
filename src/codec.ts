@@ -16,6 +16,8 @@ import {
   CLAIM_DISPOSITIONS,
   CLAIM_IMPORTANCE,
   CLAIM_KINDS,
+  DRAFT_PATHS,
+  DRAFT_RECOMMENDATIONS,
   DRAFT_STATUSES,
   GROUNDING_POLICIES,
   INSIGHT_CONFIDENCE,
@@ -292,6 +294,14 @@ function validRepresentation(value: unknown, resourceValue: unknown): boolean {
   return representation.derivation !== 'original' || mediaType === 'text/markdown'
 }
 
+function validDraftRoute(value: unknown): value is { readonly provider: string; readonly model: string } {
+  const route = record(value)
+  return route !== undefined
+    && exactKeys(route, ['provider', 'model'])
+    && string(route.provider)
+    && string(route.model)
+}
+
 function validCheck(value: unknown, sourceUrl: string, origin: string): value is RavenSourceCheck {
   const check = record(value)
   if (check === undefined || !string(check.status)) return false
@@ -344,8 +354,9 @@ const V3_TO_V4_MIGRATION_OVERHEAD_BYTES = Buffer.byteLength(
  * bump would have silently dropped every stored Task on replay — a data-loss
  * path with no code path to fix it in. The table carries the v1 web-to-v2 Source
  * fabric migration, isolates legacy v1/v2 analysis Source links during the
- * v2-to-v3 synthesis migration, and places v3 Tasks on the v4 lightweight
- * Structure Studio compatibility path; future bumps add one entry per forward step.
+ * v2-to-v3 synthesis migration, places v3 Tasks on the v4 lightweight Structure
+ * Studio compatibility path, and admits v5 draft-refinement provenance; future
+ * bumps add one entry per forward step.
  */
 const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<string, unknown> | undefined> = {
   1: state => {
@@ -385,6 +396,7 @@ const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<stri
     schemaVersion: 4,
     ...v3ToV4CompatibilityFields(),
   }),
+  4: state => ({ ...state, schemaVersion: 5, draftRecovery: null }),
 }
 
 function migrateToCurrent(state: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -414,8 +426,8 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
   if (migratingV3 && !jsonWithinBudget(raw, RAVEN_LIMITS.stateBytes)) return undefined
   const state = raw === undefined ? undefined : migrateToCurrent(raw)
   // Once migrated state is serialized again its original version is no longer visible.
-  // Replay therefore keeps this exact, bounded compatibility allowance for every v4
-  // snapshot; the engine still admits newly produced state against RAVEN_LIMITS.stateBytes.
+  // Replay therefore keeps this exact, bounded v3→v4 compatibility allowance for every
+  // current snapshot; the engine still admits newly produced state against RAVEN_LIMITS.stateBytes.
   const replayStateBudget = RAVEN_LIMITS.stateBytes + V3_TO_V4_MIGRATION_OVERHEAD_BYTES
   if (state === undefined
     || !jsonWithinBudget(state, replayStateBudget)
@@ -423,7 +435,7 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
       'revision', 'steeringRevision', 'steering', 'checkpoints', 'sources', 'claims',
       'insightCandidates', 'syntheses', 'structureMode', 'structureRounds', 'selectedSkeleton',
-      'limitations', 'latestArtifact', 'drafts', 'verification', 'finalArtifactSha256',
+      'limitations', 'latestArtifact', 'drafts', 'draftRecovery', 'verification', 'finalArtifactSha256',
       'sourcePolicy', 'startedAt', 'updatedAt',
     ])
     || state.schemaVersion !== RAVEN_SCHEMA_VERSION
@@ -515,7 +527,11 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
     for (const raw of state.drafts) {
       const item = record(raw)
       if (item === undefined
-        || !exactKeys(item, ['ordinal', 'instruction', 'requestedAt', 'routes'])
+        || !exactKeys(item, [
+          'ordinal', 'instruction', 'requestedAt', 'routes', 'steeringRevision',
+          'selectedStructureRevision', 'sectionId', 'path', 'recommendation',
+          'comparisonRoute', 'synthesisRoute', 'synthesizedFromRoutes',
+        ])
         // Rounds are trimmed from the front at the bound, so ordinals stay strictly
         // increasing without restarting at one.
         || !integer(item.ordinal, previousOrdinal + 1)
@@ -525,6 +541,8 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
         || !Array.isArray(item.routes)
         || item.routes.length > RAVEN_LIMITS.draftRoutes) return undefined
       previousOrdinal = item.ordinal
+      const routeKeys = new Set<string>()
+      const draftedRouteKeys = new Set<string>()
       for (const rawRoute of item.routes) {
         const route = record(rawRoute)
         if (route === undefined
@@ -534,8 +552,81 @@ export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined
           || !member(route.status, DRAFT_STATUSES)
           || !integer(route.chars)
           || route.chars > RAVEN_LIMITS.draftVariantChars) return undefined
+        const key = `${route.provider}\n${route.model}`
+        if (routeKeys.has(key)
+          || (route.status === 'drafted' && route.chars === 0)
+          || (route.status === 'failed' && route.chars !== 0)) return undefined
+        routeKeys.add(key)
+        if (route.status === 'drafted') draftedRouteKeys.add(key)
+      }
+      const modernFields = [
+        item.steeringRevision, item.selectedStructureRevision, item.sectionId, item.recommendation,
+        item.comparisonRoute, item.synthesisRoute, item.synthesizedFromRoutes,
+      ]
+      if (item.path === undefined) {
+        if (modernFields.some(value => value !== undefined)) return undefined
+        continue
+      }
+      if (!member(item.path, DRAFT_PATHS)
+        || !integer(item.steeringRevision)
+        || item.steeringRevision > state.steeringRevision
+        || (item.sectionId !== undefined && (!string(item.sectionId) || !STABLE_ID.test(item.sectionId)))
+        || (item.selectedStructureRevision !== undefined
+          && (!integer(item.selectedStructureRevision, 1) || item.selectedStructureRevision > state.revision))
+        || ((item.sectionId === undefined) !== (item.selectedStructureRevision === undefined))) return undefined
+      if ((item.path === 'main-agent' && draftedRouteKeys.size !== 0)
+        || (item.path === 'single-model' && draftedRouteKeys.size !== 1)
+        || (item.path === 'multi-model' && draftedRouteKeys.size < 2)) return undefined
+
+      const comparisonRoute = item.comparisonRoute
+      if ((item.recommendation === undefined) !== (comparisonRoute === undefined)) return undefined
+      if (comparisonRoute !== undefined) {
+        if (!member(item.recommendation, DRAFT_RECOMMENDATIONS) || !validDraftRoute(comparisonRoute)) return undefined
+        if (!draftedRouteKeys.has(`${comparisonRoute.provider}\n${comparisonRoute.model}`)) return undefined
+      }
+
+      const synthesisRoute = item.synthesisRoute
+      const synthesized = item.synthesizedFromRoutes
+      if ((synthesisRoute === undefined) !== (synthesized === undefined)) return undefined
+      if (synthesisRoute !== undefined) {
+        if (item.recommendation !== 'proceed'
+          || !validDraftRoute(synthesisRoute)
+          || !Array.isArray(synthesized)
+          || synthesized.length < 2
+          || synthesized.length > RAVEN_LIMITS.draftRoutes) return undefined
+        const synthesizedKeys = new Set<string>()
+        for (const route of synthesized) {
+          if (!validDraftRoute(route)) return undefined
+          const key = `${route.provider}\n${route.model}`
+          if (synthesizedKeys.has(key) || !draftedRouteKeys.has(key)) return undefined
+          synthesizedKeys.add(key)
+        }
+        if (!draftedRouteKeys.has(`${synthesisRoute.provider}\n${synthesisRoute.model}`)) return undefined
       }
     }
+  }
+
+  if (state.draftRecovery !== null) {
+    const recovery = record(state.draftRecovery)
+    if (recovery === undefined
+      || !exactKeys(recovery, [
+        'draftOrdinal', 'recommendation', 'sectionId', 'requiredAtRevision', 'recoveredAtRevision',
+      ])
+      || !integer(recovery.draftOrdinal, 1)
+      || !member(recovery.recommendation, DRAFT_RECOMMENDATIONS)
+      || recovery.recommendation === 'proceed'
+      || (recovery.sectionId !== undefined && (!string(recovery.sectionId) || !STABLE_ID.test(recovery.sectionId)))
+      || !integer(recovery.requiredAtRevision, 1)
+      || recovery.requiredAtRevision > state.revision
+      || (recovery.recoveredAtRevision !== undefined
+        && (!integer(recovery.recoveredAtRevision, recovery.requiredAtRevision)
+          || recovery.recoveredAtRevision > state.revision))) return undefined
+    const sourceRound = Array.isArray(state.drafts)
+      ? state.drafts.map(record).find(round => round?.ordinal === recovery.draftOrdinal)
+      : undefined
+    if (sourceRound === undefined
+      || sourceRound.recommendation !== recovery.recommendation
+      || sourceRound.sectionId !== recovery.sectionId) return undefined
   }
 
   const sourceIds = new Set<string>()

@@ -51,13 +51,15 @@ export const RAVEN_LIMITS = {
   draftContextChars: 64_000,
   draftRounds: 32,
   draftVariantChars: 40_000,
+  draftAssessmentChars: 4_000,
+  draftRefinementContextChars: 64_000,
   /** Maximum UTF-8 JSON size of one durable Task snapshot. */
   stateBytes: 1_000_000,
   /** Headroom non-final mutations leave so Completion cannot deadlock on the state cap. */
   stateCompletionReserveBytes: 64_000,
 } as const
 
-export const RAVEN_SCHEMA_VERSION = 4 as const
+export const RAVEN_SCHEMA_VERSION = 5 as const
 
 export const OUTCOMES = [
   'research',
@@ -402,11 +404,32 @@ export const DRAFT_STATUSES = ['drafted', 'failed'] as const
 
 export type RavenDraftStatus = typeof DRAFT_STATUSES[number]
 
+export const DRAFT_PATHS = ['multi-model', 'single-model', 'main-agent'] as const
+
+export type RavenDraftPath = typeof DRAFT_PATHS[number]
+
+export const DRAFT_CRITERIA = [
+  'argument-integrity',
+  'evidence-fidelity',
+  'originality',
+  'logical-progression',
+  'clarity-compression',
+  'counterargument-handling',
+  'reader-value-surprise',
+  'reasoning-not-restatement',
+] as const
+
+export type RavenDraftCriterion = typeof DRAFT_CRITERIA[number]
+
+export const DRAFT_RECOMMENDATIONS = ['proceed', 'research', 'synthesis', 'structure'] as const
+
+export type RavenDraftRecommendation = typeof DRAFT_RECOMMENDATIONS[number]
+
 /** One model route asked for a Draft Variant. Identity is the pair, never the model alone. */
 export type { RavenDraftRoute } from './route.js'
 
 /**
- * One candidate rendering of the same writing task, produced by one route.
+ * One independent candidate rendering of the same bounded section contract, produced by one route.
  *
  * A Draft Variant is a candidate, exactly as a Lead is a candidate: it carries
  * no evidence of its own, can never be cited, and joins the Task only when the
@@ -420,7 +443,7 @@ export interface RavenDraftVariant {
   readonly status: RavenDraftStatus
   /** Present only for a drafted variant, already laid out under the Task's Prose Layout. */
   readonly text?: string
-  /** Present only for a failed route; a dead model costs its own variant, never the round. */
+  /** Failure reason, or a drafted-response note such as truncation; one dead model never costs the whole round. */
   readonly detail?: string
 }
 
@@ -428,15 +451,58 @@ export interface DraftRequest {
   readonly instruction: string
   readonly routes: readonly RavenDraftRoute[]
   readonly system: string
-  /** Task material the drafter may use: the request, the steering, and the current Artifact. */
+  /** Full candidate-generation context, including the current Artifact. */
   readonly context: string
+  /** Required reasoning/evidence contract retained intact through critique and synthesis. */
+  readonly refinementContext: string
+  /** Exact selected-Skeleton section that bounds this round; absent only on the lightweight skip path. */
+  readonly section?: RavenSkeletonSection
   readonly maxTokens: number
+}
+
+export interface RavenDraftCriterionAssessment {
+  readonly criterion: RavenDraftCriterion
+  readonly assessment: string
+}
+
+/** Machine-readable adversarial review of all successful independent candidates. */
+export interface RavenDraftComparison {
+  readonly route: RavenDraftRoute
+  readonly criteria: readonly RavenDraftCriterionAssessment[]
+  readonly recommendation: RavenDraftRecommendation
+  readonly reason: string
+}
+
+export interface RavenDraftContribution {
+  readonly route: RavenDraftRoute
+  readonly strength: string
+  /** Route-specific fragment of at least two substantive words retained from this candidate. */
+  readonly candidateExcerpt: string
+  /** Exact fragment in the synthesized prose where that strength appears. */
+  readonly synthesisExcerpt: string
+}
+
+/** Candidate synthesis produced only after incorporating strengths from at least two route outputs. */
+export interface RavenDraftSynthesis {
+  readonly route: RavenDraftRoute
+  /** Every independent candidate shown to the synthesizer. */
+  readonly variantRoutes: readonly RavenDraftRoute[]
+  /** Route-specific strengths the synthesizer claims to have incorporated; always at least two distinct routes. */
+  readonly contributions: readonly RavenDraftContribution[]
+  readonly text: string
+  readonly detail?: string
 }
 
 export interface DraftResult {
   readonly variants: readonly RavenDraftVariant[]
+  /** Optional only for pre-v5 DraftGenerator implementers; the engine derives it when absent. */
+  readonly path?: RavenDraftPath
+  readonly comparison?: RavenDraftComparison
+  readonly synthesis?: RavenDraftSynthesis
   /** Set when no route could run at all, so one reason replaces N identical failures. */
   readonly unavailable?: string
+  /** Why multi-model comparison or synthesis could not complete while a fallback remains usable. */
+  readonly refinementUnavailable?: string
 }
 
 /** Retrieval seam for Draft Variants, kept separate from evidence seams on purpose. */
@@ -455,6 +521,26 @@ export interface RavenDraftRound {
   readonly instruction: string
   readonly requestedAt: string
   readonly routes: readonly RavenDraftRouteOutcome[]
+  /** Revision bindings make a retained section scope intelligible after steering or reselection. */
+  readonly steeringRevision?: number
+  readonly selectedStructureRevision?: number
+  /** Absent on the lightweight skip path and records written before section-bound drafting. */
+  readonly sectionId?: string
+  /** Absent on records written before adversarial multi-model refinement. */
+  readonly path?: RavenDraftPath
+  readonly recommendation?: RavenDraftRecommendation
+  readonly comparisonRoute?: RavenDraftRoute
+  readonly synthesisRoute?: RavenDraftRoute
+  /** Routes whose independent candidates entered synthesis; texts are deliberately never retained. */
+  readonly synthesizedFromRoutes?: readonly RavenDraftRoute[]
+}
+
+export interface RavenDraftRecovery {
+  readonly draftOrdinal: number
+  readonly recommendation: Exclude<RavenDraftRecommendation, 'proceed'>
+  readonly sectionId?: string
+  readonly requiredAtRevision: number
+  readonly recoveredAtRevision?: number
 }
 
 export interface RavenDraftRouteOutcome {
@@ -500,6 +586,7 @@ export interface RavenTaskState {
   readonly latestArtifact: string | null
   /** Draft comparison rounds, oldest first. Absent on a record written before Draft Variants existed. */
   readonly drafts?: readonly RavenDraftRound[]
+  readonly draftRecovery: RavenDraftRecovery | null
   readonly verification: RavenVerificationReceipt | null
   readonly finalArtifactSha256: string | null
   readonly startedAt: string

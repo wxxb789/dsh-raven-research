@@ -40,7 +40,7 @@ describe('Raven Task snapshot codec', () => {
   it('round-trips a complete current state through JSON', async () => {
     const state = await validState()
     const roundTrip: unknown = JSON.parse(JSON.stringify(state))
-    expect(decodeRavenTaskState(roundTrip)).toEqual({ ...state, schemaVersion: 4, sourcePolicy: {
+    expect(decodeRavenTaskState(roundTrip)).toEqual({ ...state, schemaVersion: 5, sourcePolicy: {
       allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
       includedMcpSources: [], excludedMcpSources: [],
     } })
@@ -261,7 +261,7 @@ describe('Raven Task snapshot codec', () => {
     for (const state of emitted) {
       const replayed: unknown = JSON.parse(JSON.stringify(state))
       // Not just "defined": the codec must return the SAME Task, not a shell.
-      expect(decodeRavenTaskState(replayed)).toEqual({ ...state, schemaVersion: 4, sourcePolicy: {
+      expect(decodeRavenTaskState(replayed)).toEqual({ ...state, schemaVersion: 5, sourcePolicy: {
         allowedWebHosts: [], blockedWebHosts: [], preferPrimary: false, localRoots: [], llmWikiRoots: [],
         includedMcpSources: [], excludedMcpSources: [],
       }, sources: state.sources.map(source => ({
@@ -410,9 +410,9 @@ describe('Raven Task snapshot codec', () => {
     const decoded = decodeRavenTaskState(legacyV1)
     if (decoded === undefined) throw new Error('Expected literal schema-v1 fixture to migrate')
 
-    expect(RAVEN_SCHEMA_VERSION).toBe(4)
+    expect(RAVEN_SCHEMA_VERSION).toBe(5)
     expect(decoded).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       insightCandidates: [],
       syntheses: [],
       structureMode: 'skip',
@@ -490,7 +490,7 @@ describe('Raven Task snapshot codec', () => {
     if (decoded === undefined) throw new Error('Expected literal schema-v2 fixture to migrate')
 
     expect(decoded).toMatchObject({
-      schemaVersion: 4,
+      schemaVersion: 5,
       claims: [{ sourceIds: [], legacySourceIds: ['S2'] }],
       insightCandidates: [],
       syntheses: [],
@@ -543,6 +543,62 @@ describe('Raven Task snapshot codec', () => {
       structureRounds: [],
       selectedSkeleton: null,
     })
+  })
+
+  it('migrates a literal schema-v4 Draft round without inventing refinement provenance', async () => {
+    const state = await validState()
+    const legacy = JSON.parse(JSON.stringify(state)) as Record<string, unknown>
+    const legacyDraft = {
+      ordinal: 1,
+      instruction: 'Legacy bounded draft.',
+      requestedAt: now(),
+      routes: [{ provider: 'alpha', model: 'writer', status: 'drafted', chars: 21 }],
+    }
+    legacy.schemaVersion = 4
+    delete legacy.draftRecovery
+    legacy.drafts = [legacyDraft]
+
+    const decoded = decodeRavenTaskState(legacy)
+
+    expect(decoded).toEqual({ ...state, schemaVersion: 5, drafts: [legacyDraft] })
+    expect(decoded?.drafts?.[0]).not.toHaveProperty('path')
+  })
+
+  it('validates bounded multi-model draft provenance without retaining generated text', async () => {
+    const state = await validState()
+    const round = {
+      ordinal: 1,
+      instruction: 'Draft one section.',
+      requestedAt: now(),
+      routes: [{ provider: 'alpha', model: 'writer', status: 'drafted', chars: 20 }, {
+        provider: 'beta', model: 'critic', status: 'drafted', chars: 21,
+      }],
+      steeringRevision: 0,
+      path: 'multi-model',
+      recommendation: 'proceed',
+      comparisonRoute: { provider: 'beta', model: 'critic' },
+      synthesisRoute: { provider: 'alpha', model: 'writer' },
+      synthesizedFromRoutes: [{ provider: 'alpha', model: 'writer' }, { provider: 'beta', model: 'critic' }],
+    }
+    const current = { ...state, drafts: [round] }
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(current)))).toEqual(current)
+
+    expect(decodeRavenTaskState({
+      ...current,
+      drafts: [{ ...round, routes: [round.routes[0], round.routes[0]] }],
+    })).toBeUndefined()
+    expect(decodeRavenTaskState({
+      ...current,
+      drafts: [{ ...round, routes: [{ ...round.routes[0], status: 'failed', chars: 20 }, round.routes[1]] }],
+    })).toBeUndefined()
+    expect(decodeRavenTaskState({
+      ...current,
+      drafts: [{ ...round, synthesizedFromRoutes: [round.synthesizedFromRoutes[0]] }],
+    })).toBeUndefined()
+    expect(decodeRavenTaskState({
+      ...current,
+      drafts: [{ ...round, recommendation: 'structure' }],
+    })).toBeUndefined()
   })
 
   it('preserves a schema-v3 Task at the byte cap when compatibility fields add migration overhead', async () => {
@@ -689,7 +745,7 @@ describe('Raven Task snapshot codec', () => {
   it('keeps migration bounded to known older schemas', async () => {
     const state = await validState()
     expect(decodeRavenTaskState({ ...state, schemaVersion: 0 })).toBeUndefined()
-    expect(decodeRavenTaskState({ ...state, schemaVersion: 5 })).toBeUndefined()
+    expect(decodeRavenTaskState({ ...state, schemaVersion: 6 })).toBeUndefined()
     expect(decodeRavenTaskState({ ...state, schemaVersion: 'one' })).toBeUndefined()
   })
   // rather than one unreadable snapshot.

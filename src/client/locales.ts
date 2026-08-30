@@ -61,7 +61,7 @@ export const en: Record<RavenCardKey, string> = {
   'group.evidence': 'Evidence',
   'group.discovery': 'Discovery',
   'group.prose': 'Artifact prose',
-  'group.draft': 'Draft Variants',
+  'group.draft': 'Draft refinement',
   'group.other': 'Other',
   guidance: 'Contextual guidance',
   guidanceHint:
@@ -97,16 +97,17 @@ export const en: Record<RavenCardKey, string> = {
   proseFormatHint:
     'Markdown is the default final output format and is what makes the layout structure-aware. Plain treats every '
     + 'line as prose.',
-  draftRoutes: 'Draft Variant routes',
+  draftRoutes: 'Draft refinement routes',
   draftRoutesHint:
-    'One provider/model per line. This list is the whole universe: the agent may select a subset and nothing else. '
-    + 'Empty disables Draft Variants and says so.',
-  draftMaxTokens: 'Draft length bound',
-  draftMaxTokensHint: 'Model output tokens allowed for one Draft Variant; 0 means the built-in bound.',
-  draftTimeoutMs: 'Draft deadline',
+    'One authorized provider/model per line. Routes receive the selected Skeleton, linked Claim/Insight text and evidence '
+    + 'excerpts, audience/constraints, and current Artifact. Two successful routes enable multi-model refinement; fewer '
+    + 'use an explicit fallback. Empty never selects the session model.',
+  draftMaxTokens: 'Draft call length bound',
+  draftMaxTokensHint: 'Model output tokens allowed for each candidate, critique, or synthesis call; 0 uses the built-in bound.',
+  draftTimeoutMs: 'Draft call deadline',
   draftTimeoutMsHint:
-    'Milliseconds allowed for one Draft Variant; 0 means no deadline. A route that exceeds it produces no variant; '
-    + 'its siblings still return theirs.',
+    'Milliseconds allowed for each candidate, critique, or synthesis call; 0 means no deadline. A timed-out attempt '
+    + 'does not discard successful candidates or fallback paths.',
   'choice.auto': 'Auto',
   'choice.off': 'Off',
   'choice.remote': 'Re-fetch',

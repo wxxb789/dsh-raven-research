@@ -110,10 +110,13 @@ external/destructive/sensitive side effect.
   rewritten paragraphs. The transform is Markdown-structure-aware and idempotent — fenced code, tables, headings,
   thematic breaks, link definitions, math blocks, YAML frontmatter, hard line breaks, and list/blockquote
   continuation prefixes are copied through untouched.
-- **Draft Variants.** `draft` asks every configured `provider/model` route for the same bounded instruction and
-  returns the candidates, each laid out one sentence per line so they diff line by line. A Draft Variant is a
-  candidate exactly as a Lead is: it carries no evidence, can never be cited, and never counts toward the evidence
-  floor. Off until a deployment configures routes.
+- **Selected-Skeleton multi-model drafting.** `draft` binds one exact selected-Skeleton section to its purpose,
+  Claim/Insight lineage, evidence needs, counterarguments, audience, constraints, and wider argument flow. Configured
+  routes produce independent candidates; Raven adversarially compares reasoning and expression across eight quality
+  dimensions, then synthesizes strengths from multiple variants instead of choosing a winner. A real research,
+  synthesis, or structure gap sends the Task back rather than polishing a broken argument. Variants, critique, and
+  synthesis remain candidate material—not evidence—and single-model/main-agent fallback keeps Raven usable when the
+  multi-model path is unavailable.
 - **First-class settings namespace.** Registering the plugin exposes `raven-research` to every configuration surface
   a Harness deployment composes; there is nothing to add to the Harness itself.
 - **A settings card in the Web GUI.** Raven ships a browser half that registers a card under Settings › Plugins for
@@ -495,7 +498,7 @@ integrators and tests:
 | `synthesize` | Examines named Claims for interpretation, records inspectable **Insight Candidates** with assumptions and alternatives, and reports Summary Debt for a synthesis-heavy scope. It neither publishes nor accepts a candidate. |
 | `structure` | Records 2–4 materially different evidence-linked Skeleton Candidates, a complete private comparative battle, and Raven's recommended candidate or hybrid. The rendered result shows only compact alternatives and tradeoffs. |
 | `select-structure` | Resolves the current argument architecture through user collaboration or delegated Raven choice. It may adopt one Candidate or persist a modified/hybrid Skeleton; substantive drafting is gated on this selection unless the Task is on `skip`. |
-| `draft` | Asks every configured `provider/model` route for the same bounded instruction and returns the candidates for comparison. A **Draft Variant** carries no evidence and can never be cited. |
+| `draft` | Binds one selected-Skeleton section to its reasoning/evidence contract, generates independent route candidates, adversarially compares them, and synthesizes strengths from multiple candidates. A real gap returns `needs-revision`; unavailable routes degrade to single-model/main-agent drafting. Every output remains candidate material, never evidence. |
 | `checkpoint` | Publishes a user-visible Artifact version with new Sources, Claims, and recorded failures, and verifies grounded evidence. |
 | `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. It may change Structure Studio mode; every Steering Revision invalidates a stale selected Skeleton until the changed framing is battled and resolved again. |
 | `complete` | Validates citation identity, material Claim links, matched excerpts, Source reachability, and the exact Artifact fingerprint against the latest post-steer Checkpoint. |
@@ -584,21 +587,42 @@ current compact alternatives or exact selected Skeleton before drafting. A Steer
 changed framing is battled again. The current main model can run the full Studio alone; configured routes or subagents are optional sources
 of private diversity and criticism, not a requirement.
 
-### Comparing wording: Draft Variants
+### Drafting and adversarial refinement
 
-After a Studio-enabled Task selects its current Skeleton—or immediately on the `skip` path—`action=draft` sends one bounded instruction — a section, a paragraph, an abstract — to every configured
-`provider/model` route and returns the results together, each laid out one sentence per line so they diff line by
-line. The combined request, steering, selected Skeleton, and current Artifact context is capped at 64,000 characters
-before any route runs. A route that fails or times out costs its own variant, never the round.
+After a Studio-enabled Task selects its current Skeleton, `action=draft` requires one exact `sectionId` and a narrow
+instruction. The complete Skeleton and the active section's purpose, Claim/Insight lineage, evidence needs, and
+counterarguments join the Task request, latest audience/constraint steering, and current Artifact as the drafting
+contract. Raven therefore asks models to write one coherent section—not to regenerate an entire long Artifact from an
+isolated wording prompt. The combined contract is capped at 64,000 characters before any route runs. On the lightweight
+`skip` path, a bounded paragraph, abstract, or similarly coherent unit remains available without `sectionId`.
 
-A Draft Variant is a **candidate**, exactly as a Lead is. It carries no evidence, may never be cited, and never
-counts toward the evidence floor; a sentence every variant agrees on is still unsupported until a recorded Source
-excerpt supports it. Adopt phrasing, never facts.
+Candidate generation is independent and concurrent: no route sees a sibling's prose. When two or more routes succeed,
+Raven sends all successful candidates through an adversarial comparison of argument integrity, evidence fidelity,
+originality, logical progression, clarity and compression, counterargument handling, reader value and surprise, and
+whether the prose performs reasoning rather than merely restating material. Only a `proceed` comparison triggers prose
+synthesis. The synthesizer must return structured contributions from at least two distinct candidates, each carrying
+a route-specific exact fragment of at least two substantive words into the final prose. A winner-copy or malformed
+result is rejected and another successful route is tried. Required Skeleton/section lineage
+is retained intact through both refinement stages, while candidate material is fairly bounded around it. Candidates and
+synthesized prose use the Task's Prose Layout, and truncation stays visible to later stages and the main agent.
 
-The deployment owns the route list: the agent may select a subset of `draftRoutes` and nothing else, because naming
-a model is naming spend and a data path. An unknown route is refused with the configured set named rather than
-quietly substituted. Drafting is **off** until a deployment sets `draftRoutes`; until then the call reports that
-instead of drafting from the session model.
+A comparison can instead recommend `research`, `synthesis`, or `structure`. Raven returns `needs-revision`, persists the
+obligation through replay/status/context, rejects another draft before the matching recovery succeeds, and blocks prose
+Checkpoints and Completion until that recovery is followed by another draft round. These are autonomous recovery paths, not per-section approval gates. The structural
+path still preserves the user's one high-leverage architecture collaboration when it materially changes the argument.
+
+Every Draft Variant, criterion assessment, and synthesized sentence is a **candidate**, exactly as a Lead is. None
+carries evidence, may be cited, or counts toward the evidence floor. Model agreement is not corroboration; every factual
+or analytical proposition adopted into a Checkpoint must still obey Raven's Source/Claim/Insight provenance and final
+verification rules. Model output is rendered inside a delimiter-safe, explicitly untrusted candidate block. Durable
+Task state records only bounded section/revision, route, path, recovery, comparison, and validated contribution
+provenance—never candidate, critique, or synthesized text.
+
+The deployment owns `draftRoutes`: the agent may select a subset and nothing else, because naming a model names spend
+and a data path. An unknown route is refused rather than quietly substituted. A failed route loses only its attempt. If
+fewer than two candidates survive, Raven explicitly uses the single-model or main-agent path and skips false comparison;
+if no routes are configured, `draft` reports that multi-model refinement did not run while the existing main agent remains
+usable. Raven never silently sends the request through the session model.
 
 ### Keeping knowledge across Tasks: Raven Workspace
 
@@ -796,9 +820,9 @@ settings provider serves the namespace to every configuration surface.
 | `searchTimeoutMs` | `30000` | Deadline for one discovery query, in milliseconds. `0` means no deadline. An exceeded query is recorded as a failed query and a Limitation; its siblings still return their Leads. |
 | `proseLayout` | `sentence-per-line` | How every stored Artifact is laid out. The default puts one sentence on each line, making a line the smallest edit unit. `as-written` stores exactly what the agent submitted. |
 | `proseFormat` | `markdown` | The Artifact format Raven assumes. `markdown` is the documented default final output format and is what makes the layout structure-aware. `plain` treats every line as prose, so a deployment whose Artifacts are not Markdown does not get its headings and code reflowed as sentences. |
-| `draftRoutes` | `[]` | Model routes a Draft Variant may be requested from, one `provider/model` per entry, split on the **first** slash so a namespaced model id survives — `openrouter/deepseek/deepseek-chat` is the provider `openrouter` and the model `deepseek/deepseek-chat`. This list is the whole universe: the agent may select a subset of it and nothing else. Empty disables Draft Variants and reports that instead of drafting from the session model. |
-| `draftMaxTokens` | `4000` | Upper bound on one Draft Variant, in model output tokens. `0` means the built-in bound. Every route in a round shares it so the variants stay comparable. |
-| `draftTimeoutMs` | `120000` | Deadline for one Draft Variant, in milliseconds. `0` means no deadline. A route that exceeds it produces no variant and says so; its siblings still return theirs. |
+| `draftRoutes` | `[]` | Authorized model routes for independent section candidates and the later critique/synthesis stages, one `provider/model` per entry and split on the **first** slash. The agent may select a subset and nothing else. Two or more successful routes enable adversarial multi-model refinement; fewer use an explicit single-model/main-agent fallback. Empty never silently selects the session model. |
+| `draftMaxTokens` | `4000` | Upper bound on each candidate, critique, or synthesis model call. `0` means the built-in bound. Every route and stage in a round shares it. |
+| `draftTimeoutMs` | `120000` | Deadline for each candidate, critique, or synthesis model call. `0` means no deadline. A timed-out attempt loses only that attempt; successful candidates and fallback paths remain usable. |
 
 > [!NOTE]
 > No setting can lower a Task's evidence floor. Withholding checks makes evidence unverifiable, which refuses
@@ -905,22 +929,25 @@ Discovery is a convenience, not a requirement: the agent's own retrieval tools s
 work, and it is always the agent — never `discover` — that opens a Lead and records the
 excerpt.
 
-Drafting is off by default and needs no credential of its own; if `draftRoutes` is empty,
-`action=draft` reports `no Draft Variant route is configured` instead of quietly drafting
-from the session model. A configured route does require that provider's credential in the
-Harness.
+Multi-model refinement is off by default and needs no credential of its own. If `draftRoutes`
+is empty, `action=draft` reports `no Draft Variant route is configured`, leaves the Task intact,
+and tells the already-running main agent to continue; it never quietly sends data through the
+session model. A configured route requires that provider's credential in the Harness.
 
 ### Cost
 
 Raven adds no model of its own, but two actions multiply work the deployment pays for.
 
-- **A draft round bills every configured route, in parallel.** `action=draft` sends the
-  same instruction to every route in `draftRoutes` (or the subset the agent selects) and
-  runs them concurrently, so the cost of one round is the sum over routes, not the cost
-  of one model. Three routes is three billed completions for one instruction. Each is
-  bounded by `draftMaxTokens` (default `4000` output tokens) and `draftTimeoutMs`
-  (default `120000`). This is why the deployment owns the route list and the agent may
-  only pick a subset: naming a model is naming spend and a data path.
+- **A multi-model draft round bills candidate generation plus refinement.** `action=draft`
+  sends the selected section contract independently to every route in `draftRoutes` (or an
+  authorized subset), so three routes begin with three concurrent billed completions. With
+  at least two successes, one successful route performs adversarial comparison and a different
+  route is tried first for synthesis. Failed critique or synthesis attempts may fall through
+  the remaining successful routes, so the worst case is `N` candidate calls + up to `N`
+  critique attempts + up to `N` synthesis attempts; the normal successful path is `N + 2`.
+  `draftMaxTokens` (default `4000`) and `draftTimeoutMs` (default `120000`) apply separately
+  to every call. This is why the deployment owns the route list: each stage names spend and
+  a data path.
 - **Verification re-fetches every cited web Source, twice per publication.** Web Resources are reopened at `checkpoint` and again at `complete`; Completion does not trust the earlier result because a page can change. A Task with 20 web Sources checkpointed four times and completed once performs about 100 fetches. Local, llm-wiki, and MCP verification rechecks the bounded Markdown already in Task state and makes no network call; their ordinary Harness inspection happened before registration.
 - **Discovery** costs one search-backend call per query in the batch, up to
   `searchMaxQueries` (default `4`), each requesting up to `searchMaxResults` (default `8`)
@@ -938,14 +965,16 @@ leaves the machine leaves through a Harness capability the deployment composed:
 | Recorded web Source **URLs**, re-fetched in full | The origin host of each web Source | Every grounded `checkpoint`, and every `complete` |
 | Local, llm-wiki, and MCP resource requests | Whatever ordinary Harness file/MCP tool the agent invokes | Before Source registration; Raven does not add a connector or second retrieval path |
 | **Search queries** you or the agent formulate | The composed search backend (e.g. the DeepSeek search provider) | Every `discover` |
-| The **draft instruction** and whatever context the drafter sends with it | Every configured model route in the round | Every `draft` |
+| The selected **draft section contract** — complete Skeleton, linked Claim/Insight records, linked Source titles/locators/excerpts/check state, audience/constraints — plus instruction and current Artifact | Every configured candidate route in the round | Candidate generation for every `draft` |
+| Successful candidate prose plus bounded contract and critique data | The configured route attempted for adversarial comparison or synthesis | Multi-model refinement after at least two candidate routes succeed |
 
-Note the third row: **Artifact and instruction text is sent to each draft route**, so a
-route pointed at a third-party provider is a data path for the text being written. That
-is the reason `draftRoutes` is a deployment setting and not something the agent can widen.
+Artifact, instruction, Skeleton, linked evidence excerpts, Claim/Insight text, and candidate text can therefore cross
+every configured route used by its stage. Configuring `draftRoutes` is the deployment's explicit authorization for this
+bounded writing context; a route pointed at a third-party provider is a data path for it, and the agent cannot widen the
+route list.
 
-Nothing else is transmitted by Raven. Task Source metadata, bounded non-web Markdown representations, excerpts,
-Claims, Limitations, Source Policy, and Artifacts live in the Harness **session log**. Workspace tool calls likewise
+Outside those configured draft calls, Task Source metadata, bounded non-web Markdown representations, excerpts, Claims,
+Limitations, Source Policy, and Artifacts remain in the Harness **session log**. Workspace tool calls likewise
 carry the inspected Markdown snapshots and normalized documents needed for that operation; do not pass sensitive local
 or MCP content unless that session log is an acceptable persistence location. Applied Workspace pages also live in the
 user-owned llm-wiki. Raven itself writes no file at any point.
@@ -1010,7 +1039,7 @@ locator at 4,000) are reported the same way.
 | `DeepSeek search has no API key for "DEEPSEEK_API_KEY"` | Discovery reached the search provider, which has no credential. | Store the key through the credentials service (Models page in the Web GUI, or the environment). Fetch is unaffected. |
 | `DeepSeek Harness web search capability is not composed` | No search half at all. | Compose a search provider, or let the agent use its own retrieval tools — discovery is optional. |
 | Discovery reports unavailable and records a Limitation, with no error | `sourceDiscovery: disabled`. | Deliberate: an empty result would read as "nothing exists". Set it back to `seam`. |
-| `no Draft Variant route is configured` | `draftRoutes` is empty — the default. | Set `draftRoutes` to `provider/model` entries. Drafting is off until you do. |
+| `no Draft Variant route is configured` | `draftRoutes` is empty — the default. | Continue with the reported main-agent fallback, or set at least two `provider/model` entries to enable adversarial multi-model refinement. |
 | A route is refused with the configured set named | The agent selected a route outside `draftRoutes`. | Expected: the agent may only select a subset. Add the route to the deployment setting if it should be allowed. |
 | A Checkpoint citing a web Source is refused, naming `structural-only` | `sourceVerification: structural-only` withholds remote web checks. | Set it back to `remote`, or use a non-web Source with a verified Markdown representation. |
 | Completion is refused: candidate bytes differ from the latest Checkpoint | The final edit was never published as a Checkpoint, or the *submitted* bytes were edited rather than the *stored* ones. | Re-read the rendered Artifact and complete with exactly those bytes. Storage is in the Task's Prose Layout, so the returned bytes differ from what was sent. |
@@ -1199,8 +1228,9 @@ does not delete user-owned llm-wiki Workspace files.
 ## v1 limits
 
 - Excerpt verification is literal, not semantic (see FAQ).
-- The four Outcomes select grounding defaults and explicit prompt policy inside the existing Harness agent; Raven
-  embeds no second model and no deterministic prose generator, so content quality remains model-dependent.
+- The four Outcomes select grounding defaults and explicit prompt policy inside the existing Harness agent. Optional
+  configured draft routes add bounded candidate, critique, and synthesis calls but no autonomous second agent or
+  deterministic prose generator, so content quality remains model-dependent.
 - Natural-language correction detection is performed by the Harness model using Raven's pre-step context. The plugin
   supplies the deterministic same-Task `steer` transition; it does not guess corrections with a rule-based text
   classifier.
@@ -1212,8 +1242,9 @@ does not delete user-owned llm-wiki Workspace files.
   out of scope.
 - Raven renders Task progress through ordinary tool results and chat; its only browser surface is the settings card,
   and v1 has no custom UI for the Task itself.
-- Draft Variants are off until a deployment configures `draftRoutes`, and a variant is never evidence: it cannot be
-  cited and never counts toward the evidence floor.
+- Adversarial multi-model refinement is off until a deployment configures at least two usable `draftRoutes`; Raven
+  continues through explicit single-model/main-agent fallback. Variants, critique, and synthesis are never evidence,
+  cannot be cited, and never count toward the evidence floor.
 
 ## Contributing
 
