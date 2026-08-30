@@ -545,6 +545,43 @@ describe('Raven Task snapshot codec', () => {
     })
   })
 
+  it('preserves a schema-v3 Task at the byte cap when compatibility fields add migration overhead', async () => {
+    const state = await validState()
+    const legacy = JSON.parse(JSON.stringify(state)) as Record<string, unknown>
+    legacy.schemaVersion = 3
+    delete legacy.structureMode
+    delete legacy.structureRounds
+    delete legacy.selectedSkeleton
+
+    const fullPolicyItems = Array.from({ length: 249 }, (_, index) => {
+      const prefix = `policy-${index}-`
+      return prefix + 'x'.repeat(RAVEN_LIMITS.sourcePolicyStringChars - prefix.length)
+    })
+    const sourcePolicy = {
+      allowedWebHosts: [],
+      blockedWebHosts: [],
+      preferPrimary: false,
+      localRoots: [],
+      llmWikiRoots: [],
+      includedMcpSources: [],
+      excludedMcpSources: [...fullPolicyItems, 'boundary'],
+    }
+    legacy.sourcePolicy = sourcePolicy
+    const markerIndex = sourcePolicy.excludedMcpSources.length - 1
+    const missingBytes = RAVEN_LIMITS.stateBytes - Buffer.byteLength(JSON.stringify(legacy), 'utf8')
+    expect(missingBytes).toBeGreaterThan(0)
+    sourcePolicy.excludedMcpSources[markerIndex] += 'y'.repeat(missingBytes)
+    expect(sourcePolicy.excludedMcpSources[markerIndex]?.length).toBeLessThanOrEqual(RAVEN_LIMITS.sourcePolicyStringChars)
+    expect(Buffer.byteLength(JSON.stringify(legacy), 'utf8')).toBe(RAVEN_LIMITS.stateBytes)
+
+    const decoded = decodeRavenTaskState(legacy)
+    if (decoded === undefined) throw new Error('Expected near-cap schema-v3 fixture to migrate')
+    const compatibilityFields = { structureMode: 'skip', structureRounds: [], selectedSkeleton: null }
+    const compatibilityOverhead = Buffer.byteLength(JSON.stringify(compatibilityFields), 'utf8') - 1
+    expect(Buffer.byteLength(JSON.stringify(decoded), 'utf8')).toBe(RAVEN_LIMITS.stateBytes + compatibilityOverhead)
+    expect(decodeRavenTaskState(JSON.parse(JSON.stringify(decoded)) as unknown)).toEqual(decoded)
+  })
+
   it('rejects a structurally bounded Structure Studio snapshot above the aggregate byte budget', async () => {
     const state = await validState()
     const largeSkeleton = (prefix: string) => ({

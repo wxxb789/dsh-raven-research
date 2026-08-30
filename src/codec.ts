@@ -322,6 +322,21 @@ function sha256(value: string): string {
 /** The schema version this build writes. Older versions are migrated forward. */
 export { RAVEN_SCHEMA_VERSION } from './domain.js'
 
+function v3ToV4CompatibilityFields() {
+  return {
+    structureMode: 'skip',
+    structureRounds: [],
+    selectedSkeleton: null,
+  } as const
+}
+
+// A non-empty v3 root keeps its closing brace and gains one comma plus the
+// compatibility object interior, so its exact additive JSON cost is size - 1.
+const V3_TO_V4_MIGRATION_OVERHEAD_BYTES = Buffer.byteLength(
+  JSON.stringify(v3ToV4CompatibilityFields()),
+  'utf8',
+) - 1
+
 /**
  * Forward migrations, keyed by the version being migrated FROM.
  *
@@ -368,9 +383,7 @@ const MIGRATIONS: Record<number, (state: Record<string, unknown>) => Record<stri
   3: state => ({
     ...state,
     schemaVersion: 4,
-    structureMode: 'skip',
-    structureRounds: [],
-    selectedSkeleton: null,
+    ...v3ToV4CompatibilityFields(),
   }),
 }
 
@@ -397,9 +410,15 @@ function migrateToCurrent(state: Record<string, unknown>): Record<string, unknow
 /** Decode and fully validate the compact replay snapshot, migrating older versions forward. */
 export function decodeRavenTaskState(value: unknown): RavenTaskState | undefined {
   const raw = record(value)
+  const migratingV3 = raw?.schemaVersion === 3
+  if (migratingV3 && !jsonWithinBudget(raw, RAVEN_LIMITS.stateBytes)) return undefined
   const state = raw === undefined ? undefined : migrateToCurrent(raw)
+  // Once migrated state is serialized again its original version is no longer visible.
+  // Replay therefore keeps this exact, bounded compatibility allowance for every v4
+  // snapshot; the engine still admits newly produced state against RAVEN_LIMITS.stateBytes.
+  const replayStateBudget = RAVEN_LIMITS.stateBytes + V3_TO_V4_MIGRATION_OVERHEAD_BYTES
   if (state === undefined
-    || !jsonWithinBudget(state, RAVEN_LIMITS.stateBytes)
+    || !jsonWithinBudget(state, replayStateBudget)
     || !exactKeys(state, [
       'schemaVersion', 'taskId', 'ordinal', 'outcome', 'request', 'grounding', 'phase',
       'revision', 'steeringRevision', 'steering', 'checkpoints', 'sources', 'claims',
