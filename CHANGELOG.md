@@ -10,6 +10,29 @@ tested compatibility family.
 
 ## [Unreleased]
 
+### Pre-writing Structure Studio
+
+#### Added
+
+- Added durable, evidence-linked Skeleton Candidates with distinct frames and theses, central questions, reasoning flows,
+  purposeful sections, Claim and Insight links, evidence needs, counterarguments, unresolved weaknesses, and reader takeaways.
+- Added a complete private Structure Battle for every Candidate and a compact user-facing projection of the strongest
+  alternatives, tradeoffs, and Raven recommendation.
+- Added collaborative user selection and hybridization plus delegated Raven selection, with the selected architecture
+  injected into drafting context and required before substantive prose on Studio-enabled Tasks.
+
+#### Changed
+
+- Added `collaborative | autonomous | skip` Structure Studio modes so research-only work, direct summaries, ordinary
+  learning, small writing, and explicit user skips remain lightweight.
+- A Steering Revision now invalidates a prior selection, `status` recovers current compact alternatives or the exact
+  selection, and every prose Checkpoint records the selected Skeleton revision before Completion.
+- Added punctuation/case and lexical near-duplicate rejection, mandatory Claim/Insight linkage, exact-selection
+  headroom, aggregate replay-state and Draft Variant context budgets, and delimiter-safe prompt data envelopes.
+- Detailed Studio procedure is injected only while a collaborative or autonomous decision is unresolved; lightweight
+  `skip` Tasks retain the compact base prompt. Durable Task snapshots migrate to schema v4 with old Tasks on that
+  compatibility path.
+
 ### Inspectable synthesis and critical thinking
 
 #### Added

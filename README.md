@@ -52,11 +52,14 @@ of text, and the citations are whatever the model remembered. Raven changes the 
 | Three reprints of one wire story read as three confirmations | Claims sharing a declared `sourceFamily` are marked as **not independent corroboration** |
 | Organized notes are mistaken for insight | A **Synthesis Pass** exposes Summary Debt and retains inspectable Insight Candidates with Claim lineage, assumptions, alternatives, and reversal evidence |
 | Raven's interpretation is presented as sourced fact | External Claims say what Sources say; promoted analysis is separately rendered as a **Raven inference** from named Claims |
+| Long-form prose starts from the first plausible outline | **Structure Studio** battles materially different evidence-linked argument architectures, then the user or Raven selects or hybridizes one before drafting |
 | One dead link fails the whole run | Failed dependencies **defer only the affected Claims**; independently verified work still completes honestly |
 | State dies with the tool call | The latest successfully persisted Task snapshot is **rebuilt from the session log** and supports stop/resume |
 
-Normal `discover → read → analyze → draft → verify → refine` movement stays autonomous. Raven asks only when an
-unresolved choice changes the public outcome, evidence floor, audience, deliverable, significant cost, or an
+Normal `discover → read → analyze → verify → refine` movement stays autonomous. For substantive long-form writing,
+Raven pauses once after private structural comparison when user preference can materially change the argument; this is
+collaboration, not an approval gate, and the user can delegate or skip it. Raven otherwise asks only when an unresolved
+choice changes the public outcome, evidence floor, audience, deliverable, significant cost, or an
 external/destructive/sensitive side effect.
 
 ## Features
@@ -89,6 +92,11 @@ external/destructive/sensitive side effect.
 - **Summary Debt without synthesis theater.** A synthesis pass warns when a section merely organizes or restates
   evidence, and when candidate reasoning has unusable lineage. `purpose=summary` and `purpose=explanation` explicitly
   suppress that diagnostic, so direct summaries, trivial writing, and ordinary learning remain lightweight.
+- **Pre-writing Structure Studio.** Substantive long-form writing explores 2–4 genuinely different argument
+  architectures, privately battles what each explains, misses, assumes, repeats, requires, and contributes, then
+  presents only the strongest alternatives and Raven's recommendation. The user can select, modify, reject, combine,
+  redirect, delegate, or skip naturally. The resolved Skeleton retains Claim/Insight links, counterarguments, evidence
+  gaps, weaknesses, and reader takeaway in Task state and drafting context; lightweight work bypasses the Studio.
 - **Honest partial results.** Withdrawn Claims force the asserting prose to be edited in the same Checkpoint; a
   dropped citation may not leave a bare assertion standing. Unverifiable evidence refuses publication rather than
   silently downgrading to "unchecked".
@@ -482,14 +490,16 @@ integrators and tests:
 
 | Action | What it does |
 | --- | --- |
-| `start` | Opens one Task with an Outcome (`research`, `general-writing`, `academic-writing`, `learning`) and a grounding level (`required`, `optional`, `none`). |
+| `start` | Opens one Task with an Outcome, grounding level, and internal Structure Studio mode: `collaborative`, `autonomous`, or `skip` (the compatibility default). |
 | `discover` | Runs one batch of complementary queries through the Harness `web` search seam and returns **Leads** — uninspected candidates, never Sources. A failing query becomes a Limitation instead of losing the batch. |
 | `synthesize` | Examines named Claims for interpretation, records inspectable **Insight Candidates** with assumptions and alternatives, and reports Summary Debt for a synthesis-heavy scope. It neither publishes nor accepts a candidate. |
+| `structure` | Records 2–4 materially different evidence-linked Skeleton Candidates, a complete private comparative battle, and Raven's recommended candidate or hybrid. The rendered result shows only compact alternatives and tradeoffs. |
+| `select-structure` | Resolves the current argument architecture through user collaboration or delegated Raven choice. It may adopt one Candidate or persist a modified/hybrid Skeleton; substantive drafting is gated on this selection unless the Task is on `skip`. |
 | `draft` | Asks every configured `provider/model` route for the same bounded instruction and returns the candidates for comparison. A **Draft Variant** carries no evidence and can never be cited. |
 | `checkpoint` | Publishes a user-visible Artifact version with new Sources, Claims, and recorded failures, and verifies grounded evidence. |
-| `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. |
+| `steer` | Applies a user correction to the same Task, preserving prior evidence and Checkpoints. It may change Structure Studio mode; every Steering Revision invalidates a stale selected Skeleton until the changed framing is battled and resolved again. |
 | `complete` | Validates citation identity, material Claim links, matched excerpts, Source reachability, and the exact Artifact fingerprint against the latest post-steer Checkpoint. |
-| `status` | Reports the current Task book and one bounded page of unpromoted Insight Candidate IDs; optional nonnegative `insightOffset` advances through later pages. |
+| `status` | Reports the current Task book, re-renders an exact selected Skeleton on demand, and returns one bounded page of unpromoted Insight Candidate IDs; optional nonnegative `insightOffset` advances through later pages. |
 | `inspect` | Returns exact records for 1–8 explicitly named durable Insight Candidates; it never dumps the full Candidate collection. |
 | `stop` | Marks the Task stopped; explicitly not Completion. It prevents later Task mutation after processing but does not cancel Harness work already in flight. |
 | `resume` | Reopens a stopped Task — including an older one — without losing evidence or Artifact. |
@@ -541,14 +551,45 @@ A candidate is never automatically accepted. A later Checkpoint promotes it only
 `kind=analysis` Claim carrying the candidate's unchanged text, `insightId`, exact `derivedFromClaimIds`, and exact
 assumptions. Every premise must still be supported or qualified. Raven rejects the candidate as an `external` Claim,
 renders accepted analysis under **Analysis lineage** as “Raven inference from …,” and automatically defers it if a
-premise later loses support. Competing candidates remain visible after promotion. This is the intellectual substrate for
-future drafting workflows; it does not add multi-skeleton or multi-model synthesis.
+premise later loses support. Competing candidates remain visible after promotion. This is the intellectual substrate
+Structure Studio uses; it does not add a second synthesis model loop.
+
+### Choosing the argument: Structure Studio
+
+For substantive long-form general or academic writing, Raven sets `structureMode=collaborative` when user preference
+can materially change the argument, or `autonomous` when the user delegates the choice. Research-only findings, direct
+summaries, ordinary learning, small writing, and explicit user skips use `skip` and keep their existing lightweight path.
+
+After enough evidence and analysis exist, Raven generates 2–4 **Skeleton Candidates**. A Skeleton is not an outline:
+it defines the piece's intellectual frame, thesis, central question, reasoning flow, section purposes, Claim and Insight
+links, evidence gaps, counterarguments with their own Claim/Insight lineage, unresolved weaknesses, and intended reader
+takeaway. Every Skeleton retains at least one recorded Claim or Insight link. Frames and theses must be materially
+different; punctuation/case copies, lexical near-duplicates, renamed headings, and reordered copies are refused. The
+full Studio procedure is injected only while a collaborative or autonomous Task is unresolved, so the skip path does
+not pay that recurring prompt cost.
+
+Before showing anything, Raven records one **Structure Battle** entry per Candidate: what it explains better, fails to
+explain, assumes, repeats from conventional wisdom, requires as evidence, contributes as non-obvious insight, and offers
+to a hybrid. The tool result intentionally omits that tournament detail and presents compact alternatives, tradeoffs,
+and Raven's recommendation. The user can discuss, modify, reject, combine, redirect, delegate, or skip in natural
+language. This is a high-leverage collaboration point, not an approval gate.
+
+`select-structure` stores either one exact Candidate or a resolved hybrid with `chosenBy=user | raven`. The selected
+Skeleton—not merely its headings—enters every Draft Variant context as delimiter-safe data, including its Claim/Insight
+links, counterargument lineage, evidence needs, weaknesses, and takeaway. Draft, draft-stage Checkpoint, and Completion
+are refused on Studio-enabled Tasks until that selection exists. Each prose Checkpoint records the selected Skeleton's
+Task revision, so selecting a different Candidate forces a new Checkpoint before Completion. Always-on Task context
+carries only a bounded delimiter-safe frame/thesis/section-ID digest; after replay or context loss, `status` returns the
+current compact alternatives or exact selected Skeleton before drafting. A Steering Revision clears stale selection so
+changed framing is battled again. The current main model can run the full Studio alone; configured routes or subagents are optional sources
+of private diversity and criticism, not a requirement.
 
 ### Comparing wording: Draft Variants
 
-`action=draft` sends one bounded instruction — a section, a paragraph, an abstract — to every configured
+After a Studio-enabled Task selects its current Skeleton—or immediately on the `skip` path—`action=draft` sends one bounded instruction — a section, a paragraph, an abstract — to every configured
 `provider/model` route and returns the results together, each laid out one sentence per line so they diff line by
-line. A route that fails or times out costs its own variant, never the round.
+line. The combined request, steering, selected Skeleton, and current Artifact context is capped at 64,000 characters
+before any route runs. A route that fails or times out costs its own variant, never the round.
 
 A Draft Variant is a **candidate**, exactly as a Lead is. It carries no evidence, may never be cited, and never
 counts toward the evidence floor; a sentence every variant agrees on is still unsupported until a recorded Source
@@ -1114,8 +1155,9 @@ with its own tools and its own model.
 
 **Does `synthesize` run a new model workflow or choose among several models?**
 No. The existing main agent identifies and submits Insight Candidates; Raven validates, persists, renders, and
-propagates their lineage. Draft Variants remain wording candidates, and this release adds neither multi-skeleton nor
-multi-model synthesis.
+propagates their lineage. Structure Studio then uses those records to compare argument architectures without adding a
+second synthesis model loop. Alternate configured routes or subagents may increase private diversity, but the current
+model can generate, battle, and resolve Skeleton Candidates alone; Draft Variants remain wording candidates.
 
 **Do I need a vector database, an index, or an embedding pipeline?**
 No. Raven has no connector store of its own. Web Sources are independently reopened through the Harness `web` capability. The agent inspects local files, llm-wiki pages, and MCP resources with ordinary Harness tools and records bounded Markdown plus explicit Original Resource and producer provenance.

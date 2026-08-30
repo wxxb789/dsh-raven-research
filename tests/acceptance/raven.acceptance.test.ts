@@ -145,6 +145,94 @@ const claim = (claimId: string, sourceId: string, text: string) => ({
   sourceIds: [sourceId],
 })
 
+const structureInsightText = 'Short evaluation windows may make visible activity crowd out delayed outcomes.'
+const structureInsight = {
+  insightId: 'I1',
+  text: structureInsightText,
+  kind: 'explanation',
+  pattern: 'incentive-mismatch',
+  claimIds: ['C1'],
+  assumptions: ['Evaluation decisions privilege outcomes visible inside the review window.'],
+  rationale: 'The mechanism connects the observed activity reward to a later outcome deficit.',
+  wouldChangeMind: 'Evidence that evaluation decisions consistently use delayed outcome measures.',
+  confidence: 'medium',
+}
+const structureAnalysisClaim = {
+  claimId: 'A1',
+  text: structureInsightText,
+  kind: 'analysis',
+  importance: 'material',
+  disposition: 'qualified',
+  sourceIds: [],
+  insightId: 'I1',
+  derivedFromClaimIds: ['C1'],
+  assumptions: structureInsight.assumptions,
+}
+
+const acceptanceSkeleton = (overrides: Record<string, unknown> = {}) => ({
+  frame: 'Incentive timing explains why visible activity crowds out delayed outcomes.',
+  thesis: 'The apparent execution problem is primarily an incentive-horizon problem.',
+  centralQuestion: 'Why do capable teams optimize for activity instead of delayed outcomes?',
+  reasoningFlow: ['Establish the recurring gap.', 'Explain the timing mechanism.', 'Derive the intervention.'],
+  sections: [{
+    sectionId: 'mechanism',
+    title: 'The operating mechanism',
+    purpose: 'Connect review timing to the behavior it rewards.',
+    claimIds: ['C1', 'A1'],
+    insightIds: ['I1'],
+    evidenceNeeds: ['Longitudinal evidence separating short activity from delayed outcomes.'],
+    counterarguments: [{
+      text: 'Measurement cost may explain the pattern without an incentive mechanism.',
+      claimIds: ['C1', 'A1'],
+      insightIds: ['I1'],
+    }],
+  }],
+  unresolvedWeaknesses: ['The interaction with measurement cost remains unresolved.'],
+  readerTakeaway: 'Change the evaluation horizon before demanding different behavior.',
+  ...overrides,
+})
+
+const acceptanceCandidates = () => [{
+  candidateId: 'SK1',
+  label: 'Incentive horizon',
+  skeleton: acceptanceSkeleton(),
+}, {
+  candidateId: 'SK2',
+  label: 'Measurement bottleneck',
+  skeleton: acceptanceSkeleton({
+    frame: 'Measurement infrastructure explains why delayed outcomes disappear from decisions.',
+    thesis: 'The apparent execution problem is primarily an observability-cost problem.',
+    centralQuestion: 'What becomes rational when long-horizon outcomes are expensive to observe?',
+    reasoningFlow: ['Map cheap measures.', 'Explain attention allocation.', 'Derive the observability intervention.'],
+    sections: [{
+      sectionId: 'measurement',
+      title: 'The observability bottleneck',
+      purpose: 'Show how measurement cost narrows what decision makers can reward.',
+      claimIds: ['C1', 'A1'],
+      insightIds: ['I1'],
+      evidenceNeeds: ['Cost and latency data for delayed-outcome measurement.'],
+      counterarguments: [{
+        text: 'Decision makers may ignore delayed measures even when those measures are cheap.',
+        claimIds: ['C1', 'A1'],
+        insightIds: ['I1'],
+      }],
+    }],
+    unresolvedWeaknesses: ['Measurement cost is not quantified in the current record.'],
+    readerTakeaway: 'Build observability before treating behavior as an incentive failure.',
+  }),
+}]
+
+const acceptanceBattle = (items = acceptanceCandidates()) => items.map((candidate, index) => ({
+  candidateId: candidate.candidateId,
+  explainsBetter: [`Explains causal mechanism ${index + 1}.`],
+  failsToExplain: [`Leaves boundary ${index + 1} unresolved.`],
+  conventionalWisdom: [`Risks repeating prescription ${index + 1}.`],
+  evidenceRequired: [`Needs discriminating evidence ${index + 1}.`],
+  assumptions: [`Depends on assumption ${index + 1}.`],
+  nonObviousInsights: [`Surfaces implication ${index + 1}.`],
+  mergeableElements: [`Contributes a section to a stronger hybrid.`],
+}))
+
 describe('Raven end-to-end acceptance', () => {
   it('progressively researches, exposes an early Artifact, accepts correction, and refines the same Task', async () => {
     const fetch = vi.fn(async ({ url }: { url: string }) => ({
@@ -301,7 +389,141 @@ describe('Raven end-to-end acceptance', () => {
     expect(prompt).toContain('Raven infers Y from A, B, and C')
     expect(prompt).toContain('alternative causal mechanisms')
     expect(prompt).toContain('Summary debt')
+    expect(prompt).toContain('Structure Studio')
+    expect(prompt).toContain('collaboration, not an approval gate')
+    expect(prompt).toContain('conditional <raven_structure_studio> instructions')
+    expect(prompt).not.toContain('Battle the Candidates before involving the user')
     expect(prompt).toContain('Do not force action=synthesize onto trivial writing')
+  })
+
+  it('selects or hybridizes evidence-linked argument architectures before prose while preserving autonomous and skip paths', async () => {
+    const fetch = vi.fn(async ({ url }: { url: string }) => ({
+      url,
+      statusCode: 200,
+      body: { kind: 'text' as const, content: 'Exact evidence excerpt for S1.' },
+    }))
+    const collaborative = createHarness({ fetch })
+    const started = await collaborative.run({
+      action: 'start', outcome: 'general-writing', grounding: 'optional', structureMode: 'collaborative',
+      request: 'Write a long-form argument about why organizations reward visible activity.',
+    })
+    await collaborative.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'analyze',
+      summary: 'Evidence the argument architectures must explain.',
+      artifact: 'Observed incentives reward visible short-term activity [@S1].',
+      sources: [source('S1', 'structure-studio')],
+      claims: [claim('C1', 'S1', 'Observed incentives reward visible short-term activity.')],
+    })
+    await collaborative.run({
+      action: 'synthesize', taskId: started.state.taskId, scope: 'Argument mechanism',
+      purpose: 'synthesis', claimIds: ['C1'], insights: [structureInsight],
+    })
+    await collaborative.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'analyze',
+      summary: 'Promoted one defensible insight before structural exploration.',
+      artifact: `Observed incentives reward visible short-term activity [@S1]. ${structureInsightText}`,
+      claims: [structureAnalysisClaim],
+    })
+    await expect(collaborative.run({
+      action: 'draft', taskId: started.state.taskId, instruction: 'Draft the opening.',
+    })).rejects.toThrow(/selected argument architecture/)
+
+    const collaborativeCandidates = acceptanceCandidates()
+    const structured = await collaborative.run({
+      action: 'structure', taskId: started.state.taskId,
+      candidates: collaborativeCandidates, battle: acceptanceBattle(collaborativeCandidates),
+      recommendation: {
+        kind: 'hybrid', candidateIds: ['SK1', 'SK2'],
+        rationale: 'Use incentive timing as the mechanism and measurement cost as its boundary condition.',
+      },
+    })
+    expect(new Set(structured.state.structureRounds[0]?.candidates.map(item => item.skeleton.frame)).size).toBe(2)
+    expect(new Set(structured.state.structureRounds[0]?.candidates.map(item => item.skeleton.thesis)).size).toBe(2)
+    expect(structured.state.structureRounds[0]?.battle).toHaveLength(2)
+
+    const hybrid = acceptanceSkeleton({
+      frame: 'Incentive timing and observability cost reinforce one operating system.',
+      thesis: 'Activity bias persists when short review windows and costly outcome measurement reinforce each other.',
+      reasoningFlow: ['Establish the timing gap.', 'Add measurement cost as its boundary.', 'Derive the joint intervention.'],
+      readerTakeaway: 'Change evaluation timing and outcome observability together.',
+    })
+    const selected = await collaborative.run({
+      action: 'select-structure', taskId: started.state.taskId, chosenBy: 'user',
+      candidateIds: ['SK1', 'SK2'], hybrid,
+      rationale: 'The user combined the strongest mechanism with its most important boundary condition.',
+    })
+    expect(selected.state.selectedSkeleton).toMatchObject({
+      kind: 'hybrid', chosenBy: 'user', candidateIds: ['SK1', 'SK2'],
+      skeleton: {
+        thesis: hybrid.thesis,
+        sections: [{
+          claimIds: ['C1', 'A1'],
+          insightIds: ['I1'],
+          evidenceNeeds: [expect.stringContaining('Longitudinal evidence')],
+          counterarguments: [{ text: expect.stringContaining('Measurement cost') }],
+        }],
+      },
+    })
+    const drafted = await collaborative.run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'draft',
+      summary: 'Prose constrained by the selected hybrid architecture.',
+      artifact: 'Observed incentives reward visible short-term activity [@S1].',
+    })
+    expect(drafted.status).toBe('active')
+    const redirected = await collaborative.run({
+      action: 'steer', taskId: started.state.taskId,
+      correction: 'Redirect the argument to a skeptical board audience.', structureMode: 'collaborative',
+    })
+    expect(redirected.state.selectedSkeleton).toBeNull()
+
+    const autonomous = createHarness()
+    const delegated = await autonomous.run({
+      action: 'start', outcome: 'general-writing', grounding: 'none', structureMode: 'autonomous',
+      request: 'Choose the strongest architecture yourself for a long-form essay.',
+    })
+    const premise = await autonomous.run({
+      action: 'checkpoint', taskId: delegated.state.taskId, stage: 'analyze',
+      summary: 'A context Claim for autonomous structure.', artifact: 'Visible activity dominates operating attention.',
+      claims: [{
+        claimId: 'C1', text: 'Visible activity dominates operating attention.', kind: 'analysis',
+        importance: 'context', disposition: 'supported', sourceIds: [],
+      }],
+    })
+    await autonomous.run({
+      action: 'synthesize', taskId: delegated.state.taskId, scope: 'Autonomous mechanism',
+      purpose: 'synthesis', claimIds: ['C1'], insights: [structureInsight],
+    })
+    const promoted = await autonomous.run({
+      action: 'checkpoint', taskId: delegated.state.taskId, stage: 'analyze',
+      summary: 'Promoted one insight for autonomous structure.',
+      artifact: `Visible activity dominates operating attention. ${structureInsightText}`,
+      claims: [structureAnalysisClaim],
+    })
+    const autonomousCandidates = acceptanceCandidates()
+    const autoStructured = await autonomous.run({
+      action: 'structure', taskId: delegated.state.taskId,
+      candidates: autonomousCandidates, battle: acceptanceBattle(autonomousCandidates),
+      recommendation: { kind: 'candidate', candidateIds: ['SK1'], rationale: 'It explains the mechanism most directly.' },
+    })
+    expect(autoStructured.state.taskId).toBe(premise.state.taskId)
+    expect(autoStructured.state.taskId).toBe(promoted.state.taskId)
+    const autoSelected = await autonomous.run({
+      action: 'select-structure', taskId: delegated.state.taskId, chosenBy: 'raven',
+      candidateIds: ['SK1'], rationale: 'Raven selected the strongest explanatory architecture.',
+    })
+    expect(autoSelected.state.selectedSkeleton).toMatchObject({ kind: 'candidate', chosenBy: 'raven' })
+
+    const lightweight = createHarness()
+    const skipped = await lightweight.run({
+      action: 'start', outcome: 'general-writing', grounding: 'none', structureMode: 'skip',
+      request: 'Rewrite this two-sentence release note.',
+    })
+    const quickDraft = await lightweight.run({
+      action: 'checkpoint', taskId: skipped.state.taskId, stage: 'draft',
+      summary: 'Lightweight rewrite.', artifact: 'The release rolls out tomorrow.',
+    })
+    expect(quickDraft.state.structureRounds).toEqual([])
+    expect(quickDraft.state.selectedSkeleton).toBeNull()
   })
 
   it('supports general writing without forcing external evidence', async () => {
@@ -852,7 +1074,10 @@ describe('Raven end-to-end acceptance', () => {
     const properties = raven.tool.parameters.properties as Record<string, unknown>
     const action = properties.action as { enum: string[] }
 
-    expect(action.enum).toEqual(['start', 'discover', 'synthesize', 'draft', 'checkpoint', 'steer', 'complete', 'status', 'inspect', 'stop', 'resume', 'export'])
+    expect(action.enum).toEqual([
+      'start', 'discover', 'synthesize', 'structure', 'select-structure', 'draft', 'checkpoint', 'steer',
+      'complete', 'status', 'inspect', 'stop', 'resume', 'export',
+    ])
     expect(action.enum).not.toContain('confirm')
     expect(action.enum).not.toContain('approve')
     expect(String(raven.sections[0]?.text)).toContain('Do not ask for approval between')
