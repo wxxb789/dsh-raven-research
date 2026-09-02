@@ -10,6 +10,32 @@ tested compatibility family.
 
 ## [Unreleased]
 
+### Reproducible evaluation and workflow hardening
+
+#### Added
+
+- Added a strict, evidence-first Raven evaluation suite with eight controlled workflows, frozen synthetic Source fixtures,
+  assessor-only fact and contradiction identities, exact SHA-256 checks, nullable usage accounting, categorical human
+  review rubrics, deterministic blinded packets, and isolated vanilla PTC versus PTC-plus-Raven live runs.
+- Added a keyless paired-run/restart smoke, raw Session and model/service-call ledgers, shared-cwd environment fingerprints,
+  counterbalanced arm order, secret-scanned evidence admission, and private local paid-evaluation commands.
+- Added a separate Raven single-route versus multi-route drafting ablation, two-stage blinded-content/lifecycle review, factual reports without an aggregate score, and schema-version 2 baseline verification that binds create-once review packets, examples, event/model ledgers, explicit concern/disagreement decisions, independent promotion approvers, and two counterbalanced replicates per scenario. Canonical raw archives store sorted path/SHA-256/base64 members without filesystem extraction and let promotion recompute Source/model-workspace trees, all-generation prompt/tool treatment parity, progress, final Raven state, Session/model/service ledgers, routes, tool access, and upload admission.
+- Isolated model-visible fixture files by Source origin: only local and llm-wiki bytes enter the workspace, while frozen web and MCP bytes remain available solely through their deterministic providers and reviewer snapshot.
+- Made `after-checkpoint` Steering occur inside the active prior turn from exact nested Checkpoint events, and derive Completion/selection floors from successful nested action ledgers when large state carriers spill.
+- Froze scenario, rubric, and verified Source bytes once before serial arms, rehashed every arm copy, and exposed source quality/family/as-of metadata to blinded reviewers without revealing arm identity.
+- Added atomic immutable run reservation, all-generation prompt/tool-schema parity and treatment stability, structured recorded model-route allowlists in every generation, workspace-confined read/write/edit evidence, same-Task stop/resume/Completion matching, final-consumer knowledge accounting, public-policy fixture URIs, symlink/binary rejection, exact multiline credential scanning, and private archive admission checks.
+
+#### Changed
+
+- Kept the native-call-compatible flat `raven_task` schema and added the exact action-to-field directory plus common field-name traps to model-visible guidance. The pinned PTC TypeScript renderer already degrades Raven's complex argument schema to `unknown`; a root object union was tested and rejected because it preserved that fallback while making native schemas less usable.
+- Made non-web Source and Workspace inspection work in the supported PTC preset: Raven now consumes paired nested dispatch receipts and resolves an omitted call ID only when producer, resolved Resource identity, coverage, and Markdown content match; explicit IDs remain authoritative, offset and byte-capped read windows are parsed from strict Harness footers, truncated lines fail closed, MCP producers cannot impersonate local resources, exact MCP `read_resource` calls may attest full-resource Markdown output, and model guidance separates PTC inspection from the later registration call that consumes its durable receipt.
+- Canonicalized representation fields that Raven can determine more safely than the caller: Source origin casing is normalized, web coverage is reset to `unknown` before independent re-fetch, original Markdown infers `text/markdown` when the media type was omitted, and web callers may omit independently fetched Markdown.
+- Made Completion state its exact verification scope: registered Claim/Source references and Artifact bytes are checked,
+  while omitted Claims and semantic entailment are explicitly not assessed and remain review responsibilities.
+- Made one-off wiki export collision-safe across Tasks with Task/resource-addressed paths, absent preconditions, and an idempotent log marker; the same unchanged Task remains byte-identical even when retried on another day.
+- Added CJK-aware multi-model contribution validation, including the exact four-character boundary, and CJK bigram similarity for Structure Studio near-copy rejection.
+- Made pull-request CI validate deterministic evaluation inputs while keeping generated benchmark outputs private. Release requires exact pinned-Harness `test:dsh` plus paired process-resume smoke; only a `v*` tag can publish, and npm receives the same hashed tgz that passed the isolated consumer test.
+
 ### Multi-model drafting and adversarial refinement
 
 #### Added

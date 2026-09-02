@@ -1,5 +1,7 @@
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { dirname, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { apply } from '../../src/plugin.js'
@@ -20,6 +22,202 @@ afterEach(async () => {
 })
 
 describe('Source provenance integration', () => {
+  it('resolves a hidden inspectionCallId from a successful PTC read receipt', async () => {
+    let tool: TestTool | undefined
+    apply({
+      tools: { register(definition: TestTool) { tool = definition; return () => undefined } },
+      systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
+      get() { return undefined },
+      on() { return () => undefined },
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
+    if (tool === undefined) throw new Error('Raven tool did not register')
+    const events: unknown[] = []
+    const agent = { id: 'ptc-inspection-session', session: { events } }
+    const signal = new AbortController().signal
+    const run = (args: unknown) => tool!.execute(args, { agent, signal })
+    const sourcePath = resolve('ptc-fixture', 'note.md')
+    const sourceUri = pathToFileURL(sourcePath).href
+    const started = await run({
+      action: 'start', outcome: 'research', request: 'Use a local Source inspected from PTC.',
+      sourcePolicy: { localRoots: [pathToFileURL(dirname(sourcePath)).href] },
+    })
+    const subCallId = 'ptc-read:code:1'
+    events.push({
+      type: 'tool/code-dispatch-start',
+      data: { subCallId, name: 'read', arguments: { file_path: 'note.md' } },
+    }, {
+      type: 'tool/code-dispatch',
+      data: {
+        subCallId, name: 'read', arguments: { file_path: 'note.md' }, isError: false,
+        content: [{
+          type: 'text',
+          text: `<path>${sourcePath}</path>\n<type>file</type>\n<content>\n5: # Note\n6: \n7: Exact local evidence.\n\n(Output capped. Showing lines 5-7. Use offset=8 to continue.)\n</content>`,
+        }],
+      },
+    })
+    const artifact = 'The note provides local evidence [@LOCAL1].'
+    const checkpoint = await run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read', summary: 'PTC local evidence.', artifact,
+      sources: [{
+        sourceId: 'LOCAL1', title: 'Local note', locator: 'line 7', excerpt: 'Exact local evidence.', role: 'user-provided',
+        resource: { origin: 'local', uri: sourceUri },
+        representation: {
+          format: 'markdown', derivation: 'original', coverage: 'segment', producedBy: 'read',
+          markdown: '# Note\n\nExact local evidence.',
+        },
+      }],
+      claims: [{
+        claimId: 'LOCAL-C1', text: 'The note provides local evidence.', kind: 'external', importance: 'material',
+        disposition: 'supported', sourceIds: ['LOCAL1'],
+      }],
+    })
+
+    expect(checkpoint.status).toBe('active')
+    expect(checkpoint.state.sources[0]?.check.status).toBe('reachable')
+    expect(checkpoint.state.sources[0]?.resource.mediaType).toBe('text/markdown')
+    expect(checkpoint.state.sources[0]?.representation?.inspectionCallId).toBe(subCallId)
+    expect(checkpoint.state.sources[0]?.representation?.markdown).toBe('# Note\n\nExact local evidence.')
+    expect(checkpoint.state.sources[0]?.inspectionSha256).toMatch(/^sha256:[a-f0-9]{64}$/)
+
+    const invalidCallId = 'ptc-read:code:2'
+    events.push({
+      type: 'tool/code-dispatch-start',
+      data: { subCallId: invalidCallId, name: 'read', arguments: { file_path: 'note.md' } },
+    }, {
+      type: 'tool/code-dispatch',
+      data: {
+        subCallId: invalidCallId, name: 'read', arguments: { file_path: 'note.md' }, isError: false,
+        content: [{
+          type: 'text',
+          text: `<path>${sourcePath}</path>\n<type>file</type>\n<content>\n5: # Note\n6: \n7: Invalid range.\n\n(Showing lines 5-7 of 6. Use offset=8 to continue.)\n</content>`,
+        }],
+      },
+    })
+    await expect(run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read', summary: 'Refuse malformed receipt.',
+      artifact: 'The malformed window must not verify [@LOCAL2].',
+      sources: [{
+        sourceId: 'LOCAL2', title: 'Malformed local note', locator: 'line 7', excerpt: 'Invalid range.', role: 'user-provided',
+        resource: { origin: 'local', uri: sourceUri, mediaType: 'text/markdown' },
+        representation: {
+          format: 'markdown', derivation: 'original', coverage: 'segment', producedBy: 'read', markdown: '# Note\n\nInvalid range.',
+        },
+      }],
+      claims: [{
+        claimId: 'LOCAL-C2', text: 'The malformed window must not verify.', kind: 'external', importance: 'material',
+        disposition: 'supported', sourceIds: ['LOCAL2'],
+      }],
+    })).rejects.toThrow('must name its Harness inspectionCallId')
+  })
+
+  it('attests full Markdown from an exact PTC MCP read_resource receipt', async () => {
+    let tool: TestTool | undefined
+    apply({
+      tools: { register(definition: TestTool) { tool = definition; return () => undefined } },
+      systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
+      get() { return undefined },
+      on() { return () => undefined },
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
+    if (tool === undefined) throw new Error('Raven tool did not register')
+    const markdown = '# Audit\n\nEight organizations missed the recovery target.\n'
+    const subCallId = 'ptc-mcp:code:1'
+    const events: unknown[] = [{
+      type: 'tool/code-dispatch-start',
+      data: {
+        subCallId,
+        name: 'mcp__raven_eval__read_resource',
+        arguments: { uri: 'mcp://raven_eval/audit' },
+      },
+    }, {
+      type: 'tool/code-dispatch',
+      data: {
+        subCallId,
+        name: 'mcp__raven_eval__read_resource',
+        arguments: { uri: 'mcp://raven_eval/audit' },
+        isError: false,
+        content: [{ type: 'text', text: markdown }],
+      },
+    }]
+    const agent = { id: 'ptc-mcp-session', session: { events } }
+    const signal = new AbortController().signal
+    const run = (args: unknown) => tool!.execute(args, { agent, signal })
+    const started = await run({
+      action: 'start', outcome: 'research', request: 'Use the MCP audit.',
+      sourcePolicy: { includedMcpSources: ['raven_eval'] },
+    })
+    const checkpoint = await run({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'read', summary: 'MCP audit.',
+      artifact: 'Eight organizations missed the target [@AUDIT].',
+      sources: [{
+        sourceId: 'AUDIT', title: 'Audit', locator: 'finding',
+        excerpt: 'Eight organizations missed the recovery target.', role: 'primary',
+        resource: {
+          origin: 'MCP', uri: 'mcp://raven_eval/audit', sourceName: 'raven_eval', mediaType: 'text/markdown',
+        },
+        representation: {
+          format: 'markdown', derivation: 'original', coverage: 'full',
+          producedBy: 'mcp__raven_eval__read_resource', markdown: markdown.trimEnd(),
+        },
+      }],
+      claims: [{
+        claimId: 'AUDIT-C1', text: 'Eight organizations missed the target.', kind: 'external',
+        importance: 'material', disposition: 'supported', sourceIds: ['AUDIT'],
+      }],
+    })
+
+    expect(checkpoint.status).toBe('active')
+    expect(checkpoint.state.sources[0]?.resource.origin).toBe('mcp')
+    expect(checkpoint.state.sources[0]?.representation?.inspectionCallId).toBe(subCallId)
+    expect(checkpoint.state.sources[0]?.representation?.markdown).toBe(markdown)
+  })
+
+  it('resolves omitted PTC inspection IDs for Workspace documents too', async () => {
+    const registered = new Map<string, { execute(args: unknown, exec: unknown): Promise<unknown> }>()
+    apply({
+      tools: { register(definition: { name: string; execute(args: unknown, exec: unknown): Promise<unknown> }) { registered.set(definition.name, definition); return () => undefined } },
+      systemPrompt: { section() { return () => undefined } },
+      inject() { return () => undefined },
+      get() { return undefined },
+      on() { return () => undefined },
+    } as never, { sourceNetworkPolicy: 'unrestricted' })
+    const workspace = registered.get('raven_workspace')
+    if (workspace === undefined) throw new Error('Raven Workspace tool did not register')
+    const subCallId = 'ptc-workspace-read:code:1'
+    const documentPath = resolve('ptc-fixture', 'document.md')
+    const documentUri = pathToFileURL(documentPath).href
+    const events = [{
+      type: 'tool/code-dispatch-start',
+      data: { subCallId, name: 'read', arguments: { file_path: 'document.md' } },
+    }, {
+      type: 'tool/code-dispatch',
+      data: {
+        subCallId, name: 'read', arguments: { file_path: 'document.md' }, isError: false,
+        content: [{
+          type: 'text',
+          text: `<path>${documentPath}</path>\n<type>file</type>\n<content>\n1: # Document\n2: \n3: Durable workspace evidence.\n\n(End of file - total 3 lines)\n</content>`,
+        }],
+      },
+    }]
+    const result = await workspace.execute({
+      action: 'adopt', kind: 'folder', files: [], documents: [{
+        title: 'Document',
+        resource: { origin: 'local', uri: documentUri, mediaType: 'text/markdown' },
+        representation: {
+          format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read',
+          markdown: '# Document\n\nDurable workspace evidence.',
+        },
+      }],
+    }, { agent: { id: 'workspace-ptc', session: { events } }, signal: new AbortController().signal }) as {
+      status: string
+      pages: Array<{ content: string }>
+    }
+
+    expect(result.status).toBe('ready')
+    expect(result.pages.some(page => page.content.includes(`inspection_call_id: "${subCallId}"`))).toBe(true)
+  })
+
   it('treats a truncated retrieval as unverifiable rather than as a fabricated quotation', async () => {
     let tool: TestTool | undefined
     apply({

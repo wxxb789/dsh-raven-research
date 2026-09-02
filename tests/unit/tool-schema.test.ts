@@ -35,23 +35,18 @@ describe('raven_task action field contract', () => {
     expect(toolParameters().properties.action?.enum).toEqual(Object.keys(ACTION_FIELDS))
   })
 
-  it('declares every field the runtime accepts, and accepts every field it declares', () => {
+  it('declares every accepted field without inventing aliases', () => {
     const declared = new Set(Object.keys(toolParameters().properties))
     const accepted = new Set(Object.values(ACTION_FIELDS).flat())
-    for (const field of accepted) expect(declared).toContain(field)
-    for (const field of declared) expect(accepted).toContain(field)
+    expect(declared).toEqual(accepted)
+    expect(declared).not.toContain('objective')
   })
 
-  it('tells the caller which action owns each field', () => {
-    const properties = toolParameters().properties
-    // The flat schema lists every action's fields side by side, so a field that
-    // does not name its action invites one action's field to be sent to another.
-    for (const [field, schema] of Object.entries(properties)) {
-      if (field === 'action') continue
-      expect(schema.description ?? '', `${field} must name its action`)
-        .toMatch(field === 'taskId' ? /action/ : /action=/)
-    }
-    expect(properties.action?.description ?? '').toContain('complete(taskId, artifact)')
+  it('renders the exact action-to-field directory required by the supported flat PTC schema', () => {
+    const description = toolParameters().properties.action?.description ?? ''
+    expect(description).toContain('start(outcome, request, grounding, sourcePolicy, structureMode)')
+    expect(description).toContain('checkpoint(taskId, stage, summary, artifact, sources, claims, failures)')
+    expect(description).toContain('complete(taskId, artifact)')
   })
 
   it('describes exactly four origins, Markdown provenance, and Task Source Policy', () => {
@@ -92,8 +87,8 @@ describe('raven_task action field contract', () => {
     const item = insights?.items as Record<string, unknown>
     const insightProperties = item?.properties as Record<string, Record<string, unknown>>
 
-    expect(properties.action?.enum).toContain('synthesize')
-    expect(properties.action?.enum).toContain('inspect')
+    expect(properties).toHaveProperty('insights')
+    expect(properties).toHaveProperty('insightIds')
     expect(ACTION_FIELDS.status).toEqual(['action', 'taskId', 'insightOffset'])
     expect(ACTION_FIELDS.inspect).toEqual(['action', 'taskId', 'insightIds'])
     expect(properties.insightOffset).toMatchObject({ type: 'integer', minimum: 0 })
@@ -129,8 +124,8 @@ describe('raven_task action field contract', () => {
       throw new Error('expected Structure Studio schemas')
     }
 
-    expect(properties.action?.enum).toContain('structure')
-    expect(properties.action?.enum).toContain('select-structure')
+    expect(properties).toHaveProperty('battle')
+    expect(properties).toHaveProperty('chosenBy')
     expect(ACTION_FIELDS.structure).toEqual(['action', 'taskId', 'candidates', 'battle', 'recommendation'])
     expect(ACTION_FIELDS['select-structure']).toEqual([
       'action', 'taskId', 'chosenBy', 'candidateIds', 'hybrid', 'rationale',

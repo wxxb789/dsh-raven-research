@@ -386,6 +386,20 @@ describe('Raven end-to-end acceptance', () => {
     expect(evidence.state.insightCandidates).toEqual([])
     const prompt = String(raven.sections.find(section => section.name === 'tool:raven-task')?.text)
     expect(prompt).toContain('Epistemic layers')
+    expect(prompt).toContain('There is no material boolean, context kind, id alias, or objective field')
+    expect(prompt).toContain('there is no objective field')
+    expect(prompt).toContain('locate and inspect the available files')
+    expect(prompt).toContain('there is no early-draft or complete stage')
+    expect(prompt).toContain('there are no allowedOrigins, allowedLocalRoots')
+    expect(prompt).toContain('llmWikiRoots contain absolute file: or llm-wiki: URIs')
+    expect(prompt).toContain('never rewrite that file identity as llm-wiki:// or call an MCP tool for it')
+    expect(prompt).toContain('inspect a non-web Source in one run_code and register it in a later raven_task or raven_workspace call')
+    expect(prompt).toContain('Every battle entry contains candidateId')
+    expect(prompt).toContain('battle is an array, not an object')
+    expect(prompt).toContain('there is no tradeoffs field')
+    expect(prompt).toContain('there are no alternatives or reversalEvidence fields')
+    expect(prompt).toContain('do not make it grounding-required by habit')
+    expect(prompt).toContain('Do not send a final-looking user answer while the Raven Task is still active')
     expect(prompt).toContain('Raven infers Y from A, B, and C')
     expect(prompt).toContain('alternative causal mechanisms')
     expect(prompt).toContain('Summary debt')
@@ -589,13 +603,31 @@ describe('Raven end-to-end acceptance', () => {
     expect(completed.state.claims[0]?.sourceIds).toEqual(['P1'])
   })
 
+  it('accepts an absolute llm-wiki URI as a Workspace source root', async () => {
+    const raven = createHarness()
+    const started = await raven.run({
+      action: 'start', outcome: 'research', request: 'Reuse durable project knowledge.',
+      sourcePolicy: { llmWikiRoots: ['llm-wiki://project-wiki/queries'] },
+    })
+
+    expect(started.status).toBe('active')
+    expect(started.state.sourcePolicy.llmWikiRoots).toEqual(['llm-wiki://project-wiki/queries'])
+  })
+
   it('grounds the same Claim and citation model across exactly four Source origins', async () => {
     const excerpt = 'Canonical Markdown carries the grounded statement.'
     const cases = [
       {
         origin: 'web',
         policy: { allowedWebHosts: ['evidence.test'] },
-        source: source('WEB1', 'web-page'),
+        source: {
+          sourceId: 'WEB1', title: 'Web page', locator: 'Body',
+          excerpt: 'Exact evidence excerpt for WEB1.', role: 'primary',
+          resource: { origin: 'web', uri: 'https://evidence.test/web-page', mediaType: 'text/plain' },
+          representation: {
+            format: 'markdown', derivation: 'converted', coverage: 'full', producedBy: 'web_fetch',
+          },
+        },
       },
       {
         origin: 'local',
@@ -633,7 +665,7 @@ describe('Raven end-to-end acceptance', () => {
         source: {
           sourceId: 'MCP1', title: 'MCP resource', locator: 'resource body', excerpt, role: 'primary',
           resource: { origin: 'mcp', uri: 'mcp://docs/finding', mediaType: 'application/json', sourceName: 'docs' },
-          representation: { format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'mcp__docs__read_resource', inspectionCallId: 'inspect-mcp', markdown: '# MCP finding\n\n' + excerpt },
+          representation: { format: 'markdown', derivation: 'converted', coverage: 'full', producedBy: 'mcp__docs__read_resource', inspectionCallId: 'inspect-mcp', markdown: '# MCP finding\n\n' + excerpt },
         },
         inspection: {
           callId: 'inspect-mcp', name: 'mcp__docs__read_resource', arguments: { uri: 'mcp://docs/finding' },
@@ -673,6 +705,8 @@ describe('Raven end-to-end acceptance', () => {
       expect(completed.status, item.origin).toBe('completed')
       expect(completed.state.sources[0]?.resource.origin).toBe(item.origin)
       expect(completed.state.sources[0]?.check.status).toBe('reachable')
+      if (item.origin === 'web') expect(completed.state.sources[0]?.representation?.coverage).toBe('unknown')
+      if (item.origin === 'mcp') expect(completed.state.sources[0]?.representation?.coverage).toBe('full')
       if (item.origin !== 'web') expect(completed.state.sources[0]?.inspectionSha256).toMatch(/^sha256:[a-f0-9]{64}$/)
       expect(completed.renderedArtifact).toContain('## Claim trace')
     }
@@ -699,6 +733,43 @@ describe('Raven end-to-end acceptance', () => {
         },
       },
       {
+        expected: 'failed',
+        policy: { localRoots: ['file:///Q:/workspace/docs'] },
+        source: {
+          sourceId: 'TRUNCATED1', title: 'Truncated local representation', locator: 'line 1',
+          excerpt: 'synthetic suffix', role: 'primary',
+          resource: { origin: 'local', uri: 'file:///Q:/workspace/docs/truncated.md', mediaType: 'text/markdown' },
+          representation: {
+            format: 'markdown', derivation: 'original', coverage: 'full', producedBy: 'read',
+            inspectionCallId: 'inspect-truncated', markdown: 'prefix... (line truncated to 2000 chars) synthetic suffix',
+          },
+        },
+        inspection: {
+          callId: 'inspect-truncated', name: 'read',
+          arguments: { file_path: 'file:///Q:/workspace/docs/truncated.md' }, text: '',
+          meta: { offset: 1, totalLines: 1, path: fileURLToPath('file:///Q:/workspace/docs/truncated.md'), lines: [
+            { number: 1, text: 'prefix... (line truncated to 2000 chars)' },
+          ] },
+        },
+      },
+      {
+        expected: 'failed',
+        policy: { localRoots: ['file:///Q:/workspace/docs'] },
+        source: {
+          sourceId: 'IMPERSONATED1', title: 'MCP impersonation', locator: 'body',
+          excerpt: 'claimed statement', role: 'primary',
+          resource: { origin: 'local', uri: 'file:///Q:/workspace/docs/impersonated.md', mediaType: 'text/markdown' },
+          representation: {
+            format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'mcp__docs__read_resource',
+            inspectionCallId: 'inspect-impersonated', markdown: 'claimed statement',
+          },
+        },
+        inspection: {
+          callId: 'inspect-impersonated', name: 'mcp__docs__read_resource',
+          arguments: { uri: 'file:///Q:/workspace/docs/impersonated.md' }, text: 'claimed statement',
+        },
+      },
+      {
         expected: 'unavailable',
         policy: { includedMcpSources: ['docs'] },
         source: {
@@ -708,6 +779,22 @@ describe('Raven end-to-end acceptance', () => {
             format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'mcp__docs__read_resource',
             inspectionCallId: 'missing-call', markdown: 'claimed statement',
           },
+        },
+      },
+      {
+        expected: 'unavailable',
+        policy: { includedMcpSources: ['docs'] },
+        source: {
+          sourceId: 'EXPLICIT1', title: 'Wrong explicit receipt', locator: 'resource', excerpt: 'claimed statement',
+          resource: { origin: 'mcp', uri: 'mcp://docs/explicit', sourceName: 'docs', mediaType: 'text/plain' },
+          representation: {
+            format: 'markdown', derivation: 'converted', coverage: 'unknown', producedBy: 'mcp__docs__read_resource',
+            inspectionCallId: 'wrong-explicit-call', markdown: 'claimed statement',
+          },
+        },
+        inspection: {
+          callId: 'other-matching-call', name: 'mcp__docs__read_resource',
+          arguments: { uri: 'mcp://docs/explicit' }, text: 'claimed statement',
         },
       },
     ] as const
@@ -1064,6 +1151,8 @@ describe('Raven end-to-end acceptance', () => {
     const raven = createHarness()
     const prompt = String(raven.sections.find(section => section.name === 'tool:raven-task')?.text)
 
+    expect(prompt).toContain('do not stop after Task Completion')
+    expect(prompt).toContain('raven_workspace action=grow with the completed taskId')
     expect(prompt).toContain('Before starting substantial research from zero')
     expect(prompt).toContain('wiki/index.md')
     expect(prompt).toContain('current Harness workspace')

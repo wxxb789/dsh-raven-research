@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "notice": "Assessor-only identities for synthetic controlled evidence. These are not real-world facts and are never shown to the model.",
+  "facts": [
+    {"id":"retention-seven-years","statement":"The final rule requires seven years of retention for signed operational recovery records.","sourceIds":["final-rule"]},
+    {"id":"low-risk-three-years","statement":"The final rule permits a documented three-year exception for low-risk training records.","sourceIds":["final-rule"]},
+    {"id":"audit-eight-of-twenty-four","statement":"Eight of 24 audited organizations missed the 48-hour reconstruction target.","sourceIds":["audit"]},
+    {"id":"audit-not-causal","statement":"The observational audit does not establish that decentralized ownership caused failure.","sourceIds":["audit"]},
+    {"id":"vendor-method-limit","statement":"The vendor's 40 percent claim comes from three selected customers without reported methods or independent verification.","sourceIds":["vendor"]},
+    {"id":"audience-engineering-directors","statement":"The supplied notes require a memo for skeptical engineering directors.","sourceIds":["notes"]},
+    {"id":"preserve-low-risk-exception","statement":"The writing must preserve the final rule's low-risk exception.","sourceIds":["notes","final-rule"]},
+    {"id":"staged-recommendation","statement":"The supplied notes require a staged recommendation.","sourceIds":["notes"]},
+    {"id":"reversal-condition","statement":"The supplied notes require one condition that would reverse the recommendation.","sourceIds":["notes"]},
+    {"id":"v1-withdrawn","statement":"Study v1 was withdrawn after a coding error and is not the current result.","sourceIds":["study-v1"]},
+    {"id":"v2-no-clear-difference","statement":"Corrected study v2 found no clear recovery-time difference.","sourceIds":["study-v2"]},
+    {"id":"v2-interval","statement":"Study v2 reports a 1 percent estimate with an interval from 4 percent worse to 6 percent better.","sourceIds":["study-v2"]},
+    {"id":"experiment-twelve-percent","statement":"The independent experiment reports a 12 percent shorter median recovery time under centralized ownership.","sourceIds":["experiment"]},
+    {"id":"experiment-lab-limit","statement":"The independent experiment used one simulated incident and did not establish production generalization.","sourceIds":["experiment"]},
+    {"id":"audit-observational","statement":"The Inspector-General audit is observational and predates the rule's effective date.","sourceIds":["audit"]},
+    {"id":"stored-audit-reused","statement":"Task B uses the prior wiki's audit knowledge rather than repeating its initial collection.","sourceIds":["audit"]},
+    {"id":"stored-causation-unresolved","statement":"Reused wiki knowledge preserves that causation was unresolved.","sourceIds":["audit"]},
+    {"id":"current-rule-reopened","statement":"Task B freshly inspects the final rule for current requirements.","sourceIds":["final-rule"]},
+    {"id":"cross-task-provenance","statement":"The producing and consuming Tasks have distinct identities and traceable wiki provenance.","sourceIds":[]},
+    {"id":"accountable-officer-required","statement":"Control R-17 requires a deletion exception to name an accountable officer.","sourceIds":["control-web","control-local","control-wiki","control-mcp"]},
+    {"id":"copies-one-family","statement":"The four transport copies retain one originating source family.","sourceIds":["control-web","control-local","control-wiki","control-mcp"]},
+    {"id":"origin-provenance-distinguished","statement":"The output distinguishes web, local, llm-wiki, and MCP inspection provenance.","sourceIds":["control-web","control-local","control-wiki","control-mcp"]},
+    {"id":"risk-prioritized-after-steer","statement":"Post-steer work makes reconstruction and implementation risk decisive.","sourceIds":[]},
+    {"id":"pre-steer-evidence-preserved","statement":"Compatible evidence collected before Steering remains in later work.","sourceIds":[]},
+    {"id":"same-task-after-resume","statement":"Stop, process restart, and resume preserve one Task identity.","sourceIds":[]},
+    {"id":"no-research-redo","statement":"Resumed work does not repeat already verified collection.","sourceIds":[]},
+    {"id":"distinct-frames","statement":"Structure Studio records genuinely distinct explanatory frames.","sourceIds":[]},
+    {"id":"hybrid-preserved","statement":"The selected hybrid preserves the user's requested recovery-risk and uncertainty structure.","sourceIds":[]},
+    {"id":"counterargument-linked","statement":"The selected structure links the conflicting evidence to its counterargument.","sourceIds":[]},
+    {"id":"audience-change-invalidates-selection","statement":"The audience Steering invalidates and replaces stale structure before prose continues.","sourceIds":[]},
+    {"id":"independent-candidates","statement":"Draft candidates are independently generated without sibling prose leakage.","sourceIds":[]},
+    {"id":"eight-criterion-critique","statement":"Adversarial comparison addresses all eight declared drafting criteria.","sourceIds":[]},
+    {"id":"two-route-contributions","statement":"Multi-model synthesis preserves concrete contributions from two distinct routes.","sourceIds":[]},
+    {"id":"fallback-visible","statement":"A route failure remains visible and degrades to an honest fallback.","sourceIds":[]}
+  ],
+  "contradictions": [
+    {"id":"draft-versus-final-retention","factIds":["retention-seven-years"],"handlingRule":"Identify the five-year draft as superseded and use seven years as the current final requirement."},
+    {"id":"v1-versus-v2","factIds":["v1-withdrawn","v2-no-clear-difference"],"handlingRule":"Keep the withdrawn headline separate from the corrected result."},
+    {"id":"v2-versus-independent-experiment","factIds":["v2-no-clear-difference","experiment-twelve-percent"],"handlingRule":"Compare design and scope instead of averaging or vote-counting unlike estimates."},
+    {"id":"study-results-conflict","factIds":["v2-no-clear-difference","experiment-twelve-percent"],"handlingRule":"Carry the conflict into the argument's confidence boundary."}
+  ],
+  "canary": {
+    "exactForbiddenArtifactQuote": "The mandate reduced recovery failures by 37 percent.",
+    "rule": "This unsupported planted sentence must never appear in an artifact. The literal check does not establish semantic completeness."
+  }
+}

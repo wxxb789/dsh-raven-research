@@ -19,7 +19,7 @@
 
 [English](README.md) · 中文
 
-[**TL;DR**](#tldr) · [**安装**](#安装) · [**使用**](#使用) · [**工作原理**](#工作原理-under-the-hood) · [**配置**](#配置) · [**运维**](#运维须知) · [**FAQ**](#faq)
+[**TL;DR**](#tldr) · [**产品体验**](#产品体验) · [**安装**](#安装) · [**使用**](#使用) · [**评测**](./evaluation/README.md) · [**配置**](#配置) · [**运维**](#运维须知) · [**FAQ**](#faq)
 
 </div>
 
@@ -39,6 +39,8 @@
 - **安装：** `pnpm build && pnpm pack`，把 tarball 装进 Harness 部署，再运行
   `npx dsh-raven-install-preset`。见[安装](#安装)。
 - **使用：** 照常跟 Harness agent 对话 —— 没有启动咒语、独立 Task UI，也不用学习生命周期命令。情境提示默认为 `auto`，也可设为 `off`。见[使用](#使用)。
+- **评测：** 仓库跟踪可复现的[方法、场景与 rubric](./evaluation/README.md)，但生成的 benchmark 输出、原始 Session 日志和 review packets 仅保留在本地，不公开发布。请针对具体 release 私下运行评测；这里不宣称公开的 aggregate winner。
+
 ## 为什么需要 Raven
 
 一个有分量的研究或写作请求，通常会掉进一条很长的批处理管线：你等很久，拿到一大块文字，而引用只是模型"记得"的字符串。
@@ -50,11 +52,35 @@ Raven 改变的是这项工作的形态。
 | 一次纠正就要重来 | 纠正变成同一个 Task 上的 **Steering Revision**，此前的证据与 Checkpoint 全部保留 |
 | 引用是"记住"的字符串 | 引用指向来自 web、本地文件、llm-wiki 或 MCP 的**真正检查过的 Source**；摘录会与规范 Markdown 比对 |
 | 同一通稿的三次转载被当成三次印证 | 共享同一 `sourceFamily` 的 Claim 会被标记为**不构成独立佐证** |
+| 把整理好的笔记误当成洞察 | **Synthesis Pass** 暴露 Summary Debt，并保留带 Claim 血缘、假设、替代解释与反转证据的 Insight Candidate |
+| 把 Raven 的解释说成来源事实 | 外部 Claim 表示 Source 说了什么；提升后的分析单独标为由具名 Claim 推导的 **Raven inference** |
+| 从第一个像样的提纲直接写长文 | **Structure Studio** 比较真正不同、与证据相连的论证骨架，再由用户选择或组合后开始写作 |
 | 一个死链拖垮整轮 | 失败的依赖只会 **defer 受影响的 Claim**，其余已验证的工作照常诚实完成 |
 | 状态随工具调用消失 | 最近一次成功持久化的 Task snapshot 由 session log 重建，并支持 stop / resume |
 
-`discover → read → analyze → draft → verify → refine` 这些常规推进都是自主的。只有当一个未决选择会影响公开结果、
-证据底线、受众、交付物、显著成本，或涉及外部/破坏性/敏感副作用时，Raven 才会来问。
+`discover → read → analyze → verify → refine` 这些常规推进都是自主的。对有分量的长文，Raven 会在私下比较结构后暂停一次；只有当用户偏好会实质改变论证时，才进行这一处高杠杆协作。用户也可以委托 Raven 选择或直接跳过。
+
+## 产品体验
+
+新建 Harness session 时选择 **Raven** 模式，然后描述结果，不用学习 Raven 的内部协议：
+
+```text
+研究集中管理恢复记录的支持与反对证据。先给我一份可用的早期证据图，
+再写成面向持怀疑态度的工程主管的决策 memo。保留矛盾，并让结论可复用。
+```
+
+同一段对话会沿着一条可见链路推进：
+
+1. **研究：** Raven 用普通 Harness 工具查找并打开 web、本地、llm-wiki 和 MCP 材料；只有真正检查过的内容才成为 Source。
+2. **渐进证据：** 早期 Checkpoint 在 Task 仍开放时给出可用发现、限制和引用。
+3. **洞察：** Source 说了什么，与候选解释、假设、替代机制及反转证据分层保存。
+4. **竞争骨架：** 对有分量的写作，Structure Studio 展示真正不同的论证选项，而不是换标题的同一份提纲。
+5. **用户协作：** 直接回复：`把恢复风险的开头与不确定性边界合并，并优先讨论实施风险。` 同一 Task 保留兼容证据并淘汰过时结构。
+6. **写作：** Raven 按选中骨架逐节写。配置了 route 时会独立生成候选并做对抗式综合；没有 route 时主 agent 照常继续。
+7. **经 Source 检查的 Artifact：** Completion 绑定最新 Checkpoint 的精确字节，并重检已登记 Claim/Source；它不会假装自动发现漏登 Claim 或判断语义蕴含。
+8. **持久知识：** 说 `把可复用结论保存在这个 llm-wiki。` Raven 返回带条件与 log marker 的 Markdown 写入计划；后续独立 Task 可复用它，并为易变事实重新打开权威来源。
+
+你可以在任何 Checkpoint 后暂停，稍后只说 `继续`。用户永远不需要说 Task ID、action、phase 或 revision。更多示例见[使用](#使用)；受控 vanilla-vs-Raven 方法、原始证据与人工 rubric 见[评测套件](./evaluation/README.md)。
 
 ## 特性
 
@@ -473,15 +499,12 @@ Raven 仍没有文件系统权限。Agent 先用普通 Harness 文件工具读�
 no-op，而不会重复写 log 或覆盖新知识。
 
 混合文档目录不会引入第二条转换流水线。Markdown 以 `derivation=original` 原样传入；PDF、HTML、office 等材料必须复用
-普通 Source 层的 Markdown normalization，并携带 Original Resource URI/media type、`producedBy`、`inspectionCallId`、
-coverage 与精确的转换结果。转换失败必须显式报告，原始文件保持不动。
+普通 Source 层的 Markdown normalization，并携带 Original Resource URI/media type、`producedBy`、coverage 与精确的转换结果。surface 暴露 ID 时一并传入 `inspectionCallId`；PTC 隐藏 nested call ID 时，Raven 会按 producer、resource 参数、coverage 和 Markdown 字节解析并存下真实 receipt。转换失败必须显式报告，原始文件保持不动。
 
 `reuse` 不是 freshness 豁免。稳定概念可在后续 Task 中把选中的 Workspace 页读回并登记为 `llm-wiki` Source；价格、
 任职者、产品状态、数量等易变或“当前”事实仍必须重新打开权威 Original Resource 做新验证。
 
-兼容的一次性路径仍保留：Task 已有 Artifact 后，`raven_task action=export` 继续返回 `wiki/queries` 下的 artifact 页、每个
-Source 一张 `capture: excerpt-only` 的不可变 `wiki/raw` 页与一条可追加的 `wiki/log.md` 记录。只想完成一个 Task 的用户
-无需建立 Workspace。
+兼容的一次性路径仍保留：Task 已有 Artifact 后，`raven_task action=export` 返回带 Task digest 的 `wiki/queries` artifact 页、按 Task 与 resource 寻址的不可变 `wiki/raw` 页，以及受 operation marker 保护的 `wiki/log.md` 追加。每个页面都有 `absent` 前置条件；同一 Task 重复导出字节完全一致，不同 Task 即使同名且复用局部 Source ID 也不会相互覆盖。只想完成一个 Task 的用户无需建立 Workspace。
 
 ## 工作原理 (under the hood)
 
@@ -563,12 +586,12 @@ tool-owned content finalizer 附加 `<raven_task_recovery>` 提示 —— 这是
 有据可依的 Checkpoint 与 Completion 会把四种 origin 的 Source 送进同一条 Markdown-first 校验流水线：
 
 1. web Source 通过 Harness `web` 能力重新打开 Original Resource，受 `sourceCheckTimeoutMs` 约束，并拒绝偏离原始身份的重定向。
-2. 本地文件、llm-wiki 页面与 MCP resource 不经过第二套 retrieval runtime；agent 在登记前用普通 Harness file/MCP tool 检查内容，并记录 `inspectionCallId`。Raven 会在所属 session log 中核对真实 `tool/call` 与 `tool/result`、producer、解析后的文件身份或 MCP namespace，以及返回的 Markdown，而不是接受调用者自证的 Representation。
+2. 本地文件、llm-wiki 页面与 MCP resource 不经过第二套 retrieval runtime；agent 在登记前用普通 Harness file/MCP tool 检查内容。direct surface 可传 `inspectionCallId`；PTC 隐藏 ID 时，Raven 从成对的 nested dispatch 记录中解析并存下准确 call ID。两条路径都会核对 producer、resource 身份、coverage 与返回的 Markdown，而不是接受调用者自证的 Representation。
 3. 原始 Markdown 保持原样；转换后的 Representation 记录 producer Harness tool provenance。
 4. 对规范 Markdown 做有界摘录的字面匹配；web 抓取被截断、资源不可读、不受支持或转换失败时，Source 标记为 `unavailable`，依赖的 Claim 被 defer，并保留 Limitation。
 5. 单个 web Source 超时按不可验证上报，而不是让整个 Checkpoint 一直挂着。
 
-Completion 会再次核对引用身份、关键 Claim 链接、Source 可达性与 Artifact 指纹，并追加带独立性判断的 Claim trace。
+Completion 会再次核对引用身份、已登记关键 Claim 的链接、Source 可达性与 Artifact 指纹，并追加带独立性判断的 Claim trace；返回值明确说明，漏登断言与语义蕴含并未被自动评估。
 
 ### 包的边界与非目标
 
@@ -847,12 +870,13 @@ DeepSeek Harness 目前是 alpha 预发布版，会有破坏性变更。Raven �
 
 ```bash
 pnpm install --frozen-lockfile
+pnpm run eval -- check   # 严格校验评测输入与 fixture hash；不调用模型
 pnpm check
 pnpm test:pack
 ```
 
 技术栈是 TypeScript 优先的现代工具链：TypeScript 6 严格类型检查、tsdown 构建 ESM 与声明文件、Vitest 覆盖
-unit/integration/acceptance、Oxlint 且 warning 视为错误、pnpm 使用 frozen lockfile 与显式 `esbuild` 构建白名单。
+unit/integration/acceptance、Oxlint 且 warning 视为错误、pnpm 使用 frozen lockfile 与显式 `esbuild` 构建白名单。公平的 PTC-vs-Raven 成对方法、八条受控工作流、assessor catalog、人工 rubric、付费 runner 与原始证据策略见 [`evaluation/README.md`](./evaluation/README.md)；确定性完整性检查已经属于 `pnpm check`。
 
 针对指定 checkout 验证真实的 Harness Loader、prompt registry、tool registry、执行管线与 Cordis 释放：
 
@@ -933,6 +957,9 @@ pnpm check:release
 **摘录匹配能证明 Claim 为真吗？**
 不能。Raven 校验有界摘录是否存在于有 receipt 的规范 Markdown，并保留其到 Original Resource 的路径；web 还会额外校验 HTTP 可达性与重定向身份。字面存在不等于语义蕴含，Claim 的判断仍由 agent 负责。
 
+**Completion 能证明每个关键断言都登记成 Claim 吗？**
+不能。Completion 会检查已登记的 Claim/Source 关系并绑定最新 Checkpoint 的精确字节，但无法在语义上发现 agent 漏登的命题。Raven 要求 agent 逐句盘点最终 Artifact，并用 machine-readable verification scope 明示这个边界；完整性与语义蕴含交给评测 rubric，而不是伪装成确定性检查。
+
 **发到 npm 了吗？**
 还没有。请按[安装](#安装)从仓库构建打包。
 
@@ -944,7 +971,7 @@ pnpm check:release
 
 ## v1 限制
 
-- 摘录校验是字面的，不是语义的（见 FAQ）。
+- 摘录校验是字面的，不是语义的；Completion 也无法发现漏登在 Claim inventory 之外的关键断言（见 FAQ）。
 - 四种 Outcome 只是在现有 Harness agent 内部选择 grounding 默认值与显式 prompt 策略；Raven 不内嵌第二个模型，也没有
   确定性的文本生成器，因此内容质量仍取决于模型。
 - 自然语言纠偏的识别由 Harness 模型基于 Raven 的前置上下文完成。插件提供的是确定性的同 Task `steer` 迁移，

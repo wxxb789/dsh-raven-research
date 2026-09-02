@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { runProcess } from './process.js'
@@ -35,6 +36,10 @@ if (suppliedStore !== undefined && suppliedStore.length > 0 && !isAbsolute(suppl
 const isolatedStore = suppliedStore === undefined || suppliedStore.length === 0
   ? join(temporary, 'pnpm-store')
   : suppliedStore
+const retainedTarball = process.env.RAVEN_PACK_OUTPUT?.trim()
+if (retainedTarball !== undefined && retainedTarball.length > 0 && !isAbsolute(retainedTarball)) {
+  throw new Error('RAVEN_PACK_OUTPUT must be an absolute path')
+}
 const suppliedCache = process.env.RAVEN_PACK_CACHE_DIR?.trim()
 if (suppliedCache !== undefined && suppliedCache.length > 0 && !isAbsolute(suppliedCache)) {
   throw new Error('RAVEN_PACK_CACHE_DIR must be an absolute path')
@@ -239,6 +244,7 @@ try {
   assert.deepEqual(files, expectedFiles.toSorted(), 'publishable files differ from the exact allowlist')
   if (typeof manifest.filename !== 'string') throw new Error('pnpm pack returned no tarball filename')
   const tarball = isAbsolute(manifest.filename) ? manifest.filename : join(packed, manifest.filename)
+  const packedSha256 = createHash('sha256').update(await readFile(tarball)).digest('hex')
   const builtFiles = await Promise.all([
     readFile(join(staging, 'lib', 'index.js'), 'utf8'),
     readFile(join(staging, 'lib', 'index.d.ts'), 'utf8'),
@@ -450,6 +456,14 @@ console.log('packed install: isolated staged prepack, exact files, bundle manife
     timeoutMs: 30_000,
     env: isolatedPnpmEnv(),
   })
+  const verifiedSha256 = createHash('sha256').update(await readFile(tarball)).digest('hex')
+  assert.equal(verifiedSha256, packedSha256, 'the tested tarball changed during consumer verification')
+  if (retainedTarball !== undefined && retainedTarball.length > 0) {
+    await mkdir(dirname(retainedTarball), { recursive: true })
+    await cp(tarball, retainedTarball)
+    const retainedSha256 = createHash('sha256').update(await readFile(retainedTarball)).digest('hex')
+    assert.equal(retainedSha256, packedSha256, 'the retained release tarball differs from the tested bytes')
+  }
 } finally {
   await rm(temporary, { recursive: true, force: true })
 }

@@ -7,11 +7,6 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Run every gate and pack, but do not publish'
-        type: boolean
-        default: true
 
 # Minimal and explicit at the workflow level; the publish job widens `id-token` only
 # for itself, because that token is what mints the npm provenance attestation and no
@@ -29,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
 
@@ -40,12 +37,24 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # `check` is lint + typecheck + build + test. `test:pack` proves the tarball.
-      # `test:dsh` is deliberately NOT here — see the note in the publish job.
+      # The separate compatibility job proves the built plugin against the exact Harness pin.
       - name: Full check
         run: pnpm run check
 
-      - name: Packed consumer install
-        run: pnpm run test:pack
+      - name: Pack once and test the release tarball
+        env:
+          RAVEN_PACK_OUTPUT: ${{ github.workspace }}/.release/raven.tgz
+        run: |
+          pnpm run test:pack
+          cd .release
+          sha256sum raven.tgz > raven.tgz.sha256
+
+      - name: Preserve the tested release tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: raven-release-tarball
+          path: .release/
+          if-no-files-found: error
 
       # A tag that does not name the version being published produces a release whose
       # git tag and npm version disagree forever, and nothing downstream can repair it.
@@ -59,11 +68,16 @@ jobs:
             exit 1
           fi
 
-      # The Harness pin is metadata a consumer reads to decide whether this build can
-      # run at all, so a release that ships an absent or malformed pin ships a lie. The
-      # VALUE cannot be checked here — that needs a Harness checkout, which CI has no
-      # cheap way to obtain — so this asserts only that the pin is present and
-      # well-formed, and `test:dsh` remains the local gate that checks it against reality.
+      # The compatibility job checks the pin against a real exact checkout. This early
+      # shape check keeps a malformed ref from reaching actions/checkout with a vague error.
+      - name: Release tag belongs to main history
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::release tag must point to a commit already reachable from origin/main"
+            exit 1
+          fi
+
       - name: Harness pin is present and well-formed
         run: |
           node -e '
@@ -92,13 +106,58 @@ jobs:
             exit 1
           fi
 
+  compatibility:
+    name: pinned Harness compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: harness-pin
+        name: Read exact Harness pin
+        shell: bash
+        run: |
+          echo "commit=$(node -p \"require('./package.json').dshRaven.harnessCommit\")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p \"require('./package.json').dshRaven.harnessVersion\")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ steps.harness-pin.outputs.commit }}
+          path: .harness-under-test
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.19.0'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Harness workspace
+        run: pnpm --dir .harness-under-test install --frozen-lockfile
+
+      - name: Exercise Raven against the exact pin
+        run: pnpm run test:dsh
+        env:
+          DSH_CHECKOUT: ${{ github.workspace }}/.harness-under-test
+
+      - name: Smoke paired presets and process resume
+        run: >-
+          pnpm run eval -- run
+          --scenario steering-checkpoint
+          --fixture-model
+          --checkout "${{ github.workspace }}/.harness-under-test"
+          --out .tmp/evaluation/release-runner-smoke
+
   publish:
     name: publish to npm
-    needs: gate
-    # A manual run defaults to a dry run: the gate above still runs in full, and this
-    # job is skipped unless the operator explicitly unticked it. Only a tag publishes
-    # by default.
-    if: github.event_name == 'push' || inputs.dry_run == false
+    needs: [gate, compatibility]
+    # Manual dispatch exercises the gates only. Publishing is possible exclusively from
+    # an immutable v* tag push whose version check passed above.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
@@ -109,28 +168,21 @@ jobs:
       # here and nowhere else in the file.
       id-token: write
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
-
       - uses: actions/setup-node@v7
         with:
           node-version: '22.19.0'
-          cache: pnpm
           registry-url: 'https://registry.npmjs.org'
 
-      - run: pnpm install --frozen-lockfile
+      - name: Download the exact tested tarball
+        uses: actions/download-artifact@v7
+        with:
+          name: raven-release-tarball
+          path: .release
 
-      # `test:dsh` is NOT run in CI and that is a decision, not an omission. It composes
-      # Raven against a real DeepSeek Harness checkout by SOURCE path — the pinned commit
-      # of a separate repository — and there is no honest way for this workflow to obtain
-      # one at the pinned commit without either vendoring it or trusting a floating
-      # clone, both of which would make a green gate mean less than it does today. It is
-      # therefore a documented LOCAL release gate: run
-      #   DSH_CHECKOUT=/path/to/deepseek-harness pnpm run check:release
-      # on a machine that has the pinned checkout BEFORE pushing the release tag. See
-      # CONTRIBUTING.md ("Releasing").
-      - name: Publish with provenance
-        run: pnpm publish --provenance --no-git-checks --access public
+      - name: Verify and publish the tested bytes with provenance
+        run: |
+          cd .release
+          sha256sum --check raven.tgz.sha256
+          npm publish raven.tgz --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

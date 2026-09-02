@@ -547,6 +547,16 @@ try {
       text: 'upper bound sentinel',
     })
     const ptcPrompt = await ptcCtx.systemPrompt.assemble()
+    const ravenSdk = ptcPrompt.sections.find((section: { name: string }) => section.name === 'tools:sdk')?.text ?? ''
+    assert.match(ravenSdk, /raven_task: unknown;/,
+      'the pinned PTC renderer changed its known complex-argument fallback; reassess Raven schema guidance')
+    assert.match(ravenSdk, /Exact action fields: start\(outcome, request, grounding, sourcePolicy, structureMode\)/,
+      'Raven tool guidance no longer compensates for the pinned PTC renderer complex-schema fallback')
+    assert.match(ravenSdk, /checkpoint\(taskId, stage, summary, artifact, sources, claims, failures\)/,
+      'Raven PTC action directory omitted the checkpoint contract')
+    assert.match(ravenSdk, /complete\(taskId, artifact\)/,
+      'Raven PTC action directory omitted the Completion contract')
+    assert.doesNotMatch(ravenSdk, /objective/, 'Raven PTC guidance advertises a nonexistent objective field')
     const sectionNames = ptcPrompt.sections.map((section: { name: string }) => section.name)
     const ptcOnlyIndex = sectionNames.indexOf('tools:ptc-only')
     const ravenIndex = sectionNames.indexOf('tool:raven-task')
@@ -621,7 +631,7 @@ try {
     const resumed = await ptcCtx.tools.execute({
       callId: 'raven-dsh-ptc-mode-2',
       name: 'raven_task',
-      arguments: { action: 'status' },
+      arguments: { action: 'status', taskId: ptcTaskId },
       agent: { id: 'raven-dsh-ptc-mode-resumed', session: { events: [settle] } },
       signal,
       parent: Symbol('raven-dsh-ptc-mode-resume'),

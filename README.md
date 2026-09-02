@@ -19,7 +19,7 @@ Early checkpoints you can steer mid-run · citations verified against the bytes 
 
 English · [中文](README.zh.md)
 
-[**TL;DR**](#tldr) · [**Install**](#install) · [**Usage**](#usage) · [**How it works**](#how-it-works-under-the-hood) · [**Configuration**](#configuration) · [**Operating**](#operating-raven) · [**FAQ**](#faq)
+[**TL;DR**](#tldr) · [**Experience**](#the-product-experience) · [**Install**](#install) · [**Usage**](#usage) · [**Evaluation**](./evaluation/README.md) · [**Configuration**](#configuration) · [**Operating**](#operating-raven) · [**FAQ**](#faq)
 
 </div>
 
@@ -39,6 +39,8 @@ English · [中文](README.zh.md)
 - **Install:** `pnpm build && pnpm pack`, add the tarball from the deployment root, then run
   `npx dsh-raven-install-preset` and choose Raven as the session mode. See [Install](#install).
 - **Use:** talk to the Harness agent normally — no launch phrase, no separate Task UI, and no lifecycle commands to learn. Contextual guidance defaults to `auto` and can be set to `off`. See [Usage](#usage).
+- **Evaluation:** the reproducible [methodology, scenarios, and rubric](./evaluation/README.md) are tracked, but generated benchmark outputs, raw Session logs, and review packets remain local and are not published. Run the suite privately to evaluate a specific release; no public aggregate winner is claimed.
+
 ## Why Raven
 
 A substantial research or writing request usually disappears into a long batch pipeline: you wait, you get one wall
@@ -62,6 +64,29 @@ collaboration, not an approval gate, and the user can delegate or skip it. Raven
 choice changes the public outcome, evidence floor, audience, deliverable, significant cost, or an
 external/destructive/sensitive side effect.
 
+## The product experience
+
+Start a new Harness session in **Raven** mode and make the outcome—not Raven's protocol—the request:
+
+```text
+Research the evidence for and against centralizing our recovery records. Show me an
+early useful evidence map, then turn the result into a decision memo for skeptical
+engineering directors. Preserve contradictions and keep the conclusion reusable.
+```
+
+The same conversation then moves through one visible chain:
+
+1. **Research:** Raven finds Leads, opens the web/local/llm-wiki/MCP material with ordinary Harness tools, and admits only inspected Sources.
+2. **Progressive evidence:** an early Checkpoint gives you useful findings, limits, and citations while the Task remains open.
+3. **Insight:** Raven separates what Sources say from candidate explanations, assumptions, alternatives, and evidence that would reverse them.
+4. **Competing structures:** for substantial writing, Structure Studio presents a compact choice between genuinely different arguments—not renamed outlines.
+5. **User collaboration:** reply naturally: `Combine the recovery-risk opening with the uncertainty boundary, and focus on implementation risk.` The same Task retains compatible evidence and invalidates stale structure.
+6. **Writing:** Raven drafts one selected section at a time. Optional configured routes generate independent candidates and an adversarial synthesis; without them, the main agent continues normally.
+7. **Source-checked Artifact:** Completion binds the exact latest Checkpoint bytes and rechecks registered Claim/Source references. It explicitly does **not** pretend to discover omitted Claims or judge semantic entailment.
+8. **Durable knowledge:** ask `Keep the reusable conclusions in this llm-wiki.` Raven returns conditional, marker-protected Markdown writes; a later independent Task can reuse the knowledge while reopening volatile facts.
+
+You can pause after any Checkpoint and later say `continue`. You never need to mention Task IDs, actions, phases, or revisions. See [Usage](#usage) for more prompts and the [evaluation suite](./evaluation/README.md) for the controlled vanilla-versus-Raven methodology and preserved review evidence.
+
 ## Features
 
 - **Batched discovery over the official search seam.** `discover` sends several complementary queries in one Task
@@ -78,7 +103,7 @@ external/destructive/sensitive side effect.
 - **Steering instead of restarts.** `steer` applies a user correction to the live Task and preserves prior evidence.
 - **One Markdown-first Source fabric.** Every Source keeps its Original Resource separate from Raven's canonical Markdown representation. Exactly four origins are supported: web, local files, llm-wiki pages, and MCP resources. Existing Markdown stays original; conversion names the producing Harness tool; `full`, `segment`, or `unknown` coverage prevents a bounded projection from impersonating a whole Resource. A successful non-web inspection persists a digest binding Resource, Markdown, producer, call ID, and coverage; unavailable or failed conversion defers dependent Claims.
 - **Task-level Source Policy.** Natural requests become steerable policy on the same Task: allow/block web hosts, prefer primary evidence, scope local or llm-wiki roots, and include/exclude named MCP sources. This is never deployment configuration.
-- **Citations checked against source material.** Artifacts cite stable Source IDs with `[@source-id]`. Raven independently re-fetches web Sources with the existing HTTP identity guarantees. Local, llm-wiki, and MCP Sources must name the prior successful Harness `inspectionCallId`; Raven checks its `tool/call` and `tool/result`, producer, resolved file identity or MCP namespace, returned Markdown, and excerpt. Rendered citations expose Origin and conversion provenance. Unknown citations, unattested representations, cross-host redirects, and mismatched excerpts are rejected.
+- **Citations checked against source material.** Artifacts cite stable Source IDs with `[@source-id]`. Raven independently re-fetches web Sources with the existing HTTP identity guarantees. Local, llm-wiki, and MCP Sources bind a prior successful Harness inspection. When a direct surface exposes `inspectionCallId`, the agent may pass it; when PTC hides a nested call ID, Raven resolves and stores the latest exact matching receipt from producer, resource arguments, coverage, and Markdown bytes. Raven checks direct `tool/call`/`tool/result` or paired PTC dispatch records, resolved file identity or MCP namespace, returned Markdown, and excerpt. Rendered citations expose Origin and conversion provenance. Unknown citations, unattested representations, cross-host redirects, and mismatched excerpts are rejected.
 - **Independence-aware Claim trace.** Every Completion appends a trace mapping material Claim IDs and text to Source
   IDs, marking Claims whose Sources share one `sourceFamily` so reprints of a single originating record cannot read
   as several confirmations. Genuinely conflicting Claims are recorded as contested rather than silently resolved.
@@ -653,18 +678,16 @@ adoption, ingest, or Task contribution is therefore a no-op rather than a duplic
 
 Mixed-document folders do not create another converter. Existing Markdown is passed byte-for-byte as
 `derivation=original`; PDF, HTML, office, and other media must use the ordinary Source layer's existing Markdown
-normalization and carry the Original Resource URI/media type, `producedBy`, `inspectionCallId`, coverage, and exact
-converted Markdown. Unsupported or failed normalization is reported and the original stays untouched.
+normalization and carry the Original Resource URI/media type, `producedBy`, coverage, and exact converted Markdown. Include `inspectionCallId` when the surface exposes it; otherwise Raven resolves an exact matching PTC receipt before the Workspace plan is accepted. Unsupported or failed normalization is reported and the original stays untouched.
 
 `reuse` is prior knowledge, not a freshness waiver. For durable concepts, the later Task may inspect the selected
 Workspace page and register it as an `llm-wiki` Source. For prices, office holders, product status, counts, or other
 volatile/current Claims, Raven labels the stored result as requiring fresh verification and the agent must reopen the
 authoritative Original Resource.
 
-The compatible one-off path remains: after a Task has an Artifact, `raven_task action=export` returns an artifact page
-under `wiki/queries`, one immutable `wiki/raw` excerpt page per Source with its verification receipt
-(`capture: excerpt-only`), and one appendable `wiki/log.md` entry. Pass `init=true` only for a new repository. This is
-still useful when a user wants one Task and no maintained Workspace.
+The compatible one-off path remains: after a Task has an Artifact, `raven_task action=export` returns a Task-addressed artifact page
+under `wiki/queries`, Task-and-resource-addressed immutable `wiki/raw` excerpt pages with verification receipts
+(`capture: excerpt-only`), and one marker-protected append for `wiki/log.md`. Every page carries an `absent` precondition: the agent must re-read it and never overwrite an existing path. Repeating the same export produces the same paths, bytes, and log marker; two Tasks with the same title cannot collide. Pass `init=true` only for a new repository. This is still useful when a user wants one Task and no maintained Workspace.
 
 ## How it works (under the hood)
 
@@ -768,8 +791,10 @@ adapter in production, a deterministic adapter in tests):
    retrieval limit, not missing evidence.
 5. Report a per-Source timeout as unverifiable instead of holding the whole Checkpoint open.
 
-Completion then re-checks citation identity, material Claim links, Source reachability, and the exact Artifact
-fingerprint, and appends the independence-aware Claim trace.
+Completion then re-checks citation identity, **registered** material Claim links, Source reachability, and the exact Artifact
+fingerprint, and appends the independence-aware Claim trace. Its result explicitly reports the boundary: Raven does not
+discover material assertions the agent omitted from the Claim inventory, and literal excerpt presence does not establish
+semantic entailment. The final assertion inventory and those judgments remain agent and reviewer responsibilities.
 
 ### Package surface and non-goals
 
@@ -985,14 +1010,19 @@ ordinary Harness file tools, inside that agent's existing approval and sandbox b
 What lands on disk when you accept those writes is:
 
 ```text
-wiki/queries/<slug>.md    the Artifact page, with derived frontmatter
-wiki/raw/<source-id>.md   one immutable page per Source: Original Resource and Markdown
-                          provenance, the verified excerpt only (capture: excerpt-only),
-                          its verification receipt, and a sha256 over that page's body
-wiki/log.md               one appended entry
+wiki/queries/<date>-<slug>-<task-digest>.md
+                          one Task-addressed Artifact page with derived frontmatter
+wiki/raw/articles/<source-label>-<task-resource-digest>.md
+                          one immutable excerpt page per Source: Original Resource and
+                          Markdown provenance, verification receipt, and body sha256
+wiki/log.md               one append guarded by an operation marker
 wiki/SCHEMA.md            seeded only with init=true
 wiki/index.md             seeded only with init=true
 ```
+
+Every projected page has an `absent` precondition. Re-read each target before applying the plan; write only when it is
+still absent, and append the log entry only when its marker is absent. A conflicting existing path is a reason to stop
+and inspect, never permission to overwrite.
 
 The one-off `raw/` pages store the bounded excerpt and provenance, **not** the full Original Resource or full
 Markdown representation, so an export is not a copy of the sources you read. A maintained Workspace adds:
@@ -1112,13 +1142,14 @@ Harness versions.
 
 ```bash
 pnpm install --frozen-lockfile
+pnpm run eval -- check   # strict benchmark inputs and fixture hashes; no model call
 pnpm check
 pnpm test:pack
 ```
 
 The repository uses a TypeScript-first modern toolchain: TypeScript 6 for strict type checking, tsdown for ESM and
 declaration builds, Vitest for unit/integration/acceptance tests, Oxlint with warnings denied, and pnpm with a
-frozen lockfile and an explicit `esbuild` build allowlist.
+frozen lockfile and an explicit `esbuild` build allowlist. The reproducible paired methodology, eight controlled workflows, assessor catalog, review rubric, and paid/manual runner are documented in [`evaluation/README.md`](./evaluation/README.md); deterministic integrity is part of `pnpm check`.
 
 Verify the real Harness Loader, prompt registry, tool registry, execution pipeline, and Cordis disposal against the
 intended checkout:
@@ -1215,6 +1246,9 @@ one continuing Task, and gates Completion on excerpt-level verification rather t
 **Does excerpt matching prove the Claim is true?**
 No. Raven verifies a bounded excerpt against canonical Markdown and preserves its route to the Original Resource. For web it also verifies HTTP reachability and redirect identity. Literal presence is not semantic entailment; the agent remains responsible for Claim judgment.
 
+**Does Completion prove that every material assertion was registered as a Claim?**
+No. Completion checks registered Claim/Source references and binds the exact latest Checkpoint bytes, but it cannot semantically discover a proposition the agent omitted from the Claim inventory. Raven instructs the agent to inventory the final Artifact sentence by sentence, exposes this limitation in a machine-readable verification scope, and keeps completeness and entailment in the review rubric rather than pretending they are deterministic checks.
+
 **Is it on npm?**
 Not yet. Build and pack from a checkout — see [Install](#install).
 
@@ -1227,7 +1261,7 @@ does not delete user-owned llm-wiki Workspace files.
 
 ## v1 limits
 
-- Excerpt verification is literal, not semantic (see FAQ).
+- Excerpt verification is literal, not semantic, and Completion cannot discover material assertions omitted from the registered Claim inventory (see FAQ).
 - The four Outcomes select grounding defaults and explicit prompt policy inside the existing Harness agent. Optional
   configured draft routes add bounded candidate, critique, and synthesis calls but no autonomous second agent or
   deterministic prose generator, so content quality remains model-dependent.

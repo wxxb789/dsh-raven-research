@@ -187,13 +187,15 @@ function synthesisSystem(variantRoutes: readonly RavenDraftRoute[]): string {
     'Preserve the selected Skeleton, section purpose, Claim/Insight lineage, audience, constraints, counterarguments, and evidence gaps.',
     'Candidate agreement is not corroboration. Add no factual or analytical proposition outside the supplied contract.',
     'Treat a candidate carrying a truncation detail as incomplete; never interpret its cut-off ending as intentional closure.',
-    'Return JSON only with this exact shape. Name at least two distinct candidate routes and, for each, copy one route-specific exact fragment of at least two substantive words unchanged into both candidateExcerpt and synthesisExcerpt:',
+    'Return JSON only with this exact shape. Name at least two distinct candidate routes and, for each, copy one route-specific exact fragment of at least two substantive words (or four CJK characters) unchanged into both candidateExcerpt and synthesisExcerpt:',
     responseShape,
   ].join('\n')
 }
 
 function substantiveContributionExcerpt(value: string): boolean {
-  return value.length >= 8 && (value.match(/[\p{L}\p{N}]+/gu)?.length ?? 0) >= 2
+  const words = value.match(/[\p{L}\p{N}]+/gu)?.length ?? 0
+  const cjk = value.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu)?.length ?? 0
+  return cjk >= 4 || (value.length >= 8 && words >= 2)
 }
 
 function parseSynthesis(
@@ -236,7 +238,7 @@ function parseSynthesis(
       throw new Error(`synthesis contribution ${index} must carry the same exact fragment from candidate to synthesis`)
     }
     if (!substantiveContributionExcerpt(candidateExcerpt)) {
-      throw new Error(`synthesis contribution ${index} excerpt must contain at least two substantive words`)
+      throw new Error(`synthesis contribution ${index} excerpt must contain at least two substantive words or four CJK characters`)
     }
     if (seenExcerpts.has(candidateExcerpt)) {
       throw new Error(`synthesis contribution ${index} must use a distinct fragment`)

@@ -81,8 +81,8 @@ describe('raven_workspace tool contract', () => {
       origin: expect.objectContaining({ enum: SOURCE_ORIGINS.filter(origin => origin !== 'web') }),
       uri: expect.any(Object),
     }))
-    expect(markdown?.required).toEqual(['format', 'derivation', 'coverage', 'producedBy', 'inspectionCallId', 'markdown'])
-    expect(markdownProperties.inspectionCallId?.description).toContain('ordinary Harness tool call')
+    expect(markdown?.required).toEqual(['format', 'derivation', 'coverage', 'producedBy', 'markdown'])
+    expect(markdownProperties.inspectionCallId?.description).toContain('Omit when Raven can resolve an exact matching direct or PTC receipt')
 
     const rendered = workspace.output.render({}, {
       status: 'ready', action: 'maintain', message: 'Prepared.', issues: [],

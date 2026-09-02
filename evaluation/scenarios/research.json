@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "research",
+  "title": "Conflicting retention evidence",
+  "description": "Research a fictional final rule against its superseded draft, same-family reprint, observational audit, and interested vendor claim.",
+  "kind": "primary",
+  "outcome": "research",
+  "workflow": ["research", "web", "mcp"],
+  "turns": [
+    {
+      "id": "initial",
+      "delivery": "followup",
+      "trigger": "idle",
+      "content": "Using the frozen sources available in this workspace, determine what Rule R-17 requires, what evidence bears on recovery risk, and what remains unknown. Prefer primary records, identify non-independent coverage, preserve contradictions, show an early useful findings checkpoint, then produce a decision brief. Do not repeat the supplied sources as a list."
+    }
+  ],
+  "sources": [
+    {"id":"final-rule","title":"Final Rule R-17","origin":"web","uri":"https://example.com/raven-eval/regulator-current","path":"fixtures/corpus/regulator-current.md","sha256":"sha256:b54920907d16233877d8434ed01ecb4f21c9fed0533ee25c61a1597841233add","quality":"primary","family":"regulator-rule","asOf":"2026-02-01"},
+    {"id":"draft-rule","title":"Draft Rule R-17","origin":"web","uri":"https://example.com/raven-eval/regulator-draft-2024","path":"fixtures/corpus/regulator-draft-2024.md","sha256":"sha256:a87a69f5663aee89dd39a17c3ab4c18d2b7d08bb4ca331477060c1a384b56198","quality":"primary","family":"regulator-rule","asOf":"2024-09-10"},
+    {"id":"reprint","title":"Industry Bulletin reprint","origin":"web","uri":"https://example.com/raven-eval/industry-reprint","path":"fixtures/corpus/industry-reprint.md","sha256":"sha256:8574948eb38b263453a04709cbe5b3a20fe2611e0f2e5f8f4edd16d3a5bea4b1","quality":"secondary","family":"regulator-rule","asOf":"2026-02-02"},
+    {"id":"audit","title":"Inspector-General Recovery Audit","origin":"mcp","uri":"mcp://raven_eval/inspector-audit","path":"fixtures/corpus/inspector-audit.md","sha256":"sha256:5c9510fd49bfa05b57ef3f0ddd21891e854136a192201324c5e32c2126ab1af9","quality":"primary","family":"inspector-audit","asOf":"2026-03-12"},
+    {"id":"vendor","title":"RestoreFast case study","origin":"web","uri":"https://example.com/raven-eval/vendor-case-study","path":"fixtures/corpus/vendor-case-study.md","sha256":"sha256:f3f923cf2b354b29868e34c38eed6421dfbd32eb493a0b34edd126df6c6df149","quality":"primary","family":"restorefast-self-report","asOf":"2026-03-20"}
+  ],
+  "expectations": {
+    "requiredFactIds": ["retention-seven-years", "low-risk-three-years", "audit-eight-of-twenty-four", "audit-not-causal", "vendor-method-limit"],
+    "contradictionIds": ["draft-versus-final-retention"],
+    "forbiddenArtifactQuotes": ["The mandate reduced recovery failures by 37 percent."],
+    "minimumIndependentSourceFamilies": 2,
+    "minimumCheckpoints": 1,
+    "requireStopResume": false,
+    "requireKnowledgeReuse": false,
+    "requireStructureChoice": false,
+    "requireMultiModelDraft": false,
+    "allowedTerminalStatuses": ["completed", "completed-with-limits"]
+  },
+  "reviewDimensions": ["research-correctness", "claim-support-fidelity", "source-quality-independence", "coverage-contradiction-handling", "insight-defensibility", "synthesis-usefulness", "anti-summary", "provenance-completeness", "checkpoint-usefulness"]
+}

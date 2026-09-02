@@ -21,10 +21,43 @@ export function semanticTextFold(value: string): string {
     .trim()
 }
 
+const CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+
+/** Word tokens for spaced prose and character bigrams for languages without word spaces. */
+function semanticTextTokens(value: string): string[] {
+  const tokens: string[] = []
+  let word = ''
+  let cjk: string[] = []
+  const flushWord = (): void => {
+    if (word !== '') tokens.push(word)
+    word = ''
+  }
+  const flushCjk = (): void => {
+    if (cjk.length === 1) tokens.push(cjk[0] as string)
+    for (let index = 0; index + 1 < cjk.length; index += 1) {
+      tokens.push((cjk[index] as string) + (cjk[index + 1] as string))
+    }
+    cjk = []
+  }
+  for (const character of semanticTextFold(value)) {
+    if (CJK_CHARACTER.test(character)) {
+      flushWord()
+      cjk.push(character)
+    } else {
+      flushCjk()
+      if (character === ' ') flushWord()
+      else word += character
+    }
+  }
+  flushWord()
+  flushCjk()
+  return tokens
+}
+
 /** Conservative lexical overlap guard for cosmetic rewrites of the same argument. */
 export function semanticTextSimilarity(left: string, right: string): number {
-  const leftTokens = new Set(semanticTextFold(left).split(' ').filter(Boolean))
-  const rightTokens = new Set(semanticTextFold(right).split(' ').filter(Boolean))
+  const leftTokens = new Set(semanticTextTokens(left))
+  const rightTokens = new Set(semanticTextTokens(right))
   if (leftTokens.size < 4 || rightTokens.size < 4) return 0
   let shared = 0
   for (const token of leftTokens) {

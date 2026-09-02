@@ -28,7 +28,7 @@ export interface RavenWikiOptions {
   readonly title: string
   readonly tags: readonly string[]
   readonly init: boolean
-  /** Emission time for the knowledge page and log; immutable raw pages use Source inspection time. */
+  /** Legacy caller timestamp retained for API compatibility; Task updatedAt owns deterministic export dating. */
   readonly at: string
 }
 
@@ -43,13 +43,21 @@ function blockquote(value: string): string {
  * produced the SAME path and the second silently overwrote the first — losing an
  * inspected Source and leaving the artifact page's `sources:` list pointing at a
  * page describing something else. A short digest of the full identity is
- * therefore appended: it is derived only from the Source's own stable ID and
- * title, so the path is a pure function of the record and exporting the same Task
- * twice still produces byte-identical paths.
+ * therefore appended. Source IDs are only Task-local, so the digest also binds
+ * the Task and canonical Original Resource; two Tasks may both call different
+ * records `S1` without overwriting one another. Re-exporting the same Task stays
+ * byte-identical.
  */
-function rawPagePath(source: RavenSourceRecord): string {
-  const identity = `${source.sourceId} ${source.title}`
-  return `wiki/raw/articles/${wikiSlug(identity)}-${sha256Hex(identity).slice(0, 8)}.md`
+function rawPagePath(source: RavenSourceRecord, state: RavenTaskState): string {
+  const label = `${source.sourceId} ${source.title}`
+  const identity = [
+    state.taskId,
+    source.resource.origin,
+    source.resource.uri,
+    source.inspectionSha256 ?? '',
+    source.inspectedAt,
+  ].join('\0')
+  return `wiki/raw/articles/${wikiSlug(label)}-${sha256Hex(identity).slice(0, 8)}.md`
 }
 
 /**
@@ -142,7 +150,7 @@ function renderRawPage(source: RavenSourceRecord, state: RavenTaskState): RavenW
     frontmatter.push(`verification: ${source.check.status}`, `verified_at: ${source.check.checkedAt}`)
   }
   frontmatter.push(`raven_task: ${state.taskId}`)
-  return { path: rawPagePath(source), content: renderWikiPage(frontmatter, body) }
+  return { path: rawPagePath(source, state), content: renderWikiPage(frontmatter, body) }
 }
 
 const SCHEMA_SEED = `# Wiki Schema
@@ -276,9 +284,8 @@ export function renderWikiPages(
   renderedArtifact: string,
   options: RavenWikiOptions,
 ): RavenWikiEmission {
-  const date = options.at.slice(0, 10)
+  const date = state.updatedAt.slice(0, 10)
   const artifactSlug = wikiSlug(options.title)
-  const artifactPath = `wiki/queries/query-${date}-${artifactSlug}.md`
   const rawPages = renderWikiRawPages(state)
   const contested = state.claims.some(claim => (claim.contradicts ?? []).length > 0)
   const outstandingDebt = outstandingSummaryDebt(state.syntheses)
@@ -309,7 +316,10 @@ export function renderWikiPages(
   if (state.finalArtifactSha256 !== null) frontmatter.push(`raven_artifact_sha256: ${state.finalArtifactSha256}`)
 
   const body = `# ${options.title}\n\n${renderedArtifact.trimEnd()}\n`
-  const pages: RavenWikiPage[] = [{ path: artifactPath, content: renderWikiPage(frontmatter, body) }, ...rawPages]
+  const artifactContent = renderWikiPage(frontmatter, body)
+  const artifactIdentity = `${state.taskId}\0${sha256Hex(artifactContent)}`
+  const artifactPath = `wiki/queries/query-${date}-${artifactSlug}-${sha256Hex(artifactIdentity).slice(0, 8)}.md`
+  const pages: RavenWikiPage[] = [{ path: artifactPath, content: artifactContent }, ...rawPages]
   if (options.init) {
     pages.push(
       { path: 'wiki/SCHEMA.md', content: SCHEMA_SEED },
@@ -320,6 +330,8 @@ export function renderWikiPages(
 
   const external = materialExternal(state.claims)
   const verified = state.sources.filter(source => source.check.status === 'reachable').length
+  const operationId = `sha256:${sha256Hex(`${state.taskId}\0${state.revision}\0${artifactPath}`)}`
+  const logMarker = `<!-- dsh-raven-research/export ${operationId} -->`
   const logEntry = [
     `## [${date}] raven | ${state.outcome} — ${options.title}`,
     `- Task: ${state.taskId} · revision ${state.revision} · steering ${state.steeringRevision} · phase ${state.phase}`,
@@ -335,8 +347,14 @@ export function renderWikiPages(
         : ` in ${outstandingDebt.length} scope(s): ${outstandingDebt.map(round => markdownText(round.scope)).join(', ')}`),
     `- Limitations: ${state.limitations.length}${contested ? ' · contested claims present' : ''}`,
     `- Artifact: ${artifactPath}`,
+    logMarker,
     '',
   ].join('\n')
 
-  return { pages, logEntry }
+  return {
+    pages,
+    preconditions: pages.map(page => ({ path: page.path, expected: 'absent' as const })),
+    logEntry,
+    logMarker,
+  }
 }

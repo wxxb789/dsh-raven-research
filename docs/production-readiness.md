@@ -238,7 +238,7 @@ Every finding below was fixed in this repository unless the row says otherwise.
 | A10 | Fixed, narrower than first reported | Limitation identity is a monotonic counter and the codec validates shape and uniqueness rather than position. The audit implied any interleaving broke decoding; the measured scope is narrower — the two only diverge after a cap drop. Recorded in the code rather than dramatized with a contrived test. |
 | A11 | Fixed, with a corrected rationale | Near-identical Limitation details fold. The digit-stripping step the original fix advertised is dead code: the character-class pass that follows already removes digits. The comment now says so. |
 | A12 | **Withdrawn — the reported defect does not exist** | The claim was that HTML-escaping before Markdown-escaping renders `&` as `&amp\;`. It does not: `;` is not in the escaped class, so neither pass can re-escape the other's output. Both orders were tested across realistic inputs with zero diverging cases. No behaviour was changed and the comment records the false alarm instead of a fictional fix. |
-| A13 | Fixed | Raw wiki page paths carry a digest of the Source id and title; `renderWikiPages` dedupes them; export idempotence is asserted byte for byte. |
+| A13 | Fixed and hardened again | Raw page identities now bind Task plus canonical resource/inspection identity, artifact paths bind Task plus Artifact digest, and one-off exports carry absent preconditions plus an idempotent log marker. Tests cover same-Task idempotence and cross-Task title/Source-ID collisions. |
 | A14 | Fixed | A migration table and loop exist; a newer-than-current schema is still refused, deliberately. |
 | A15 | Fixed | `compactError` keeps a head and a tail with the middle elided, so repair guidance survives. |
 | A16 | Fixed | Cap boundary tests at, below and above every cap, asserting the refusal costs the accepted state nothing. |
@@ -260,7 +260,7 @@ Every finding below was fixed in this repository unless the row says otherwise.
 | B16 | Fixed | Ordinary Agent books and terminal-only Team books use an LRU target of 64; the current book is exempt, and evicted Agent books re-fold from their session log. Continuing detected-Team books are also exempt because one-member-at-a-time reconstruction can fork an active or stopped Team Task, so the resident target becomes soft only when every excess candidate is a continuing Team book. Tests prove ordinary eviction/re-fold and >64-Team continuity separately. |
 | B17 | Fixed | The card controller sets a disposal fence before releasing its subscriptions, and a save settling after disposal no longer publishes. |
 | C1 | Fixed | The pin has one machine-readable source, the gate reads it, and the pin was retargeted to the checkout that exists. `pnpm run test:dsh` passes against it. |
-| C2 | Fixed | `test:pack` runs as its own CI job; `test:dsh` is documented as a local gate rather than faked in CI. |
+| C2 | Fixed and hardened again | `test:pack` runs as its own CI job. Release CI checks out the exact immutable Harness pin, runs `test:dsh`, and smoke-tests paired preset composition plus process resume before publish can start. |
 | C3 | Fixed | Tag-driven release workflow with provenance, a dirty-tree refusal, dependabot scoped away from the pinned packages, CHANGELOG, SECURITY and CONTRIBUTING. |
 | C4 | Fixed | Both READMEs carry prerequisites, cost, data handling, limits and troubleshooting, with every error string verified verbatim against source. |
 | C5 | Fixed | The intent of the wildcard peers is documented where they are declared and in the README. |
@@ -270,7 +270,7 @@ Every finding below was fixed in this repository unless the row says otherwise.
 | D2 | Fixed | Cap boundary tests for Sources, Claims, Checkpoints and Limitations. |
 | D3 | Fixed | Concurrent Team checkpoint test asserting the loser recovers rather than the contribution vanishing. |
 | D4 | Fixed | 27 retrieval tests covering the taxonomy, the retry and ten normalization cases, each verified red without the fix. |
-| D5 | Fixed | Export idempotence asserted byte for byte with one log entry. |
+| D5 | Fixed and hardened again | Same-Task export is byte-identical with one stable log marker; cross-Task export paths cannot collide when titles and Task-local Source IDs repeat. |
 | D6 | Fixed | Cross-host redirect rejection, plus default-port acceptance and non-default-port rejection. |
 | D7 | Fixed | The card is rendered and the controller driven: 16 tests over the element tree, the write path, the read-back and disposal. |
 | D8 | Fixed | Disposal releases both subscriptions and stops publishing. |
