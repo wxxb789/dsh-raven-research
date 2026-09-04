@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "general-writing",
+  "title": "Implementation decision memo",
+  "description": "Turn supplied local notes into substantial audience-specific prose without unnecessary research ceremony.",
+  "kind": "primary",
+  "outcome": "general-writing",
+  "workflow": ["general-writing", "local"],
+  "turns": [
+    {"id":"initial","delivery":"followup","trigger":"idle","content":"Use only the supplied implementation notes to write the requested decision memo for skeptical engineering directors. Preserve every explicit constraint, argue rather than summarize, give me an early useful draft, skip structural alternatives for this direct memo, and then complete the final version."}
+  ],
+  "sources": [
+    {"id":"notes","title":"Supplied implementation notes","origin":"local","uri":"file:///workspace/operations-notes.md","path":"fixtures/local/operations-notes.md","sha256":"sha256:9f2982204fa9568d337dfe2447214e102d3aca8cb2d570bbd6a2dd92c0b80aab","quality":"user-provided","family":"user-notes","asOf":null}
+  ],
+  "expectations": {
+    "requiredFactIds": ["audience-engineering-directors", "preserve-low-risk-exception", "staged-recommendation", "reversal-condition"],
+    "contradictionIds": [],
+    "forbiddenArtifactQuotes": [],
+    "minimumIndependentSourceFamilies": 0,
+    "minimumCheckpoints": 1,
+    "requireStopResume": false,
+    "requireKnowledgeReuse": false,
+    "requireStructureChoice": false,
+    "requireMultiModelDraft": false,
+    "allowedTerminalStatuses": ["completed", "completed-with-limits"]
+  },
+  "reviewDimensions": ["anti-summary", "argument-skeleton-quality", "final-prose-quality", "checkpoint-usefulness", "completion-reliability", "cost-value"]
+}

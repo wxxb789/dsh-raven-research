@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "multi-model-drafting",
+  "title": "Single-model versus multi-model drafting ablation",
+  "description": "Hold Raven, evidence, selected section, and main route fixed while comparing one authorized drafting route with two.",
+  "kind": "ablation",
+  "outcome": "general-writing",
+  "workflow": ["general-writing", "local", "structure-selection", "multi-model-drafting"],
+  "turns": [
+    {"id":"initial","delivery":"followup","trigger":"idle","content":"Use the supplied notes and evidence to select the argument architecture, then draft only the recommendation section; the full memo's 900-word target does not apply to this section-level ablation. Preserve counterarguments and produce reasoning rather than a source summary. This scenario is run once with one authorized draft route and once with two; do not change the main session model."}
+  ],
+  "sources": [
+    {"id":"notes","title":"Supplied implementation notes","origin":"local","uri":"file:///workspace/operations-notes.md","path":"fixtures/local/operations-notes.md","sha256":"sha256:9f2982204fa9568d337dfe2447214e102d3aca8cb2d570bbd6a2dd92c0b80aab","quality":"user-provided","family":"user-notes","asOf":null},
+    {"id":"study-v2","title":"University Recovery Study v2","origin":"local","uri":"file:///workspace/sources/university-study-v2.md","path":"fixtures/corpus/university-study-v2.md","sha256":"sha256:99f57f55a6a0bd29bbb178f573ae823f95c746a0928232e01300546a38ffdcdc","quality":"primary","family":"nbu-study","asOf":"2026-02-18"},
+    {"id":"experiment","title":"Independent Recovery Experiment","origin":"web","uri":"https://example.com/raven-eval/independent-experiment","path":"fixtures/corpus/independent-experiment.md","sha256":"sha256:387d80a588171bfdb1aac6f715034e8278fe588b0fc290cac28df5d16b715175","quality":"primary","family":"cir-experiment","asOf":"2026-02-25"}
+  ],
+  "expectations": {
+    "requiredFactIds": ["independent-candidates", "eight-criterion-critique", "two-route-contributions"],
+    "contradictionIds": ["study-results-conflict"],
+    "forbiddenArtifactQuotes": [],
+    "minimumIndependentSourceFamilies": 2,
+    "minimumCheckpoints": 1,
+    "requireStopResume": false,
+    "requireKnowledgeReuse": false,
+    "requireStructureChoice": true,
+    "requireMultiModelDraft": true,
+    "allowedTerminalStatuses": ["completed", "completed-with-limits"]
+  },
+  "reviewDimensions": ["argument-skeleton-quality", "final-prose-quality", "anti-summary", "completion-reliability", "cost-value", "synthesis-usefulness"]
+}

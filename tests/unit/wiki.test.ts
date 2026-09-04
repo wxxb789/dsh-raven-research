@@ -117,7 +117,7 @@ describe('llm-wiki emission', () => {
     }, { sessionId: 'wiki-session', signal })
 
     expect(exported.status).toBe('completed')
-    const page = pageAt(exported, 'wiki/queries/query-2026-08-16-durable-event-stores.md')
+    const page = pageAt(exported, /^wiki\/queries\/query-2026-08-16-durable-event-stores-[a-f0-9]{8}\.md$/)
     const fields = frontmatter(page.content)
     expect(fields.title).toBe('"Durable Event Stores"')
     expect(fields.type).toBe('query')
@@ -259,7 +259,7 @@ describe('llm-wiki emission', () => {
       taskId: started.state.taskId,
       title: 'Clean Paragraph',
     }, { sessionId: 'wiki-conf-session', signal })
-    expect(frontmatter(pageAt(active, 'wiki/queries/query-2026-08-16-clean-paragraph.md').content).confidence).toBe('low')
+    expect(frontmatter(pageAt(active, /^wiki\/queries\/query-2026-08-16-clean-paragraph-[a-f0-9]{8}\.md$/).content).confidence).toBe('low')
 
     const completed = await engine.dispatch(draft.state, {
       action: 'complete',
@@ -271,7 +271,7 @@ describe('llm-wiki emission', () => {
       taskId: started.state.taskId,
       title: 'Clean Paragraph',
     }, { sessionId: 'wiki-conf-session', signal })
-    expect(frontmatter(pageAt(done, 'wiki/queries/query-2026-08-16-clean-paragraph.md').content).confidence).toBe('high')
+    expect(frontmatter(pageAt(done, /^wiki\/queries\/query-2026-08-16-clean-paragraph-[a-f0-9]{8}\.md$/).content).confidence).toBe('high')
 
     expect(wikiConfidence({
       ...completed.state,
@@ -453,7 +453,53 @@ describe('llm-wiki emission', () => {
     expect(new Set(rawPaths).size).toBe(2)
   })
 
-  it('keeps immutable raw Source bytes stable when the same Task is projected later', async () => {
+  it('keeps one-off export paths and log operations distinct across Tasks', async () => {
+    const firstTask = await completedResearchTask('wiki-cross-task-one')
+    const secondTask = await completedResearchTask('wiki-cross-task-two')
+    const first = await firstTask.engine.dispatch(firstTask.completed.state, {
+      action: 'export', taskId: firstTask.completed.state.taskId, title: 'Durable Event Stores',
+    }, { sessionId: 'wiki-cross-task-one', signal })
+    const second = await secondTask.engine.dispatch(secondTask.completed.state, {
+      action: 'export', taskId: secondTask.completed.state.taskId, title: 'Durable Event Stores',
+    }, { sessionId: 'wiki-cross-task-two', signal })
+
+    const firstArtifact = first.wiki?.pages.find(page => page.path.startsWith('wiki/queries/'))
+    const secondArtifact = second.wiki?.pages.find(page => page.path.startsWith('wiki/queries/'))
+    const firstRaw = first.wiki?.pages.filter(page => page.path.startsWith('wiki/raw/')).map(page => page.path)
+    const secondRaw = second.wiki?.pages.filter(page => page.path.startsWith('wiki/raw/')).map(page => page.path)
+    expect(firstArtifact?.path).not.toBe(secondArtifact?.path)
+    expect(firstRaw).not.toEqual(secondRaw)
+    expect(first.wiki?.preconditions).toEqual(first.wiki?.pages.map(page => ({ path: page.path, expected: 'absent' })))
+    expect(first.wiki?.logMarker).toMatch(/^<!-- dsh-raven-research\/export sha256:[a-f0-9]{64} -->$/)
+    expect(first.wiki?.logEntry).toContain(first.wiki?.logMarker)
+
+    const repeated = await firstTask.engine.dispatch(firstTask.completed.state, {
+      action: 'export', taskId: firstTask.completed.state.taskId, title: 'Durable Event Stores',
+    }, { sessionId: 'wiki-cross-task-one', signal })
+    expect(repeated.wiki).toEqual(first.wiki)
+  })
+
+  it('binds one-off artifact paths to full title and tags, not only a truncated slug', async () => {
+    const { completed } = await completedResearchTask('wiki-export-options')
+    const artifact = completed.renderedArtifact ?? completed.state.latestArtifact ?? ''
+    const prefix = 'A'.repeat(120)
+    const first = renderWikiPages(completed.state, artifact, {
+      title: prefix + ' first', tags: ['alpha'], init: false, at: '2026-08-16T16:00:00.000Z',
+    })
+    const differentTitle = renderWikiPages(completed.state, artifact, {
+      title: prefix + ' second', tags: ['alpha'], init: false, at: '2026-08-16T16:00:00.000Z',
+    })
+    const differentTags = renderWikiPages(completed.state, artifact, {
+      title: prefix + ' first', tags: ['beta'], init: false, at: '2026-08-16T16:00:00.000Z',
+    })
+
+    expect(first.pages[0]?.path).not.toBe(differentTitle.pages[0]?.path)
+    expect(first.pages[0]?.path).not.toBe(differentTags.pages[0]?.path)
+    expect(first.logMarker).not.toBe(differentTitle.logMarker)
+    expect(first.logMarker).not.toBe(differentTags.logMarker)
+  })
+
+  it('keeps the complete export byte-identical when the same Task is projected later', async () => {
     const { completed } = await completedResearchTask('wiki-later-projection')
     const artifact = completed.renderedArtifact ?? completed.state.latestArtifact ?? ''
     const first = renderWikiPages(completed.state, artifact, {
@@ -462,10 +508,7 @@ describe('llm-wiki emission', () => {
     const later = renderWikiPages(completed.state, artifact, {
       title: 'Durable Event Stores', tags: ['research'], init: false, at: '2027-09-20T08:00:00.000Z',
     })
-    const firstRaw = first.pages.filter(page => page.path.startsWith('wiki/raw/'))
-    const laterRaw = later.pages.filter(page => page.path.startsWith('wiki/raw/'))
-
-    expect(laterRaw).toEqual(firstRaw)
+    expect(later).toEqual(first)
   })
 
   it('exports the same Task twice as byte-identical pages and one log entry', async () => {

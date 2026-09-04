@@ -23,6 +23,8 @@ jobs:
         node: ['22.19.0', '24']
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
 
@@ -38,6 +40,9 @@ jobs:
 
       - name: Typecheck
         run: pnpm run typecheck
+
+      - name: Validate evaluation inputs
+        run: pnpm run eval -- check
 
       # Build BEFORE Test, and not for speed: `tests/unit/card-*.test.ts` load
       # `lib/client.js` and fail with "the browser half is a build artifact, so this
@@ -67,6 +72,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
 

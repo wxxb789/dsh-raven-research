@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "academic-grounded",
+  "title": "Grounded literature synthesis",
+  "description": "Write an academic-style synthesis that keeps withdrawn and corrected versions distinct and reconciles conflicting study designs.",
+  "kind": "primary",
+  "outcome": "academic-writing",
+  "workflow": ["research", "academic-writing", "local", "web"],
+  "turns": [
+    {"id":"initial","delivery":"followup","trigger":"idle","content":"Write a grounded literature-review section on whether centralized record ownership improves recovery time. Distinguish the withdrawn and corrected manuscript versions, compare methods rather than vote-counting results, preserve limitations, cite exact sources, and do not claim a settled effect."}
+  ],
+  "sources": [
+    {"id":"study-v1","title":"University Recovery Study v1","origin":"local","uri":"file:///workspace/sources/university-study-v1.md","path":"fixtures/corpus/university-study-v1.md","sha256":"sha256:ddf331b99b8da057bb6c73a1cf4e486d78ef3440cf5b9553bc0c21757613e7af","quality":"primary","family":"nbu-study","asOf":"2026-01-10"},
+    {"id":"study-v2","title":"University Recovery Study v2","origin":"local","uri":"file:///workspace/sources/university-study-v2.md","path":"fixtures/corpus/university-study-v2.md","sha256":"sha256:99f57f55a6a0bd29bbb178f573ae823f95c746a0928232e01300546a38ffdcdc","quality":"primary","family":"nbu-study","asOf":"2026-02-18"},
+    {"id":"experiment","title":"Independent Recovery Experiment","origin":"web","uri":"https://example.com/raven-eval/independent-experiment","path":"fixtures/corpus/independent-experiment.md","sha256":"sha256:387d80a588171bfdb1aac6f715034e8278fe588b0fc290cac28df5d16b715175","quality":"primary","family":"cir-experiment","asOf":"2026-02-25"},
+    {"id":"audit","title":"Inspector-General Recovery Audit","origin":"web","uri":"https://example.com/raven-eval/inspector-audit","path":"fixtures/corpus/inspector-audit.md","sha256":"sha256:5c9510fd49bfa05b57ef3f0ddd21891e854136a192201324c5e32c2126ab1af9","quality":"primary","family":"inspector-audit","asOf":"2026-03-12"}
+  ],
+  "expectations": {
+    "requiredFactIds": ["v1-withdrawn", "v2-no-clear-difference", "v2-interval", "experiment-twelve-percent", "experiment-lab-limit", "audit-observational"],
+    "contradictionIds": ["v1-versus-v2", "v2-versus-independent-experiment"],
+    "forbiddenArtifactQuotes": ["The mandate reduced recovery failures by 37 percent."],
+    "minimumIndependentSourceFamilies": 2,
+    "minimumCheckpoints": 1,
+    "requireStopResume": false,
+    "requireKnowledgeReuse": false,
+    "requireStructureChoice": false,
+    "requireMultiModelDraft": false,
+    "allowedTerminalStatuses": ["completed", "completed-with-limits"]
+  },
+  "reviewDimensions": ["research-correctness", "claim-support-fidelity", "source-quality-independence", "coverage-contradiction-handling", "synthesis-usefulness", "anti-summary", "final-prose-quality", "provenance-completeness"]
+}

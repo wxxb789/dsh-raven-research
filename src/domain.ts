@@ -476,7 +476,7 @@ export interface RavenDraftComparison {
 export interface RavenDraftContribution {
   readonly route: RavenDraftRoute
   readonly strength: string
-  /** Route-specific fragment of at least two substantive words retained from this candidate. */
+  /** Route-specific fragment of at least two substantive words, or four CJK characters, retained from this candidate. */
   readonly candidateExcerpt: string
   /** Exact fragment in the synthesized prose where that strength appears. */
   readonly synthesisExcerpt: string
@@ -761,10 +761,18 @@ export interface RavenWikiPage {
   readonly content: string
 }
 
-/** Pages to write plus one entry to append; `log.md` is append-only, so it is never a page here. */
+/** An export page is content-addressed and may be created only when its path is still absent. */
+export interface RavenWikiPrecondition {
+  readonly path: string
+  readonly expected: 'absent'
+}
+
+/** Conditional pages plus one idempotent append; `log.md` is append-only, so it is never a page here. */
 export interface RavenWikiEmission {
   readonly pages: readonly RavenWikiPage[]
+  readonly preconditions: readonly RavenWikiPrecondition[]
   readonly logEntry: string
+  readonly logMarker: string
 }
 
 /** One bounded page of discovery data attached to status without rendering every durable Candidate. */
@@ -780,11 +788,19 @@ export interface RavenInsightInspection {
   readonly candidates: readonly RavenInsightCandidate[]
 }
 
+export interface RavenVerificationScope {
+  readonly artifactFingerprint: 'verified'
+  readonly registeredArtifactReferences: 'checked'
+  readonly undeclaredAssertions: 'not-assessed'
+  readonly semanticEntailment: 'not-assessed'
+}
+
 export interface RavenDispatchResult {
   readonly status: 'active' | 'needs-revision' | 'stopped' | 'completed' | 'completed-with-limits'
   readonly state: RavenTaskState
   readonly message: string
   readonly issues: readonly string[]
+  readonly verificationScope?: RavenVerificationScope
   readonly renderedArtifact?: string
   readonly wiki?: RavenWikiEmission
   readonly leads?: LeadSearchResult

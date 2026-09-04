@@ -2,4 +2,8 @@ node_modules/
 lib/
 coverage/
 .tmp/
+.harness-under-test/
 *.tgz
+.release/
+evaluation/results/
+evaluation/baselines/production-*/

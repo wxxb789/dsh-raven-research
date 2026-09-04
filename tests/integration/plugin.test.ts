@@ -41,16 +41,20 @@ describe('Raven Cordis plugin', () => {
     expect(tools.map(tool => tool.name)).toEqual(['raven_workspace', 'raven_task'])
     const [workspaceTool, taskTool] = tools
     expect(workspaceTool?.description).toContain('lifecycle is separate')
-    const parameters = taskTool?.parameters as { properties: Record<string, { description?: string }> }
-    expect(parameters.properties.artifact?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.artifactChars))
-    expect(parameters.properties.sources?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.sources))
-    const sourceItems = (parameters.properties.sources as unknown as {
+    expect(taskTool?.description).toContain('Exact action fields: start(outcome, request, grounding, sourcePolicy, structureMode)')
+    const parameters = taskTool?.parameters as {
+      properties: Record<string, { description?: string }>
+    }
+    const properties = parameters.properties
+    expect(properties.artifact?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.artifactChars))
+    expect(properties.sources?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.sources))
+    const sourceItems = (properties.sources as unknown as {
       items: { properties: Record<string, { description?: string }> }
     }).items
-    const claimItems = (parameters.properties.claims as unknown as {
+    const claimItems = (properties.claims as unknown as {
       items: { properties: Record<string, { description?: string }> }
     }).items
-    const failureItems = (parameters.properties.failures as unknown as {
+    const failureItems = (properties.failures as unknown as {
       items: { properties: Record<string, { description?: string }> }
     }).items
     expect(sourceItems.properties.excerpt?.description).toContain(String(RavenPlugin.RAVEN_LIMITS.sourceExcerptChars))
@@ -62,7 +66,7 @@ describe('Raven Cordis plugin', () => {
     expect(Number.isFinite(sections[0]?.order)).toBe(true)
     expect(String(sections[0]?.text)).toContain('one continuing Raven Task')
     expect(listeners.map(listener => listener.event)).toEqual(['tools/ptc-dispatch-log', 'agent/pre-step'])
-    expect(parameters.properties.queries?.description).toContain('Leads, never Sources')
+    expect(properties.queries?.description).toContain('Leads, never Sources')
   })
 
   it('reconstructs compact Task state from durable tool-result metadata after plugin reload', async () => {
@@ -285,6 +289,7 @@ describe('Raven Cordis plugin', () => {
     expect(statusText).toContain(`action=status taskId=${started.state.taskId} insightOffset=8`)
     expect(statusText).not.toContain('I9')
     expect(statusText).toContain('action=inspect')
+    expect(statusText).toContain('Verification scope: current Checkpoint Artifact bytes')
     expect(statusText).not.toContain(candidates[0]?.text)
 
     const nextStatus = await reloaded.tool.execute({
@@ -820,5 +825,47 @@ describe('Raven Cordis plugin', () => {
     expect(addressed?.[1]?.text).toContain('action=resume')
     const current = tool.finalizeContent({ agent, arguments: {} }, failure)
     expect(current?.[1]?.text).toContain(second.state.taskId)
+  })
+
+  it('renders Task export bytes with a fence longer than Artifact fences', async () => {
+    interface TestTool extends Record<string, unknown> {
+      execute(args: unknown, exec: unknown): Promise<{
+        state: RavenPlugin.RavenTaskState
+        status: string
+        renderedArtifact?: string
+        wiki?: unknown
+      }>
+      output: { render(args: unknown, value: unknown): Array<{ type: string; text?: string }> }
+    }
+    let tool: TestTool | undefined
+    RavenPlugin.apply({
+      tools: { register(definition: TestTool) { tool = definition; return vi.fn() } },
+      systemPrompt: { section() { return vi.fn() } },
+      inject() { return vi.fn() },
+      get() { return undefined },
+      on() { return vi.fn() },
+    } as never)
+    if (tool === undefined) throw new Error('Raven tool did not register')
+    const agent = { id: 'task-export-fence', session: { events: [] } }
+    const signal = new AbortController().signal
+    const artifact = '# Example\n\n```ts\nconst value = 1\n```'
+    const started = await tool.execute({
+      action: 'start', outcome: 'general-writing', grounding: 'none', structureMode: 'skip', request: 'Preserve code fences.',
+    }, { agent, signal })
+    const checkpoint = await tool.execute({
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'draft', summary: 'Fenced example.', artifact,
+    }, { agent, signal })
+    const completed = await tool.execute({
+      action: 'complete', taskId: checkpoint.state.taskId, artifact,
+    }, { agent, signal })
+    const exported = await tool.execute({
+      action: 'export', taskId: completed.state.taskId, title: 'Fenced Example', tags: [], init: false,
+    }, { agent, signal })
+    const rendered = tool.output.render({}, exported)[0]?.text ?? ''
+
+    expect(rendered).toContain('````markdown')
+    expect(rendered).toContain('```ts\nconst value = 1\n```')
+    expect(rendered).toContain('\n````')
+    expect(rendered).toContain('Verification scope: final Artifact bytes')
   })
 })

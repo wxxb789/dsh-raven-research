@@ -96,6 +96,62 @@ describe('multi-model draft generator', () => {
     expect(synthesis?.prompt).toContain('Assessment for argument-integrity.')
   })
 
+  it('accepts substantive CJK fragments when synthesis preserves two distinct candidates', async () => {
+    const caller: DraftModelCaller = async (call) => {
+      if (call.stage === 'candidate') {
+        return {
+          text: call.route.provider === 'alpha'
+            ? '第一方案说明反馈机制改变团队决策。'
+            : 'Second candidate keeps abc defg as a boundary.',
+        }
+      }
+      if (call.stage === 'critique') return { text: comparisonJson() }
+      return {
+        text: JSON.stringify({
+          text: '反馈机制改变团队决策，而abc defg限制长期判断。',
+          contributions: [{
+            route: 'alpha/writer', strength: '反馈机制',
+            candidateExcerpt: '反馈机制', synthesisExcerpt: '反馈机制',
+          }, {
+            route: 'beta/critic', strength: 'length boundary',
+            candidateExcerpt: 'abc defg', synthesisExcerpt: 'abc defg',
+          }],
+        }),
+      }
+    }
+
+    const result = await createDraftGenerator(caller).generate(request(), signal)
+
+    expect(result.synthesis?.text).toBe('反馈机制改变团队决策，而abc defg限制长期判断。')
+    expect(result.refinementUnavailable).toBeUndefined()
+  })
+
+  it('rejects three-CJK-character and seven-character contribution fragments', async () => {
+    const caller: DraftModelCaller = async (call) => {
+      if (call.stage === 'candidate') {
+        return { text: call.route.provider === 'alpha' ? '甲乙丙 candidate.' : 'abc def candidate.' }
+      }
+      if (call.stage === 'critique') return { text: comparisonJson() }
+      return {
+        text: JSON.stringify({
+          text: '甲乙丙 and abc def.',
+          contributions: [{
+            route: 'alpha/writer', strength: 'CJK boundary',
+            candidateExcerpt: '甲乙丙', synthesisExcerpt: '甲乙丙',
+          }, {
+            route: 'beta/critic', strength: 'length boundary',
+            candidateExcerpt: 'abc def', synthesisExcerpt: 'abc def',
+          }],
+        }),
+      }
+    }
+
+    const result = await createDraftGenerator(caller).generate(request(), signal)
+
+    expect(result.synthesis).toBeUndefined()
+    expect(result.refinementUnavailable).toContain('substantive words')
+  })
+
   it('returns a recovery recommendation instead of polishing prose across a material gap', async () => {
     const calls: DraftModelCall[] = []
     const caller: DraftModelCaller = async (call) => {

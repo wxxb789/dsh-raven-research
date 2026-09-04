@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "knowledge-reuse",
+  "title": "Cross-Task llm-wiki reuse",
+  "description": "Grow durable knowledge from Task A, then use it in an independent Task B without treating stored knowledge as fresh current evidence.",
+  "kind": "primary",
+  "outcome": "research",
+  "workflow": ["research", "knowledge-reuse", "llm-wiki", "web"],
+  "turns": [
+    {"id":"task-a","delivery":"followup","trigger":"idle","content":"Inspect the supplied audit, explain what it establishes about recovery ownership, and complete the research Task."},
+    {"id":"grow-knowledge","delivery":"followup","trigger":"idle","content":"Now preserve that completed work as durable Markdown knowledge at wiki/concepts/recovery-ownership.md, using the file or knowledge tools available to you. Verify it by reading that exact file back; do not inspect repository or runtime configuration."},
+    {"id":"task-b","delivery":"followup","trigger":"new-session","content":"In a new Task, reuse wiki/concepts/recovery-ownership.md explicitly as stored llm-wiki knowledge—not as a fresh or local primary Source—to advise on the current final Rule R-17. Reopen the current rule separately, and identify what prior research saved you from repeating."}
+  ],
+  "sources": [
+    {"id":"audit","title":"Inspector-General Recovery Audit","origin":"local","uri":"file:///workspace/fixtures/corpus/inspector-audit.md","path":"fixtures/corpus/inspector-audit.md","sha256":"sha256:5c9510fd49bfa05b57ef3f0ddd21891e854136a192201324c5e32c2126ab1af9","quality":"primary","family":"inspector-audit","asOf":"2026-03-12"},
+    {"id":"final-rule","title":"Final Rule R-17","origin":"web","uri":"https://example.com/raven-eval/regulator-current","path":"fixtures/corpus/regulator-current.md","sha256":"sha256:b54920907d16233877d8434ed01ecb4f21c9fed0533ee25c61a1597841233add","quality":"primary","family":"regulator-rule","asOf":"2026-02-01"}
+  ],
+  "expectations": {
+    "requiredFactIds": ["stored-audit-reused", "stored-causation-unresolved", "current-rule-reopened", "cross-task-provenance"],
+    "contradictionIds": [],
+    "forbiddenArtifactQuotes": [],
+    "minimumIndependentSourceFamilies": 2,
+    "minimumCheckpoints": 1,
+    "requireStopResume": false,
+    "requireKnowledgeReuse": true,
+    "requireStructureChoice": false,
+    "requireMultiModelDraft": false,
+    "allowedTerminalStatuses": ["completed", "completed-with-limits"]
+  },
+  "reviewDimensions": ["knowledge-reuse", "research-correctness", "claim-support-fidelity", "provenance-completeness", "completion-reliability", "cost-value"]
+}

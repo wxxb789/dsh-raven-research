@@ -349,6 +349,26 @@ describe('Raven Structure Studio', () => {
       candidates: nearDuplicate, battle: battle(nearDuplicate),
       recommendation: { kind: 'candidate', candidateIds: ['SK1'], rationale: 'Choose the first.' },
     }, { sessionId: 'structure-collaboration', signal })).rejects.toThrow(/lexical near-duplicates/i)
+    const cjkBase = skeleton({
+      frame: '短期考核窗口让团队优先展示可见活动而不是延迟结果。',
+      thesis: '执行偏差主要来自考核周期与结果出现时间不一致。',
+      centralQuestion: '为什么团队明知长期结果重要仍持续优化短期活动？',
+      reasoningFlow: ['确认考核周期。', '解释反馈延迟。', '识别机制边界。'],
+    })
+    const cjkNearDuplicate = [{
+      candidateId: 'CJK1', label: '考核周期', skeleton: cjkBase,
+    }, {
+      candidateId: 'CJK2', label: '反馈延迟', skeleton: {
+        ...cjkBase,
+        frame: '短期考核窗口让团队优先展示可见活动，而不是延迟结果，因此形成偏差。',
+        thesis: '执行偏差主要来自结果出现时间与考核周期不一致，因此需要调整周期。',
+      },
+    }]
+    await expect(raven.dispatch(state, {
+      action: 'structure', taskId: state.taskId,
+      candidates: cjkNearDuplicate, battle: battle(cjkNearDuplicate),
+      recommendation: { kind: 'candidate', candidateIds: ['CJK1'], rationale: 'Choose the first.' },
+    }, { sessionId: 'structure-collaboration', signal })).rejects.toThrow(/lexical near-duplicates/i)
     const unlinked = candidates()
     unlinked[0] = {
       ...unlinked[0]!,
@@ -429,6 +449,9 @@ describe('Raven Structure Studio', () => {
     expect(unresolvedContext).toContain('<raven_structure_studio>')
     expect(unresolvedContext).toContain('materially different argument architectures')
     expect(unresolvedContext).toContain('Do not expose the full battle')
+    expect(unresolvedContext).toContain('evidenceRequired')
+    expect(unresolvedContext).toContain('Use candidateIds (plural), never candidateId')
+    expect(unresolvedContext).toContain('complete Skeleton object—not a string')
     expect(unresolvedContext).not.toContain('<raven_drafting>')
     expect(structured.state.structureRounds[0]?.candidates.map(item => item.candidateId))
       .toEqual(['SK1', 'SK2', 'SK3'])

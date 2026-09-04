@@ -1304,6 +1304,38 @@ type InspectionLookup =
   | { readonly status: 'ok'; readonly receipt: InspectionReceipt }
   | { readonly status: 'unavailable'; readonly detail: string }
 
+interface InspectionEventIndex {
+  readonly callIds: string[]
+  readonly calls: Map<string, Record<string, unknown>[]>
+  readonly results: Map<string, Record<string, unknown>[]>
+}
+
+function inspectionEventIndex(events: readonly unknown[]): InspectionEventIndex {
+  const callIds: string[] = []
+  const calls = new Map<string, Record<string, unknown>[]>()
+  const results = new Map<string, Record<string, unknown>[]>()
+  const add = (target: Map<string, Record<string, unknown>[]>, id: string, value: Record<string, unknown>) => {
+    target.set(id, [...(target.get(id) ?? []), value])
+  }
+  for (const raw of events) {
+    const event = asRecord(raw)
+    const data = asRecord(event?.data)
+    const callId = event?.type === 'tool/call' && typeof data?.callId === 'string'
+      ? data.callId
+      : event?.type === 'tool/code-dispatch-start' && typeof data?.subCallId === 'string' ? data.subCallId : undefined
+    if (callId !== undefined && data !== undefined) {
+      callIds.push(callId)
+      add(calls, callId, data)
+    }
+    if (event?.type === 'tool/code-dispatch' && typeof data?.subCallId === 'string') add(results, data.subCallId, data)
+    if (event?.type === 'tool/result') {
+      const source = asRecord(asRecord(data?.message)?.source)
+      if (typeof source?.callId === 'string' && data !== undefined) add(results, source.callId, data)
+    }
+  }
+  return { callIds, calls, results }
+}
+
 function textBlocks(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   const text: string[] = []
@@ -1314,34 +1346,37 @@ function textBlocks(value: unknown): string[] {
   return text
 }
 
-function inspectionReceipt(events: readonly unknown[], callId: string): InspectionLookup {
-  const calls: Record<string, unknown>[] = []
-  const results: Record<string, unknown>[] = []
-  for (const raw of events) {
-    const event = asRecord(raw)
-    const data = asRecord(event?.data)
-    if (event?.type === 'tool/call' && data?.callId === callId) calls.push(data)
-    if (event?.type !== 'tool/result') continue
-    const message = asRecord(data?.message)
-    const source = asRecord(message?.source)
-    if (source?.callId === callId) results.push(data as Record<string, unknown>)
-  }
+function inspectionReceiptFromIndex(index: InspectionEventIndex, callId: string): InspectionLookup {
+  const calls = index.calls.get(callId) ?? []
+  const results = index.results.get(callId) ?? []
   if (calls.length !== 1 || results.length !== 1) {
     return { status: 'unavailable', detail: 'inspection call ' + callId + ' is absent or ambiguous in the owning session log' }
   }
   const call = calls[0]
   const result = results[0]
-  if (typeof call?.name !== 'string' || typeof call.arguments !== 'string') {
+  if (typeof call?.name !== 'string' || call.arguments === undefined) {
     return { status: 'unavailable', detail: 'inspection call ' + callId + ' has no usable tool identity or arguments' }
   }
-  let args: unknown
-  try {
-    args = JSON.parse(call.arguments)
-  } catch {
-    return { status: 'unavailable', detail: 'inspection call ' + callId + ' has malformed recorded arguments' }
+  let args: unknown = call.arguments
+  if (typeof call.arguments === 'string') {
+    try {
+      args = JSON.parse(call.arguments)
+    } catch {
+      return { status: 'unavailable', detail: 'inspection call ' + callId + ' has malformed recorded arguments' }
+    }
   }
-  if (result?.error !== undefined) {
+  if (result?.error !== undefined || result?.isError === true) {
     return { status: 'unavailable', detail: 'inspection call ' + callId + ' ended with a recorded tool error' }
+  }
+  if (Array.isArray(result?.content)) {
+    return {
+      status: 'ok',
+      receipt: {
+        toolName: call.name,
+        arguments: args,
+        text: textBlocks(result.content).join('\n'),
+      },
+    }
   }
   const message = asRecord(result?.message)
   const outer = Array.isArray(message?.content) ? message.content : []
@@ -1363,6 +1398,10 @@ function inspectionReceipt(events: readonly unknown[], callId: string): Inspecti
   }
 }
 
+function inspectionReceipt(events: readonly unknown[], callId: string): InspectionLookup {
+  return inspectionReceiptFromIndex(inspectionEventIndex(events), callId)
+}
+
 function containsResourceArgument(
   value: unknown,
   candidates: readonly string[],
@@ -1379,10 +1418,16 @@ function containsResourceArgument(
 function fileArgumentCandidates(uri: string): string[] {
   try {
     const path = fileURLToPath(uri)
-    return [uri, path, path.replaceAll('\\', '/'), path.replaceAll('/', '\\')]
+    return process.platform === 'win32'
+      ? [...new Set([uri, path, path.replaceAll('\\', '/'), path.replaceAll('/', '\\')])]
+      : [uri, path]
   } catch {
     return [uri]
   }
+}
+
+function truncatedReadLine(value: string): boolean {
+  return /\.\.\. \(line truncated to \d+ chars\)$/u.test(value)
 }
 
 function markdownFromReadMeta(
@@ -1406,7 +1451,7 @@ function markdownFromReadMeta(
   let expectedNumber = offset
   for (const raw of meta.lines) {
     const line = asRecord(raw)
-    if (line?.number !== expectedNumber || typeof line.text !== 'string') return undefined
+    if (line?.number !== expectedNumber || typeof line.text !== 'string' || truncatedReadLine(line.text)) return undefined
     expectedNumber += 1
     lines.push(line.text)
   }
@@ -1418,6 +1463,59 @@ function markdownFromReadMeta(
   }
 }
 
+function markdownFromRenderedRead(
+  text: string,
+  uri: string,
+): { readonly markdown: string; readonly coverage: 'full' | 'segment' } | undefined {
+  const path = /<path>([^<]+)<\/path>/u.exec(text)?.[1]
+  const body = /<content>\r?\n([\s\S]*?)\r?\n<\/content>/u.exec(text)?.[1]
+  if (path === undefined || body === undefined) return undefined
+  const expected = fileArgumentCandidates(uri).slice(1)
+    .map(value => process.platform === 'win32' ? value.toLowerCase() : value)
+  const actual = process.platform === 'win32' ? path.toLowerCase() : path
+  if (!expected.includes(actual)) return undefined
+  const rawLines = body.split(/\r?\n/u)
+  const first = /^(\d+):(?: )?(.*)$/u.exec(rawLines[0] ?? '')
+  if (first === null) return undefined
+  const lines: string[] = []
+  const start = Number(first[1])
+  if (!Number.isSafeInteger(start) || start < 1) return undefined
+  let expectedNumber = start
+  let index = 0
+  for (; index < rawLines.length; index += 1) {
+    const match = /^(\d+):(?: )?(.*)$/u.exec(rawLines[index] ?? '')
+    if (match === null) break
+    const line = match[2] ?? ''
+    if (Number(match[1]) !== expectedNumber || truncatedReadLine(line)) return undefined
+    lines.push(line)
+    expectedNumber += 1
+  }
+  const end = expectedNumber - 1
+  if (!Number.isSafeInteger(end)) return undefined
+  const footer = rawLines.slice(index).join('\n').trim()
+  const complete = /^\(End of file - total (\d+) lines\)$/u.exec(footer)
+  const windowed = /^\(Showing lines (\d+)-(\d+) of (\d+)\. Use offset=(\d+) to continue\.\)$/u.exec(footer)
+  const capped = /^\(Output capped\. Showing lines (\d+)-(\d+)\. Use offset=(\d+) to continue\.\)$/u.exec(footer)
+  if (complete !== null) {
+    const total = Number(complete[1])
+    if (!Number.isSafeInteger(total) || end !== total) return undefined
+    return { markdown: lines.join('\n'), coverage: start === 1 ? 'full' : 'segment' }
+  }
+  if (windowed !== null) {
+    const [footerStart, footerEnd, total, next] = windowed.slice(1).map(Number)
+    if (![footerStart, footerEnd, total, next].every(Number.isSafeInteger)
+      || start !== footerStart || end !== footerEnd || end >= total! || end + 1 !== next) return undefined
+    return { markdown: lines.join('\n'), coverage: 'segment' }
+  }
+  if (capped !== null) {
+    const [footerStart, footerEnd, next] = capped.slice(1).map(Number)
+    if (![footerStart, footerEnd, next].every(Number.isSafeInteger)
+      || start !== footerStart || end !== footerEnd || end + 1 !== next) return undefined
+    return { markdown: lines.join('\n'), coverage: 'segment' }
+  }
+  return undefined
+}
+
 function inspectionFailure(source: SourceCheckRequest, checkedAt: string, detail: string, status: 'failed' | 'unavailable'): SourceCheckResult {
   return {
     sourceId: source.sourceId,
@@ -1425,6 +1523,18 @@ function inspectionFailure(source: SourceCheckRequest, checkedAt: string, detail
     checkedAt,
     detail: detail + '. Original resource: ' + source.resource.uri + '; keep the Claim deferred',
   }
+}
+
+function attestedNonReadCoverage(toolName: string, requestedCoverage: unknown): 'full' | 'unknown' {
+  return toolName.startsWith('mcp__') && toolName.endsWith('__read_resource')
+    && requestedCoverage === 'full' ? 'full' : 'unknown'
+}
+
+function inspectionProducerMatchesOrigin(resource: SourceCheckRequest['resource'], toolName: string): boolean {
+  if (resource.origin === 'mcp') {
+    return resource.sourceName !== undefined && toolName.startsWith(`mcp__${resource.sourceName}__`)
+  }
+  return !toolName.startsWith('mcp__')
 }
 
 function validateInspectionReceipt(source: SourceCheckRequest, checkedAt: string, events: readonly unknown[]): SourceCheckResult | undefined {
@@ -1436,17 +1546,15 @@ function validateInspectionReceipt(source: SourceCheckRequest, checkedAt: string
   if (receipt.toolName !== representation.producedBy) {
     return inspectionFailure(source, checkedAt, 'representation producer does not match inspection tool ' + receipt.toolName, 'failed')
   }
-  if (source.resource.origin === 'mcp') {
-    const prefix = 'mcp__' + source.resource.sourceName + '__'
-    if (!receipt.toolName.startsWith(prefix)) {
-      return inspectionFailure(source, checkedAt, 'inspection tool is outside the named MCP source ' + source.resource.sourceName, 'failed')
-    }
+  if (!inspectionProducerMatchesOrigin(source.resource, receipt.toolName)) {
+    return inspectionFailure(source, checkedAt, 'inspection tool does not match the Original Resource origin', 'failed')
   }
   const candidates = source.resource.origin === 'local' || source.resource.origin === 'llm-wiki'
     ? fileArgumentCandidates(source.resource.uri)
     : [source.resource.uri]
   const readObservation = receipt.toolName === 'read'
     ? markdownFromReadMeta(receipt.meta, source.resource.uri)
+      ?? markdownFromRenderedRead(receipt.text, source.resource.uri)
     : undefined
   const observedMarkdown = receipt.toolName === 'read'
     ? readObservation?.markdown
@@ -1454,16 +1562,115 @@ function validateInspectionReceipt(source: SourceCheckRequest, checkedAt: string
   if (receipt.toolName === 'read' && readObservation?.coverage !== representation.coverage) {
     return inspectionFailure(source, checkedAt, 'recorded Markdown coverage does not match the read result', 'failed')
   }
-  if (receipt.toolName !== 'read' && representation.coverage !== 'unknown') {
-    return inspectionFailure(source, checkedAt, 'this inspection tool cannot attest full-resource coverage', 'failed')
+  if (receipt.toolName !== 'read'
+    && representation.coverage !== attestedNonReadCoverage(receipt.toolName, representation.coverage)) {
+    return inspectionFailure(source, checkedAt, 'recorded Markdown coverage does not match what the inspection tool attests', 'failed')
   }
-  if (!containsResourceArgument(receipt.arguments, candidates, source.resource.origin)) {
+  if (receipt.toolName !== 'read'
+    && !containsResourceArgument(receipt.arguments, candidates, source.resource.origin)) {
     return inspectionFailure(source, checkedAt, 'inspection arguments do not identify this Original Resource', 'failed')
   }
   if (observedMarkdown !== representation.markdown) {
     return inspectionFailure(source, checkedAt, 'recorded Markdown does not match the successful inspection result', 'failed')
   }
   return undefined
+}
+
+function equivalentTrailingNewlines(left: string, right: string): boolean {
+  return left.replace(/(?:\r?\n)+$/u, '') === right.replace(/(?:\r?\n)+$/u, '')
+}
+
+function normalizeSourceRepresentations(input: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (input?.action !== 'checkpoint' || !Array.isArray(input.sources)) return input
+  let changed = false
+  const sources = input.sources.map((raw) => {
+    const source = asRecord(raw)
+    const resource = asRecord(source?.resource)
+    const representation = asRecord(source?.representation)
+    if (source === undefined || resource === undefined || representation === undefined) return raw
+    let nextResource = resource
+    let nextRepresentation = representation
+    const origin = typeof resource.origin === 'string' ? resource.origin.toLowerCase() : resource.origin
+    if (origin !== resource.origin && ['web', 'local', 'llm-wiki', 'mcp'].includes(String(origin))) {
+      nextResource = { ...nextResource, origin }
+      changed = true
+    }
+    if (origin === 'web' && representation.coverage !== 'unknown') {
+      nextRepresentation = { ...nextRepresentation, coverage: 'unknown' }
+      changed = true
+    }
+    if (resource.mediaType === undefined && representation.format === 'markdown'
+      && representation.derivation === 'original') {
+      nextResource = { ...nextResource, mediaType: 'text/markdown' }
+      changed = true
+    }
+    return nextResource === resource && nextRepresentation === representation
+      ? raw
+      : { ...source, resource: nextResource, representation: nextRepresentation }
+  })
+  return changed ? { ...input, sources } : input
+}
+
+function resolveInspectionCallIds(
+  input: Record<string, unknown> | undefined,
+  events: readonly unknown[],
+  field: 'sources' | 'documents',
+): Record<string, unknown> | undefined {
+  const actionMatches = field === 'sources'
+    ? input?.action === 'checkpoint'
+    : input?.action === 'adopt' || input?.action === 'ingest'
+  const rawEntries = input?.[field]
+  if (!actionMatches || !Array.isArray(rawEntries)) return input
+  const index = inspectionEventIndex(events)
+  const lookups = new Map<string, InspectionLookup>()
+  const lookup = (callId: string) => {
+    const existing = lookups.get(callId)
+    if (existing !== undefined) return existing
+    const value = inspectionReceiptFromIndex(index, callId)
+    lookups.set(callId, value)
+    return value
+  }
+  let changed = false
+  const entries = rawEntries.map((raw) => {
+    const source = asRecord(raw)
+    const resource = asRecord(source?.resource)
+    const representation = asRecord(source?.representation)
+    if (source === undefined || resource === undefined || representation === undefined
+      || resource.origin === 'web' || typeof representation.inspectionCallId === 'string'
+      || typeof representation.producedBy !== 'string' || typeof representation.markdown !== 'string') return raw
+    const mcpProducer = representation.producedBy.startsWith('mcp__')
+    if (resource.origin === 'mcp'
+      ? typeof resource.sourceName !== 'string'
+        || !representation.producedBy.startsWith(`mcp__${resource.sourceName}__`)
+      : mcpProducer) return raw
+    const candidates = typeof resource.uri === 'string'
+      ? (resource.origin === 'local' || resource.origin === 'llm-wiki'
+          ? fileArgumentCandidates(resource.uri)
+          : [resource.uri])
+      : []
+    for (const callId of index.callIds.toReversed()) {
+      const found = lookup(callId)
+      if (found.status !== 'ok' || found.receipt.toolName !== representation.producedBy
+        || (found.receipt.toolName !== 'read'
+          && !containsResourceArgument(found.receipt.arguments, candidates, resource.origin as SourceCheckRequest['resource']['origin']))) continue
+      const observed: { readonly markdown: string; readonly coverage: 'full' | 'segment' | 'unknown' } | undefined = found.receipt.toolName === 'read'
+        ? markdownFromReadMeta(found.receipt.meta, resource.uri as string)
+          ?? markdownFromRenderedRead(found.receipt.text, resource.uri as string)
+        : equivalentTrailingNewlines(found.receipt.text, representation.markdown)
+          ? { markdown: found.receipt.text, coverage: attestedNonReadCoverage(found.receipt.toolName, representation.coverage) }
+          : undefined
+      if (observed === undefined
+        || !equivalentTrailingNewlines(observed.markdown, representation.markdown)
+        || observed.coverage !== representation.coverage) continue
+      changed = true
+      return {
+        ...source,
+        representation: { ...representation, inspectionCallId: callId, markdown: observed.markdown },
+      }
+    }
+    return raw
+  })
+  return changed ? { ...input, [field]: entries } : input
 }
 
 function classifyMarkdownRepresentation(
@@ -1764,12 +1971,26 @@ function renderToolValue(value: RavenToolValue): string {
     `Task: ${value.state.taskId} | Outcome: ${value.state.outcome} | Phase: ${value.state.phase} | Revision: ${value.state.revision}`,
   ]
   if (value.issues.length > 0) lines.push(`Issues:\n${value.issues.map(issue => `- ${issue}`).join('\n')}`)
+  if (value.verificationScope !== undefined) {
+    const artifact = value.state.phase === 'completed' || value.state.phase === 'completed-with-limits'
+      ? 'final Artifact'
+      : 'current Checkpoint Artifact'
+    lines.push(
+      `Verification scope: ${artifact} bytes and registered Claim/Source references were checked; `
+      + 'undeclared assertions and semantic entailment were not assessed.',
+    )
+  }
   if (value.wiki !== undefined) {
     // Exact bytes: the agent writes these files, so the render must not summarize them.
+    lines.push('No files have been changed. Re-read every target and apply this conditional export plan with ordinary Harness file tools.')
     for (const page of value.wiki.pages) {
-      lines.push(`Write \`${page.path}\`:\n\n\`\`\`markdown\n${page.content}\`\`\``)
+      const expected = value.wiki.preconditions.find(item => item.path === page.path)?.expected
+      lines.push(`Write \`${page.path}\` only if its current state is still \`${expected ?? 'unknown; re-run export'}\`:\n\n${fencedMarkdown(page.content)}`)
     }
-    lines.push(`Append to \`wiki/log.md\`:\n\n\`\`\`markdown\n${value.wiki.logEntry}\`\`\``)
+    lines.push(
+      `Append to \`wiki/log.md\` only if marker \`${value.wiki.logMarker}\` is absent:\n\n`
+      + fencedMarkdown(value.wiki.logEntry),
+    )
     return lines.join('\n\n')
   }
   if (value.leads !== undefined) lines.push(renderLeads(value.leads))
@@ -1857,7 +2078,7 @@ const SOURCE_REPRESENTATION_SCHEMA = {
     derivation: { type: 'string', enum: ['original', 'converted'] },
     coverage: { type: 'string', enum: ['full', 'segment', 'unknown'], description: 'Whether Markdown covers the resource, an exact segment, or an unprovable tool projection.' },
     producedBy: { type: 'string', description: 'Harness file/MCP/web tool or converter that produced this Markdown.' },
-    inspectionCallId: { type: 'string', description: 'Prior successful ordinary Harness tool call that produced non-web Markdown.' },
+    inspectionCallId: { type: 'string', description: 'Prior successful ordinary Harness tool call that produced non-web Markdown. Optional for action=checkpoint when Raven can resolve one exact matching direct or PTC inspection receipt from resource identity and Markdown bytes.' },
     markdown: { type: 'string', description: 'Exact canonical Markdown. Required for non-web material.' },
   },
 } as const
@@ -2127,12 +2348,12 @@ const WORKSPACE_RESOURCE_SCHEMA = {
 
 const WORKSPACE_REPRESENTATION_SCHEMA = {
   ...SOURCE_REPRESENTATION_SCHEMA,
-  required: ['format', 'derivation', 'coverage', 'producedBy', 'inspectionCallId', 'markdown'],
+  required: ['format', 'derivation', 'coverage', 'producedBy', 'markdown'],
   properties: {
     ...SOURCE_REPRESENTATION_SCHEMA.properties,
     inspectionCallId: {
       type: 'string',
-      description: 'Prior successful ordinary Harness tool call that produced these Markdown bytes; required for non-web material.',
+      description: 'Prior successful ordinary Harness tool call that produced these Markdown bytes. Omit when Raven can resolve an exact matching direct or PTC receipt from resource identity, coverage, and Markdown.',
     },
   },
 } as const
@@ -2221,7 +2442,8 @@ function workspaceToolDefinition(
     async execute(args, exec) {
       const agent = requireAgent(exec)
       const membership = teamMembership(ctx, agent)
-      const input = asRecord(args)
+      const normalizedArgs = resolveInspectionCallIds(asRecord(args), agent.session.events, 'documents') ?? args
+      const input = asRecord(normalizedArgs)
       let contribution: { readonly state: RavenTaskState; readonly renderedArtifact: string } | undefined
       if (input?.action === 'grow') {
         if (typeof input.taskId !== 'string') throw new Error('action=grow requires taskId')
@@ -2234,7 +2456,7 @@ function workspaceToolDefinition(
           renderedArtifact: renderArtifact(state.latestArtifact, state.sources, state.claims, state.insightCandidates),
         }
       }
-      const result = await engine.dispatch(args, {
+      const result = await engine.dispatch(normalizedArgs, {
         sessionId: membership?.id ?? agent.id,
         signal: exec.signal,
         inspectionEvents: agent.session.events,
@@ -2298,7 +2520,7 @@ function toolDefinition(
 ): ToolDefinition {
   return {
     name: TOOL_NAME,
-    description: 'Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover uninspected Leads; synthesize recorded Claims into Insight Candidates; for substantive long-form writing battle materially different evidence-linked argument skeletons and intentionally select or hybridize one before prose; optionally compare Draft Variants; publish useful Checkpoints; steer the same taskId; stop/resume without loss; and complete only against the exact final Artifact. Research-only, summary, learning, small writing, and explicitly skipped work remain lightweight. Structure collaboration is a high-leverage discussion, not an approval gate. The stored Artifact is Markdown laid out one sentence per line. Inside an Agent Team the Task belongs to the Team.',
+    description: `Maintain one progressive Raven Task across research, general writing, academic writing, or learning. Start once; discover uninspected Leads; synthesize recorded Claims into Insight Candidates; for substantive long-form writing battle materially different evidence-linked argument skeletons and intentionally select or hybridize one before prose; optionally compare Draft Variants; publish useful Checkpoints; steer the same taskId; stop/resume without loss; and complete only against the exact final Artifact. Research-only, summary, learning, small writing, and explicitly skipped work remain lightweight. Structure collaboration is a high-leverage discussion, not an approval gate. The stored Artifact is Markdown laid out one sentence per line. Inside an Agent Team the Task belongs to the Team. Exact action fields: ${ACTION_FIELD_SUMMARY}.`,
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -2307,7 +2529,7 @@ function toolDefinition(
         action: {
           type: 'string',
           enum: Object.keys(ACTION_FIELDS),
-          description: `Requested Task action. Each action accepts only its own fields — ${ACTION_FIELD_SUMMARY} — and any other field fails the call.`,
+          description: `Requested Task action. Use only the fields listed for that action: ${summarizeActionFields(ACTION_FIELDS)}. Any other field fails the call.`,
         },
         taskId: { type: 'string', description: 'Existing Raven Task ID. Required by every action except start.' },
         insightOffset: {
@@ -2477,7 +2699,10 @@ function toolDefinition(
       const membership = teamMembership(ctx, agent)
       const book = taskBookFor(ctx, books, agent, membership)
       const previousCurrentTaskId = book.currentTaskId
-      const input = asRecord(args)
+      const normalizedEvidence = normalizeSourceRepresentations(asRecord(args)) ?? args
+      const normalizedArgs = resolveInspectionCallIds(asRecord(normalizedEvidence), agent.session.events, 'sources')
+        ?? normalizedEvidence
+      const input = asRecord(normalizedArgs)
       const action = input?.action
       const requestedTaskId = typeof input?.taskId === 'string' ? input.taskId : undefined
       let previous: RavenTaskState | null
@@ -2512,7 +2737,7 @@ function toolDefinition(
         const blocker = groundedStartBlocker(ctx, input)
         if (blocker !== undefined) throw new Error(blocker)
       }
-      const result = await engine.dispatch(previous, args, {
+      const result = await engine.dispatch(previous, normalizedArgs, {
         // A Team shares one book and therefore one Task identity. Using the
         // calling member's Agent id here let two members racing `start` mint
         // different Task ids and bypass the book's first-write CAS guard.

@@ -1,8 +1,7 @@
 # Contributing
 
 Issues and pull requests are welcome. This document covers the gates, the ownership
-rules that keep them meaningful, and the release procedure — in particular the one gate
-that cannot run in CI.
+rules that keep them meaningful, and the release procedure — including the exact pinned-Harness compatibility gate.
 
 ## Setup
 
@@ -20,22 +19,18 @@ Node `^22.19.0 || >=24.0.0` and pnpm `11.21.0` (the `packageManager` field pins 
 | `pnpm run typecheck` | TypeScript 6, strict, no emit. | CI (`check`) |
 | `pnpm run test` | Vitest: unit, acceptance, integration. | CI (`check`) |
 | `pnpm run build` | tsdown ESM + declarations. | CI (`check`) |
-| `pnpm run check` | All four of the above. | CI, per Node version |
+| `pnpm run eval -- check` | Strict evaluation scenarios, assessor IDs, workflow/rubric coverage, complete suite digest, and frozen fixture SHA-256 integrity. No model call. | CI (`check`) |
+| `pnpm run eval -- verify-baseline <manifest>` | Frozen suite/run/report/example/review/archive hashes, production-promotable pairs, and two independent substantive reviews per dimension. No model call. | Local/private evidence review; generated baselines are not committed |
+| `pnpm run check` | Lint, typecheck, deterministic evaluation integrity, build, and tests. | CI, per Node version |
 | `pnpm run test:pack` | The **published tarball**: exact file allowlist, real `prepack`, install into a clean external consumer, then import/apply/execute. Uses registry access by default; an offline workstation may provide `RAVEN_PACK_STORE_DIR`, `RAVEN_PACK_CACHE_DIR`, and `RAVEN_PACK_OFFLINE=1` for pre-populated pnpm data. | CI (`pack` job) |
-| `pnpm run test:dsh` | Raven composed against a **real Harness checkout** at the pinned commit: Loader, prompt order, tool registry, PTC bridge/replay, settings, bundle patch, preset standing mount, React major, disposal. | **Local only** |
-| `pnpm run check:release` | `check` + `test:pack` + `test:dsh`. | **Local only** |
+| `pnpm run test:dsh` | Raven composed against a **real Harness checkout** at the pinned commit: Loader, prompt order, tool registry, PTC bridge/replay, settings, bundle patch, preset standing mount, React major, disposal. | Local; release CI (`compatibility`) |
+| `pnpm run check:release` | `check` + `test:pack` + `test:dsh`. | Local before tagging |
 
 Run `pnpm run check` before opening a PR.
 
-### Why `test:dsh` is not in CI
+### How release CI checks the Harness pin
 
-It composes Raven against the DeepSeek Harness **by source path**, at one pinned commit
-of a separate repository. CI has no honest way to obtain that: vendoring the Harness
-would make this repository carry a copy it cannot keep current, and cloning a floating
-branch would turn a green gate into a statement about whatever landed upstream this
-morning rather than about the commit Raven is pinned to. So it is a documented local
-release gate, run on a machine that has the pinned checkout, and CI verifies only that
-the pin is present and well-formed.
+`test:dsh` composes Raven against DeepSeek Harness **by source path**. The release workflow reads the only pin from `package.json`, checks out that exact immutable commit into an isolated path, installs its frozen workspace, and runs `test:dsh`; npm publish depends on that job. It never tests a floating branch or a vendored copy. The local gate remains required before tagging because it catches compatibility failures before the release request exists.
 
 To run it:
 
@@ -51,6 +46,14 @@ pnpm run test:dsh
 The checkout must be at the exact version and commit named by `dshRaven` in
 `package.json`, and it must be clean — a dirty tree is not the pinned commit, so a pass
 would prove nothing. If it fails, the message names both values and both repairs.
+
+## Evaluation changes
+
+`pnpm run eval -- check` is deterministic and belongs in every PR. It validates strict scenario and assessor schemas, exact fixture hashes, all required product workflows, and every review dimension without calling a model.
+
+Live comparison is deliberately separate because it is paid and stochastic. `.github/workflows/evaluation.yml` runs one selected scenario manually against the exact Harness pin, stages the same absolute cwd for vanilla PTC and PTC-plus-Raven, archives raw Session/model/service evidence, and never rewrites a baseline. Use `pnpm run eval -- review` to produce opaque A/B content packets; lifecycle traces and the unblinding map remain outside that packet. Preserve every underlying artifact and categorical judgment—never replace them with a weighted quality score.
+
+A fixture-model runner smoke proves composition, tool/prompt treatment, call ledgers, and real process resume; it is explicitly non-promotable and says nothing about output quality. A live baseline must use clean Raven and Harness checkouts, both arm orders across replicates, the same provider/model/settings/source bytes, and completed reviews under [`evaluation/rubric.md`](evaluation/rubric.md).
 
 ## The Harness pin
 
@@ -100,15 +103,14 @@ claiming a compatibility that no longer holds.
 
 ## Releasing
 
-1. Land everything on `main` and make sure CI is green.
-2. Run the full local gate against the pinned checkout:
-   `DSH_CHECKOUT=... pnpm run check:release`.
-3. Move the `CHANGELOG.md` `[Unreleased]` entry under the new version with its date.
-4. Bump `version` in `package.json`.
-5. Commit, then tag `vX.Y.Z` — the tag must match `package.json` exactly or the release
-   workflow refuses.
-6. Push the tag. `.github/workflows/release.yml` reruns the full gate and publishes with
-   npm provenance.
+Generated benchmark outputs contain raw Session evidence and must remain private: do not commit or upload `evaluation/results/**` or `evaluation/baselines/production-*/`. Finalize and release the product independently of those local artifacts:
+
+1. Finalize the release code, documentation, `package.json` version, and dated `CHANGELOG.md` entry.
+2. Commit those bytes on the history that will be released.
+3. Run the private evaluation suite against that exact clean commit when release evidence is required, review it locally, and keep every generated run, archive, packet, and decision outside Git history.
+4. Run the full local gate against the pinned checkout: `DSH_CHECKOUT=... pnpm run check:release`.
+5. Tag that same commit as `vX.Y.Z` without changing product, documentation, version, or changelog bytes. The tag must match `package.json` exactly or the release workflow refuses.
+6. Push the tag. `.github/workflows/release.yml` reruns the code, package, and compatibility gates and publishes with npm provenance.
 
 `workflow_dispatch` runs the same workflow with `dry_run` on by default: every gate
 runs, nothing is published.

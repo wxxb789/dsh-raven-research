@@ -347,6 +347,46 @@ describe('Raven task engine', () => {
     expect(completed.renderedArtifact).toContain('[Paper One](https://example.test/paper)')
   })
 
+  it('states the exact verification boundary when an Artifact contains an undeclared assertion', async () => {
+    const engine = createRavenEngine({ now, sourceVerifier })
+    const started = await engine.dispatch(null, {
+      action: 'start', outcome: 'research', request: 'Verify the declared fact without overstating runtime scope.',
+    }, { sessionId: 'verification-scope', signal })
+    const artifact = 'Grounded fact [@S1]. Unsupported invented fact with no Claim.'
+    const checkpoint = await engine.dispatch(started.state, {
+      action: 'checkpoint', taskId: started.state.taskId, stage: 'verify', summary: 'One declared Claim.', artifact,
+      sources: [{
+        sourceId: 'S1', url: 'https://example.test/declared', title: 'Declared source',
+        locator: 'Finding', excerpt: 'append resolves after the record is durable', role: 'primary',
+      }],
+      claims: [{
+        claimId: 'C1', text: 'Grounded fact.', kind: 'external', importance: 'material',
+        disposition: 'supported', sourceIds: ['S1'],
+      }],
+    }, { sessionId: 'verification-scope', signal })
+    const status = await engine.dispatch(checkpoint.state, {
+      action: 'status', taskId: started.state.taskId,
+    }, { sessionId: 'verification-scope', signal })
+    const completed = await engine.dispatch(checkpoint.state, {
+      action: 'complete', taskId: started.state.taskId, artifact,
+    }, { sessionId: 'verification-scope', signal })
+
+    expect(checkpoint.verificationScope).toEqual({
+      artifactFingerprint: 'verified',
+      registeredArtifactReferences: 'checked',
+      undeclaredAssertions: 'not-assessed',
+      semanticEntailment: 'not-assessed',
+    })
+    expect(status.verificationScope).toEqual(checkpoint.verificationScope)
+    expect(completed.status).toBe('completed')
+    expect(completed.verificationScope).toEqual(checkpoint.verificationScope)
+    expect(completed.message).toContain('did not assess undeclared assertions or semantic entailment')
+    expect(completed.message).not.toContain('Completed Raven Task with a verified Artifact')
+    expect(completed.state.checkpoints.at(-1)?.summary).toBe('Verified registered Claim references and final Artifact bytes.')
+    expect(completed.renderedArtifact).toContain('Unsupported invented fact with no Claim.')
+    expect(completed.renderedArtifact?.match(/\*\*C1\*\*/g)).toHaveLength(1)
+  })
+
   it('preserves independent work and completes with explicit limits after a partial source failure', async () => {
     const verifier: SourceVerifier = {
       verify: async (sources) => sources.map(source => source.sourceId === 'B1'
@@ -486,6 +526,12 @@ describe('Raven task engine', () => {
     expect(completed.status).toBe('completed-with-limits')
     expect(completed.state.phase).toBe('completed-with-limits')
     expect(completed.state.limitations).toHaveLength(1)
+    expect(completed.verificationScope).toMatchObject({
+      registeredArtifactReferences: 'checked',
+      undeclaredAssertions: 'not-assessed',
+      semanticEntailment: 'not-assessed',
+    })
+    expect(completed.state.verification).toMatchObject({ checked: 1, reachable: 1, unavailable: 0 })
     expect(completed.state.claims.find(claim => claim.claimId === 'A-C1')?.disposition).toBe('supported')
     expect(completed.state.claims.find(claim => claim.claimId === 'B-C1')?.disposition).toBe('deferred')
     expect(completed.renderedArtifact).toContain('Vendor A documentation')

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "structure-selection",
+  "title": "Competing argument structures and user hybrid",
+  "description": "Develop distinct explanatory architectures, collaborate on a hybrid, then invalidate stale structure after an audience change.",
+  "kind": "primary",
+  "outcome": "general-writing",
+  "workflow": ["general-writing", "research", "local", "structure-selection", "steering"],
+  "turns": [
+    {"id":"initial","delivery":"followup","trigger":"idle","content":"Research the supplied evidence for the implementation memo, derive defensible insights, and show me the strongest genuinely different argument structures before drafting substantive prose."},
+    {"id":"hybrid-choice","delivery":"followup","trigger":"after-checkpoint","content":"Use a hybrid: lead with recovery risk, use the conflicting studies as the boundary on causal confidence, and end with a staged implementation test."},
+    {"id":"audience-steer","delivery":"steer","trigger":"after-checkpoint","content":"Redirect the selected argument to a skeptical board audience. Reconsider the structure rather than patching the old prose."},
+    {"id":"board-selection","delivery":"followup","trigger":"after-checkpoint","content":"Use the recommended board-level hybrid, draft the complete board memo, and finish the Task."}
+  ],
+  "sources": [
+    {"id":"notes","title":"Supplied implementation notes","origin":"local","uri":"file:///workspace/operations-notes.md","path":"fixtures/local/operations-notes.md","sha256":"sha256:9f2982204fa9568d337dfe2447214e102d3aca8cb2d570bbd6a2dd92c0b80aab","quality":"user-provided","family":"user-notes","asOf":null},
+    {"id":"audit","title":"Inspector-General Recovery Audit","origin":"mcp","uri":"mcp://raven_eval/inspector-audit","path":"fixtures/corpus/inspector-audit.md","sha256":"sha256:5c9510fd49bfa05b57ef3f0ddd21891e854136a192201324c5e32c2126ab1af9","quality":"primary","family":"inspector-audit","asOf":"2026-03-12"},
+    {"id":"study-v2","title":"University Recovery Study v2","origin":"local","uri":"file:///workspace/sources/university-study-v2.md","path":"fixtures/corpus/university-study-v2.md","sha256":"sha256:99f57f55a6a0bd29bbb178f573ae823f95c746a0928232e01300546a38ffdcdc","quality":"primary","family":"nbu-study","asOf":"2026-02-18"},
+    {"id":"experiment","title":"Independent Recovery Experiment","origin":"web","uri":"https://example.com/raven-eval/independent-experiment","path":"fixtures/corpus/independent-experiment.md","sha256":"sha256:387d80a588171bfdb1aac6f715034e8278fe588b0fc290cac28df5d16b715175","quality":"primary","family":"cir-experiment","asOf":"2026-02-25"}
+  ],
+  "expectations": {
+    "requiredFactIds": ["distinct-frames", "hybrid-preserved", "counterargument-linked", "audience-change-invalidates-selection"],
+    "contradictionIds": ["study-results-conflict"],
+    "forbiddenArtifactQuotes": [],
+    "minimumIndependentSourceFamilies": 2,
+    "minimumCheckpoints": 2,
+    "requireStopResume": false,
+    "requireKnowledgeReuse": false,
+    "requireStructureChoice": true,
+    "requireMultiModelDraft": false,
+    "allowedTerminalStatuses": ["completed", "completed-with-limits"]
+  },
+  "reviewDimensions": ["insight-defensibility", "synthesis-usefulness", "anti-summary", "argument-skeleton-quality", "final-prose-quality", "steering-retention", "coverage-contradiction-handling", "checkpoint-usefulness"]
+}

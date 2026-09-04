@@ -612,11 +612,10 @@ long-lived llm-wiki repository. Task Completion never closes a Workspace, Worksp
 never starts a Task, and deployments that need only one Task keep the existing workflow.
 Workspace state is the Markdown already on disk, not a field in `RavenTaskState`.
 
-The compatible `raven_task action=export` remains a pure one-off projection: one artifact
-page under `wiki/queries`, one immutable `wiki/raw` page per Source, and one appendable
-`wiki/log.md` entry. `init` can still seed `SCHEMA.md`, `index.md`, and `log.md`. Immutable raw
-bytes use Source inspection time rather than export time, so projecting the same Task later
-cannot change an existing raw page.
+The compatible `raven_task action=export` remains a pure one-off projection: one Task-addressed artifact
+page under `wiki/queries`, one Task-and-resource-addressed immutable `wiki/raw` page per Source, and one marker-protected
+`wiki/log.md` append. Every page carries an `absent` precondition; a stale writer must stop rather than overwrite.
+`init` can still seed `SCHEMA.md`, `index.md`, and `log.md`. Immutable raw bytes use Source inspection time rather than export time, so projecting the same Task later is byte-identical, while a different Task reusing the same title and Task-local Source IDs receives distinct paths.
 
 The sibling `raven_workspace` tool owns the maintained corpus lifecycle:
 

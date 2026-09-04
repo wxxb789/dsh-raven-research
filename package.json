@@ -91,7 +91,8 @@
     "test": "vitest run",
     "test:dsh": "pnpm run build && tsx scripts/run-dsh-test.ts",
     "test:pack": "tsx scripts/verify-packed-install.ts",
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test",
+    "eval": "tsx scripts/run-evaluation.ts",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run eval -- check && pnpm run build && pnpm run test",
     "check:release": "pnpm run check && pnpm run test:pack && pnpm run test:dsh"
   },
   "peerDependenciesComment": [

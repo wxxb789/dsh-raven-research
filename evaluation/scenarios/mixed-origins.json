@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "mixed-origins",
+  "title": "Equivalent evidence across four origins",
+  "description": "Exercise the same frozen registry record through web, local, llm-wiki, and MCP while preserving one originating family.",
+  "kind": "primary",
+  "outcome": "research",
+  "workflow": ["research", "web", "local", "llm-wiki", "mcp"],
+  "turns": [
+    {"id":"initial","delivery":"followup","trigger":"idle","content":"Inspect the Control R-17 registry record through each available origin: web, local, llm-wiki, and MCP. Explain the provenance differences, verify the accountable-officer requirement, and do not count the four copies as independent corroboration."}
+  ],
+  "sources": [
+    {"id":"control-web","title":"Control R-17 web copy","origin":"web","uri":"https://example.com/raven-eval/control-r17","path":"fixtures/mixed/control-r17.md","sha256":"sha256:0f76927a0f6cf976c9cbe7963ee8647f1de83c0a359d5a8ab96a489ff6a7607b","quality":"primary","family":"control-r17","asOf":"2026-02-01"},
+    {"id":"control-local","title":"Control R-17 local copy","origin":"local","uri":"file:///workspace/sources/control-r17.md","path":"fixtures/mixed/control-r17.md","sha256":"sha256:0f76927a0f6cf976c9cbe7963ee8647f1de83c0a359d5a8ab96a489ff6a7607b","quality":"user-provided","family":"control-r17","asOf":"2026-02-01"},
+    {"id":"control-wiki","title":"Control R-17 wiki copy","origin":"llm-wiki","uri":"file:///workspace/wiki/raw/control-r17.md","path":"fixtures/mixed/control-r17.md","sha256":"sha256:0f76927a0f6cf976c9cbe7963ee8647f1de83c0a359d5a8ab96a489ff6a7607b","quality":"secondary","family":"control-r17","asOf":"2026-02-01"},
+    {"id":"control-mcp","title":"Control R-17 MCP copy","origin":"mcp","uri":"mcp://raven_eval/control-r17","path":"fixtures/mixed/control-r17.md","sha256":"sha256:0f76927a0f6cf976c9cbe7963ee8647f1de83c0a359d5a8ab96a489ff6a7607b","quality":"primary","family":"control-r17","asOf":"2026-02-01"}
+  ],
+  "expectations": {
+    "requiredFactIds": ["accountable-officer-required", "copies-one-family", "origin-provenance-distinguished"],
+    "contradictionIds": [],
+    "forbiddenArtifactQuotes": [],
+    "minimumIndependentSourceFamilies": 1,
+    "minimumCheckpoints": 1,
+    "requireStopResume": false,
+    "requireKnowledgeReuse": false,
+    "requireStructureChoice": false,
+    "requireMultiModelDraft": false,
+    "allowedTerminalStatuses": ["completed"]
+  },
+  "reviewDimensions": ["claim-support-fidelity", "source-quality-independence", "provenance-completeness", "research-correctness", "completion-reliability"]
+}

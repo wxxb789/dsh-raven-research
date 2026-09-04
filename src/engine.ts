@@ -84,6 +84,7 @@ import {
   type RavenSynthesisRound,
   type RavenTaskState,
   type RavenVerificationReceipt,
+  type RavenVerificationScope,
   type SourceCheckResult,
   type SourceOrigin,
   type SourceRole,
@@ -155,6 +156,13 @@ const DEFAULT_DRAFT_LIMITS: RavenDraftLimits = { maxTokens: 4_000, routes: [] }
 
 const DEFAULT_PROSE_LAYOUT: ProseLayoutOptions = { layout: 'sentence-per-line', format: 'markdown' }
 
+const VERIFICATION_SCOPE: RavenVerificationScope = {
+  artifactFingerprint: 'verified',
+  registeredArtifactReferences: 'checked',
+  undeclaredAssertions: 'not-assessed',
+  semanticEntailment: 'not-assessed',
+}
+
 interface RavenEngine {
   dispatch(
     previous: RavenTaskState | null,
@@ -166,9 +174,11 @@ interface RavenEngine {
 /**
  * The exact field set each action accepts. This is the single source of truth
  * for both halves of the boundary: the runtime rejects anything outside it, and
- * the model-facing parameter schema derives its per-action guidance from it. A
- * flat schema that advertises every action's fields at once invites a caller to
- * send one action's field to another, so the two must never drift apart.
+ * the model-facing parameter schema derives its exact per-action guidance from it.
+ * The pinned Harness PTC TypeScript renderer degrades a root oneOf of object arms to
+ * unknown, so Raven keeps one flat callable schema and renders this action directory
+ * into both the field description and prompt instead of pretending a discriminated
+ * union survives the supported runtime.
  */
 export const ACTION_FIELDS: Record<string, readonly string[]> = {
   start: ['action', 'outcome', 'request', 'grounding', 'sourcePolicy', 'structureMode'],
@@ -2379,6 +2389,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           ...(previous.insightCandidates.length === 0 ? {} : { recall }),
           ...(previous.selectedSkeleton === null ? {} : { selection: previous.selectedSkeleton }),
           ...(currentStudio === undefined ? {} : { studio: currentStudio }),
+          ...(previous.checkpoints.length === 0 ? {} : { verificationScope: VERIFICATION_SCOPE }),
         }
       }
 
@@ -2952,6 +2963,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           state,
           message: `Exported Raven Task ${state.taskId} as ${wiki.pages.length} llm-wiki page(s); write them and append the log entry.`,
           issues: [],
+          ...(state.phase === 'completed' || state.phase === 'completed-with-limits'
+            ? { verificationScope: VERIFICATION_SCOPE }
+            : {}),
           wiki,
         }
       }
@@ -3154,12 +3168,13 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         return {
           status: 'active',
           state: next,
-          message: `Published Raven Checkpoint ${admitted.checkpoints.at(-1)?.ordinal ?? 0} for ${state.taskId}; the Task remains active.`,
+          message: `Published Raven Checkpoint ${admitted.checkpoints.at(-1)?.ordinal ?? 0} for ${state.taskId}; registered Claims and Source references were checked, but undeclared assertions and semantic entailment were not assessed.`,
           issues: [
             ...admitted.issues,
             ...limitationCapIssue(parsedLimitations.dropped + propagated.droppedLimitations),
             ...summaryDebtIssues(state),
           ],
+          verificationScope: VERIFICATION_SCOPE,
           renderedArtifact: renderArtifact(artifact, sources, propagated.claims, state.insightCandidates),
           ...(stored.report.changed
             ? {
@@ -3280,7 +3295,9 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
           checkpointId: checkpointId(state.taskId, revision),
           ordinal: nextCheckpointOrdinal(state.checkpoints),
           stage: 'verify',
-          summary: phase === 'completed' ? 'Verified final Artifact.' : 'Final Artifact with verification limits.',
+          summary: phase === 'completed'
+            ? 'Verified registered Claim references and final Artifact bytes.'
+            : 'Final Artifact bytes with registered-Claim verification limits.',
           artifactSha256,
           artifactChars: artifact.length,
           steeringRevision: state.steeringRevision,
@@ -3306,9 +3323,10 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
         return {
           status: phase,
           state: completed,
-          message: phase === 'completed'
-            ? `Completed Raven Task ${state.taskId} with verified Source references.`
-            : `Completed Raven Task ${state.taskId} with explicit verification limits.`,
+          message: (phase === 'completed'
+            ? `Completed Raven Task ${state.taskId} with verified registered Claim and Source references.`
+            : `Completed Raven Task ${state.taskId} with explicit registered-Claim verification limits.`)
+            + ' Raven did not assess undeclared assertions or semantic entailment.',
           issues: phase === 'completed'
             ? [...admitted.issues, ...summaryDebtIssues(state)]
             : [
@@ -3320,6 +3338,7 @@ export function createRavenEngine(options: RavenEngineOptions): RavenEngine {
                   : [`${verified.receipt.unavailable} Source reference(s) could not be remotely verified`]),
                 ...(hasDeferredClaims ? ['one or more Claims remain deferred'] : []),
               ],
+          verificationScope: VERIFICATION_SCOPE,
           renderedArtifact: renderArtifact(artifact, verified.sources, propagated.claims, state.insightCandidates),
         }
       }

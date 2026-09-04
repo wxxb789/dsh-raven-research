@@ -1,0 +1,2 @@
+# Preserved benchmark artifacts are byte-for-byte evidence; do not normalize their source whitespace.
+evaluation/results/development-*/** whitespace=-trailing-space
