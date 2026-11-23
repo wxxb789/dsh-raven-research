@@ -140,12 +140,12 @@
     "@deepseek-ai/schemastery": "3.18.1",
     "@types/node": "22.20.5",
     "@types/react": "18.3.31",
-    "oxlint": "1.93.0",
+    "oxlint": "1.94.0",
     "react": "18.3.1",
     "tsdown": "0.23.7",
     "tsx": "4.23.15",
     "typescript": "6.0.3",
-    "vitest": "5.1.0"
+    "vitest": "5.1.1"
   },
   "dshRaven": {
     "harnessVersion": "0.1.2-alpha.1",
